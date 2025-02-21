@@ -1,6 +1,3 @@
-# biowzrd
-Maxwell's Genomic tools
-
 ## Downloading files on high performance compute cluster (downloadingfiles/)
 Packages required: NCBI toolkit, fastq-dl
 1. create txt file of NCBI or ENA study BioProject accessions called studies.txt
