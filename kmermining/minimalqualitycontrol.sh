@@ -82,6 +82,7 @@ if [[ -f "\$R1" && -f "\$R2" ]]; then
         -I "\$R2" \
         -o "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed_1.fastq.gz" \
         -O "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed_2.fastq.gz" \
+        --merged_out "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed.fastq.gz" \
         --html "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.html" \
         --json "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.json" \
         --thread "\$THREADS" \
@@ -90,7 +91,8 @@ if [[ -f "\$R1" && -f "\$R2" ]]; then
         --average_qual 20 \
         --cut_tail \
         --cut_tail_mean_quality 20 \
-        --cut_tail_window_size 4
+        --cut_tail_window_size 4 \
+        --merge
 
 else
     echo "Processing SINGLE-END sample: \$SAMPLE_NAME"
