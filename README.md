@@ -18,4 +18,4 @@ Packages required: Jellyfish
 Packages required: aws (see download script for linux)
 1. Navigate to home directory and Install aws (installaws.sh)
 2. Download all trimmed 16s sequence files in fa.bzip format (downloadHMP_16s_trimmed.sh)
-3. Remove reads with length < 30
+3. Remove reads with length < 30 (removereads.sh)
