@@ -13,3 +13,6 @@ Packages required: fastp
 Packages required: Jellyfish
 1. Perform QC from nonassemblyQC/minimalqualitycontrol.sh. This is done with intention for non assembly based downstream tasks.
 2. Specify a range of Kmer lengths to count and mine from each read in each trimmed fastq file after running minimalqualitycontrol.sh 
+
+## Human Microbiome Project (HMP/)
+1. Download all trimmed 16s sequence files in fa.bzip format (downloadHMP_16s_trimmed.sh)
