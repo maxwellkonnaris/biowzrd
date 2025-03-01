@@ -15,4 +15,6 @@ Packages required: Jellyfish
 2. Specify a range of Kmer lengths to count and mine from each read in each trimmed fastq file after running minimalqualitycontrol.sh 
 
 ## Human Microbiome Project (HMP/)
-1. Download all trimmed 16s sequence files in fa.bzip format (downloadHMP_16s_trimmed.sh)
+Packages required: aws (see download script for linux)
+1. Navigate to home directory and Install aws (installaws.sh)
+2. Download all trimmed 16s sequence files in fa.bzip format (downloadHMP_16s_trimmed.sh)
