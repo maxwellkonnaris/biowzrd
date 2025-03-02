@@ -9,10 +9,9 @@ import threading
 
 LOG_FILE = "fetch_log.txt"
 
-# A dictionary to map the user-friendly experiment keys
-# to the actual parameters you need in ?experiment-type=...
+# A dictionary mapping user-friendly experiment keys to the actual param used in `?experiment-type=`
 experiment_options = {
-    "metagenomic": "metagenomic",  # e.g. "Shotgun Metagenomics"
+    "metagenomic": "metagenomic",
     "16s-rrna-gene-amplicon": "16s-rrna-gene-amplicon",
     "18s-rrna-gene-amplicon": "18s-rrna-gene-amplicon",
     "its-gene-amplicon": "its-gene-amplicon"
@@ -21,7 +20,7 @@ experiment_options = {
 # Global counters / locks
 processed_count = 0
 processed_lock = threading.Lock()
-start_time = None  # Will be set in main()
+start_time = None  # Set at runtime in main()
 
 def log_message(message):
     """Append a message to fetch_log.txt (for consistent logging)."""
@@ -31,34 +30,32 @@ def log_message(message):
 def parse_sample(sample_json):
     """
     Extract ALL possible metadata from the 'attributes' dict plus 
-    every key-value in 'sample-metadata', plus a few from 'relationships'.
-    Return a single dict that can be appended into our main results list.
+    everything in the 'sample-metadata' array, plus a couple items from 'relationships'.
+    Return a single dict for the DataFrame.
     """
     row = {}
 
-    # The top-level 'id'
+    # Basic ID
     row["sample_id"] = sample_json.get("id", "N/A")
 
-    # Copy everything from "attributes" except the "sample-metadata" array
+    # Copy everything from "attributes" except "sample-metadata"
     attributes = sample_json.get("attributes", {}).copy()
     sample_md = attributes.pop("sample-metadata", [])
 
     for attr_key, attr_val in attributes.items():
         row[attr_key] = attr_val
 
-    # Then expand the "sample-metadata" array so each key => a new column
-    # e.g. "key":"sequencing method", "value":"Amplicon"
+    # Expand "sample-metadata" into columns:
     for md_item in sample_md:
         k = md_item.get("key")
         v = md_item.get("value")
         if k:
             row[k] = v
 
-    # Example: pulling a couple fields from "relationships"
+    # Grab some relationship info (like studies, biome):
     relationships = sample_json.get("relationships", {})
     studies_list = relationships.get("studies", {}).get("data", [])
     if studies_list:
-        # Could store them as semicolon-delimited if multiple
         row["study_ids"] = ";".join([s.get("id", "") for s in studies_list])
     else:
         row["study_ids"] = None
@@ -70,8 +67,8 @@ def parse_sample(sample_json):
 
 def fetch_page(url):
     """
-    Fetch a single page from MGnify, parse all samples, 
-    and return a list of metadata dicts.
+    Fetch and parse a single page from the MGnify /samples endpoint.
+    Returns a list of dicts (one per sample).
     """
     global processed_count
 
@@ -88,17 +85,17 @@ def fetch_page(url):
         row_dict = parse_sample(sample_json)
         page_results.append(row_dict)
 
-    # Update our global progress counter
+    # Update global progress
     with processed_lock:
         old_count = processed_count
         processed_count += len(page_results)
 
-        # Log every 1,000 samples processed
-        check_range = range(old_count // 1000 + 1, processed_count // 1000 + 1)
-        if len(check_range) > 0:
+        # For example, log progress every 1,000 samples
+        crossed = range(old_count // 1000 + 1, processed_count // 1000 + 1)
+        if len(list(crossed)) > 0:
             elapsed_time = time.time() - start_time
             log_message(f"Processed {processed_count} samples... "
-                        f"(Elapsed Time: {elapsed_time:.2f} seconds)")
+                        f"(Elapsed: {elapsed_time:.2f} seconds)")
 
     return page_results
 
@@ -106,69 +103,80 @@ def main():
     global start_time
 
     parser = argparse.ArgumentParser(
-        description="Fetch sample metadata from MGnify for a given experiment type."
+        description="Fetch sample metadata from MGnify for a given experiment type, using concurrency."
     )
     parser.add_argument(
         "--experiment",
         type=str,
         choices=experiment_options.keys(),
         default="16s-rrna-gene-amplicon",
-        help=("Specify the experiment type. "
-              "Options: metagenomic, 16s-rrna-gene-amplicon, "
+        help=("Experiment type. One of: metagenomic, 16s-rrna-gene-amplicon, "
               "18s-rrna-gene-amplicon, its-gene-amplicon.")
     )
     parser.add_argument(
         "--threads",
         type=int,
         default=8,
-        help="Number of threads to use in parallel fetching."
+        help="Number of threads to use for parallel fetching."
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--page_size",
+        type=int,
+        default=1000,
+        help="Number of samples per page (in the API request)."
+    )
 
+    args = parser.parse_args()
     experiment_choice = args.experiment
     max_workers = args.threads
+    page_size = args.page_size
 
-    # Convert the CLI arg to the actual query param
+    # Convert the CLI experiment arg to the actual query param
     experiment_param = experiment_options[experiment_choice]
 
-    # 1) Clear previous logs and record a start message
+    # 1) Wipe log and record start
     with open(LOG_FILE, "w") as log_file:
         log_file.write("=== MGnify Fetch Script Execution Started ===\n")
     log_message(f"Experiment type: {experiment_choice} ({experiment_param})")
     log_message(f"Threads: {max_workers}")
+    log_message(f"Page size: {page_size}")
 
     print("\n🔹 **MGnify Bulk Metadata Fetcher** 🔹")
     print(f"Experiment: {experiment_choice} ({experiment_param})")
     print(f"Using up to {max_workers} concurrent threads.")
-    print(f"📌 Progress will be logged to `{LOG_FILE}`.\n")
+    print(f"Page size: {page_size}")
+    print(f"Progress will be logged to `{LOG_FILE}`.\n")
 
-    # 2) We do an initial request to discover the total number of pages from 'links.last'
+    # 2) Start with page=1 and figure out how many total pages are needed
     base_url = "https://www.ebi.ac.uk/metagenomics/api/v1/samples"
-    # Start with page=1 for the chosen experiment
-    first_url = f"{base_url}?experiment-type={experiment_param}&page=1"
+    first_url = f"{base_url}?experiment-type={experiment_param}&page=1&page_size={page_size}"
     first_resp = requests.get(first_url)
     if first_resp.status_code != 200:
-        error_message = f"❌ Error fetching first page: {first_url} (HTTP {first_resp.status_code})"
+        error_message = (f"❌ Error fetching first page: {first_url} "
+                         f"(HTTP {first_resp.status_code})")
         print(error_message)
         log_message(error_message)
         sys.exit(1)
 
     first_data = first_resp.json()
     links = first_data.get("links", {})
-    last_link = links.get("last", None)
+    last_link = links.get("last")
     if not last_link:
-        error_message = "Could not find 'links[\"last\"]' in the response. Aborting."
+        error_message = ("Could not find 'links[\"last\"]' in the response. Aborting. "
+                         "Ensure 'experiment-type' is correct or the endpoint isn't empty.")
         print(error_message)
         log_message(error_message)
         sys.exit(1)
 
-    # The last link might look like: 
-    #   "https://www.ebi.ac.uk/metagenomics/api/v1/samples?experiment-type=16s-rrna-gene-amplicon&page=9999"
-    # So parse out the integer after 'page='
+    # last_link might look like:
+    #   https://www.ebi.ac.uk/metagenomics/api/v1/samples?experiment-type=16s-rrna-gene-amplicon&page=1234&page_size=1000
     try:
-        last_page_num = int(last_link.split("page=")[1])
+        # Easiest parse: split on "&page=" or parse the query properly
+        # We'll do a simple split on "page=" for demonstration:
+        after_page_equals = last_link.split("page=")[1]
+        last_page_num = int(after_page_equals.split("&")[0])
     except Exception as e:
-        error_message = f"Could not parse page number from last link: {last_link}\n{e}"
+        error_message = (f"Could not parse the page number from last link: {last_link}\n{e}")
         print(error_message)
         log_message(error_message)
         sys.exit(1)
@@ -176,14 +184,14 @@ def main():
     # 3) Build the list of all page URLs
     all_page_urls = []
     for page_idx in range(1, last_page_num + 1):
-        url = f"{base_url}?experiment-type={experiment_param}&page={page_idx}"
+        url = (f"{base_url}?experiment-type={experiment_param}"
+               f"&page={page_idx}&page_size={page_size}")
         all_page_urls.append(url)
 
     total_pages = len(all_page_urls)
-    log_message(f"Discovered {total_pages} pages total (from 1 to {last_page_num}) "
-                f"for experiment type '{experiment_choice}'.")
+    log_message(f"Discovered {total_pages} pages (1..{last_page_num}) for {experiment_choice}.")
 
-    # 4) Fetch them all concurrently
+    # 4) Fetch them concurrently
     all_results = []
     start_time = time.time()
     log_message("Starting parallel fetch of all pages...")
