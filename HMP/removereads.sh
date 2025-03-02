@@ -16,7 +16,7 @@ mkdir -p logs
 
 # Find all relevant files
 mapfile -t files < <(find "$BASE_DIR" -type f \( -name "*.fasta.bz2" -o -name "*.fsa.bz2" -o -name "*.fastq.bz2" -o -name "*.fq.bz2" \))
-echo "Total files to process: ${#files[@]}"
+echo "Total files to process: ${#files[@]}" | tee -a logs/hmp_parallel_filter.out
 
 # Max concurrent jobs
 MAX_JOBS=50
@@ -27,6 +27,9 @@ submit_job() {
     local base_name
     base_name=$(basename "$file")
     local output_file="$OUTPUT_DIR/$base_name"
+
+    # Log job start
+    echo "$(date): Processing $file" >> logs/hmp_parallel_filter.out
 
     # Check file type and build the filtering command
     if [[ "$file" == *.fasta.bz2 || "$file" == *.fsa.bz2 ]]; then
@@ -58,19 +61,17 @@ submit_job() {
         }' | bzip2 > \"$output_file\""
 
     else
-        echo "Skipping unsupported file type: $file"
+        echo "$(date): Skipping unsupported file type: $file" >> logs/hmp_parallel_filter.out
         return
     fi
 
-    # Submit as a Slurm job
+    # Submit as a Slurm job and append logs instead of overwriting
     sbatch \
       --job-name=filter_job \
-      --output=logs/%j.out \
-      --error=logs/%j.err \
       --cpus-per-task=1 \
       --mem=2G \
       --time=4:00:00 \
-      --wrap="$filter_cmd"
+      --wrap="$filter_cmd" >> logs/hmp_parallel_filter.out 2>> logs/hmp_parallel_filter.err
 }
 
 # Process files while respecting MAX_JOBS
@@ -81,12 +82,12 @@ for file in "${files[@]}"; do
     submit_job "$file"
 done
 
-echo "All filter jobs submitted. Waiting for completion..."
+echo "$(date): All filter jobs submitted. Waiting for completion..." | tee -a logs/hmp_parallel_filter.out
 
 # Wait until all jobs finish
 while squeue --noheader --format=%j | grep -q '^filter_job$'; do
     sleep 60
-    echo "Waiting for remaining filter jobs to finish..."
+    echo "$(date): Waiting for remaining filter jobs to finish..." | tee -a logs/hmp_parallel_filter.out
 done
 
-echo "All jobs are complete!"
+echo "$(date): All jobs are complete!" | tee -a logs/hmp_parallel_filter.out
