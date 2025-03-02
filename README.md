@@ -1,3 +1,26 @@
+## Setup
+
+Follow these steps to **clone the repository** and **run the setup script** to configure your environment.
+1. Clone the Repository from GitHub, run:
+   ```bash
+   git clone git@github.com:maxwellkonnaris/biowzrd.git
+   cd biowzrd
+   ```
+2. Build conda environment for dependencies and required packages, run:
+   ```bash
+   conda create --name biowzrd --file environment.txt
+   conda list
+   conda activate biowzrd
+   ```
+3. Set permissions for setup.py, run:
+  ```bash
+   chmod +x setup.py
+  ```
+5. Add executable permissions to all scripts, run:
+   ```python
+   python setup.py
+   ```
+
 ## Downloading files on high performance compute cluster (downloadingfiles/)
 Packages required: NCBI toolkit, fastq-dl
 1. create txt file of NCBI or ENA study BioProject accessions called studies.txt
