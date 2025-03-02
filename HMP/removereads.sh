@@ -8,14 +8,15 @@
 #SBATCH --mem=1G
 
 # Directories
-BASE_DIR="hmp_16s_trimmed"  # Change to your input directory
-OUTPUT_DIR="filteredreads"   # Change to your desired output directory
-TMP_DIR="temp_processing"    # Temporary directory to ensure no overwrites
+BASE_DIR="hmp_16s_trimmed"
+OUTPUT_DIR="filteredreads"
+TMP_DIR="temp_processing"
 
 mkdir -p "$OUTPUT_DIR" "$TMP_DIR" logs
 
 # Find all relevant files
-mapfile -t files < <(find "$BASE_DIR" -type f \( -name "*.fasta.bz2" -o -name "*.fsa.bz2" -o -name "*.fastq.bz2" -o -name "*.fq.bz2" \))
+mapfile -t files < <(find "$BASE_DIR" -type f \( -name "*.fasta.bz2" -o -name "*.fsa.bz2" -o -name "*.fastq.bz2" -o -name "*.fq.bz2" \) -print | sort)
+
 echo "$(date): Total files to process: ${#files[@]}" | tee -a logs/hmp_parallel_filter.out
 
 # Max concurrent jobs
@@ -26,30 +27,29 @@ submit_job() {
     local file="$1"
     local base_name
     base_name=$(basename "$file")
-    local temp_file="$TMP_DIR/$base_name"
+    local temp_file="$TMP_DIR/${base_name}_$$.bz2"  # Unique temp file
     local output_file="$OUTPUT_DIR/$base_name"
 
-    echo "$(date): Processing $file" >> logs/hmp_parallel_filter.out
+    echo "$(date): Checking file existence: $file" >> logs/hmp_parallel_filter.out
 
-    # Check if the file exists and is readable
+    # Verify file exists before processing
     if [[ ! -f "$file" ]]; then
         echo "$(date): ERROR - File not found: $file" >> logs/hmp_parallel_filter.err
         return
-    elif [[ ! -r "$file" ]]; then
-        echo "$(date): ERROR - Cannot read file: $file" >> logs/hmp_parallel_filter.err
-        return
     fi
 
-    # Copy file to temp directory before processing (preserves original)
+    # Copy file to a unique temp file to prevent overwrite issues
     cp "$file" "$temp_file"
 
-    # Verify `bzcat` produces output
+    # Verify `bzcat` can read the file
     if ! bzcat "$temp_file" | head -n 1 &>/dev/null; then
-        echo "$(date): ERROR - bzcat failed or file is empty: $file" >> logs/hmp_parallel_filter.err
+        echo "$(date): ERROR - bzcat failed or empty file: $file" >> logs/hmp_parallel_filter.err
         return
     fi
 
-    # Determine filtering logic based on file type
+    echo "$(date): Processing $file" >> logs/hmp_parallel_filter.out
+
+    # Check file type and determine filtering command
     if [[ "$file" == *.fasta.bz2 || "$file" == *.fsa.bz2 ]]; then
         filter_cmd="bzcat \"$temp_file\" | awk '{
             if (\$0 ~ /^>/) {header = \$0; next}
@@ -81,7 +81,7 @@ submit_job() {
         return
     fi
 
-    # Submit Slurm job and append logs instead of overwriting
+    # Submit Slurm job and append logs
     sbatch \
       --job-name=filter_job \
       --cpus-per-task=1 \
@@ -89,11 +89,26 @@ submit_job() {
       --time=4:00:00 \
       --wrap="$filter_cmd" >> logs/hmp_parallel_filter.out 2>> logs/hmp_parallel_filter.err
 
-    # Ensure the filtered file is not unexpectedly empty
-    sleep 2  # Allow time for file creation
-    if [[ -f "$output_file" && $(stat -c%s "$output_file") -lt 100 ]]; then
-        echo "$(date): WARNING - Output file too small: $output_file" >> logs/hmp_parallel_filter.err
-    fi
+    # Wait for the output file to be fully written
+    sleep 5  # Give the system some time to complete writes
+
+    # Ensure the file exists before proceeding
+    WAIT_TIME=0
+    MAX_WAIT=60  # Max wait time (seconds)
+
+    while [[ ! -f "$output_file" || $(stat -c%s "$output_file") -lt 100 ]]; do
+        if [[ $WAIT_TIME -ge $MAX_WAIT ]]; then
+            echo "$(date): ERROR - Output file too small even after waiting: $output_file" >> logs/hmp_parallel_filter.err
+            break
+        fi
+        sleep 2
+        WAIT_TIME=$((WAIT_TIME + 2))
+    done
+
+    echo "$(date): Verified write completed for $output_file" >> logs/hmp_parallel_filter.out
+
+    # Cleanup: Remove temp file after job submission
+    rm -f "$temp_file"
 }
 
 # Process files while respecting MAX_JOBS
