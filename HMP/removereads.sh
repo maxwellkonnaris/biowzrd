@@ -6,100 +6,89 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=1G
-#SBATCH --partition=low
 
-# Define base and output directories
+# Adjust paths as needed
 BASE_DIR="hmp_16s_trimmed"
 OUTPUT_DIR="filteredreads"
 
-# Create output and logs directories if they don't exist
 mkdir -p "$OUTPUT_DIR"
 mkdir -p logs
 
-# Find all relevant files (.fasta.bz2, .fsa.bz2, .fastq.bz2) and read them into an array
+# Find all relevant .fasta.bz2, .fsa.bz2, .fastq.bz2 files
 mapfile -t files < <(find "$BASE_DIR" -type f \( -name "*.fasta.bz2" -o -name "*.fsa.bz2" -o -name "*.fastq.bz2" \))
-TOTAL_FILES=${#files[@]}
-echo "Total files to process: $TOTAL_FILES"
+echo "Total files to process: ${#files[@]}"
 
-# Function to determine memory allocation based on file size (in MB)
-get_memory_allocation() {
-    local file="$1"
-    local file_size
-    file_size=$(du -m "$file" | cut -f1)
-    if (( file_size < 100 )); then
-        echo "2G"
-    elif (( file_size < 500 )); then
-        echo "4G"
-    elif (( file_size < 1000 )); then
-        echo "8G"
-    else
-        echo "16G"
-    fi
-}
+# MAX_JOBS: how many jobs to run concurrently
+MAX_JOBS=50
 
-# Function to construct the filtering command based on file type.
-# It outputs the filtered file to the OUTPUT_DIR while keeping the original filename.
-get_filter_command() {
+# Helper function to submit Slurm job for a single file
+submit_job() {
     local file="$1"
+
     local base_name
     base_name=$(basename "$file")
     local output_file="$OUTPUT_DIR/$base_name"
 
+    # Build the filtering command depending on FASTA vs FASTQ
     if [[ "$file" == *.fasta.bz2 || "$file" == *.fsa.bz2 ]]; then
-        # For FASTA files: skip the first empty record and filter records where the first sequence line is at least 30 bp.
-        echo "bzcat \"$file\" | awk 'BEGIN {RS=\">\"; ORS=\"\"} NR>1 {if(length(\$2) >= 30) print \">\"\$0}' | bzip2 > \"$output_file\""
-    elif [[ "$file" == *.fastq.bz2 ]]; then
-        # For FASTQ files: process four lines at a time; only print the full record if the sequence line (second line) is at least 30 bp.
-        echo "bzcat \"$file\" | awk '{
-            header=\$0;
-            getline seq;
-            getline plus;
-            getline qual;
+        # Each record is exactly 2 lines: header + 1 read line
+        # Keep if sequence length ≥ 30
+        filter_cmd="bzcat \"$file\" | paste - - | awk -F\"\t\" '{
+            header=\$1; seq=\$2;
             if(length(seq) >= 30) {
                 print header;
                 print seq;
-                print plus;
-                print qual;
             }
         }' | bzip2 > \"$output_file\""
+
+    elif [[ "$file" == *.fastq.bz2 ]]; then
+        # Standard FASTQ: 4 lines per record
+        # Keep if sequence line (line #2) ≥ 30
+        filter_cmd="bzcat \"$file\" | awk '{
+            if(NR%4 == 1) { h=\$0 }
+            else if(NR%4 == 2) { s=\$0 }
+            else if(NR%4 == 3) { p=\$0 }
+            else if(NR%4 == 0) {
+                q=\$0;
+                if(length(s) >= 30) {
+                    print h;
+                    print s;
+                    print p;
+                    print q;
+                }
+            }
+        }' | bzip2 > \"$output_file\""
+    else
+        echo "Skipping file with unknown extension: $file"
+        return
     fi
+
+    # Submit as a separate Slurm job
+    sbatch \
+      --job-name=filter_job \
+      --output=logs/%j.out \
+      --error=logs/%j.err \
+      --cpus-per-task=1 \
+      --mem=2G \
+      --time=4:00:00 \
+      --wrap="$filter_cmd"
 }
 
-# Function to submit a job with dynamic memory allocation for a single file
-submit_job() {
-    local file="$1"
-    local mem_required
-    mem_required=$(get_memory_allocation "$file")
-    local filter_command
-    filter_command=$(get_filter_command "$file")
-
-    sbatch --job-name=filter_job \
-           --output=logs/%j.out \
-           --error=logs/%j.err \
-           --cpus-per-task=1 \
-           --mem="$mem_required" \
-           --time=4:00:00 \
-           --wrap="$filter_command"
-}
-
-# Maximum number of concurrent jobs allowed
-MAX_JOBS=50
-
-# Submit jobs for each file while ensuring we never exceed MAX_JOBS running concurrently
+# Loop over files, respecting the MAX_JOBS concurrency limit
 for file in "${files[@]}"; do
-    # Wait if the number of running filter jobs has reached MAX_JOBS
+    # If there are already MAX_JOBS filter_job’s running, wait
     while (( $(squeue --noheader -n filter_job | wc -l) >= MAX_JOBS )); do
         sleep 10
     done
     submit_job "$file"
 done
 
-echo "All jobs submitted. Waiting for completion..."
+echo "All filter jobs submitted. Waiting for completion..."
 
-# Wait until all submitted filter jobs are finished
+# Optionally wait until all filter jobs are done
 while squeue --noheader -n filter_job | grep -q '[0-9]'; do
     sleep 60
-    echo "Waiting for remaining jobs to finish..."
+    echo "Waiting for remaining filter jobs to finish..."
 done
 
 echo "All jobs are complete!"
