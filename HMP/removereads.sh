@@ -1,52 +1,71 @@
 #!/bin/bash
 #SBATCH --job-name=hmp_parallel_filter
-#SBATCH --output=hmp_parallel_filter.log
-#SBATCH --error=hmp_parallel_filter.err
+#SBATCH --output=filteredreads/hmp_parallel_filter.log
+#SBATCH --error=filteredreads/hmp_parallel_filter.err
 #SBATCH --time=48:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=1G
 #SBATCH --partition=low
 
-# Set the base directory containing all subdirectories
+# Define base and output directories
 BASE_DIR="hmp_16s_trimmed"
+OUTPUT_DIR="filteredreads"
 
-# Find all relevant files (.fasta.bz2, .fsa.bz2, .fastq.bz2) in all subdirectories
-FILE_LIST=$(mktemp)
-find "$BASE_DIR" -type f \( -name "*.fasta.bz2" -o -name "*.fsa.bz2" -o -name "*.fastq.bz2" \) > "$FILE_LIST"
-TOTAL_FILES=$(wc -l < "$FILE_LIST")
+# Create output and logs directories if they don't exist
+mkdir -p "$OUTPUT_DIR"
+mkdir -p logs
 
+# Find all relevant files (.fasta.bz2, .fsa.bz2, .fastq.bz2) and read them into an array
+mapfile -t files < <(find "$BASE_DIR" -type f \( -name "*.fasta.bz2" -o -name "*.fsa.bz2" -o -name "*.fastq.bz2" \))
+TOTAL_FILES=${#files[@]}
 echo "Total files to process: $TOTAL_FILES"
 
-# Function to determine memory allocation based on file size
+# Function to determine memory allocation based on file size (in MB)
 get_memory_allocation() {
+    local file="$1"
     local file_size
-    file_size=$(du -m "$1" | cut -f1)  # Get file size in MB
-
-    if ((file_size < 100)); then
+    file_size=$(du -m "$file" | cut -f1)
+    if (( file_size < 100 )); then
         echo "2G"
-    elif ((file_size < 500)); then
+    elif (( file_size < 500 )); then
         echo "4G"
-    elif ((file_size < 1000)); then
+    elif (( file_size < 1000 )); then
         echo "8G"
     else
         echo "16G"
     fi
 }
 
-# Function to determine file type and filtering method
+# Function to construct the filtering command based on file type.
+# It outputs the filtered file to the OUTPUT_DIR while keeping the original filename.
 get_filter_command() {
     local file="$1"
+    local base_name
+    base_name=$(basename "$file")
+    local output_file="$OUTPUT_DIR/$base_name"
 
-    # Detect if file is FASTA (fasta, fsa) or FASTQ
     if [[ "$file" == *.fasta.bz2 || "$file" == *.fsa.bz2 ]]; then
-        echo "bzcat \"$file\" | awk 'BEGIN {RS=\">\"; ORS=\"\"} length(\$2) >= 30 {print \">\"\$0}' | bzip2 > \"${file}.tmp.bz2\""
+        # For FASTA files: skip the first empty record and filter records where the first sequence line is at least 30 bp.
+        echo "bzcat \"$file\" | awk 'BEGIN {RS=\">\"; ORS=\"\"} NR>1 {if(length(\$2) >= 30) print \">\"\$0}' | bzip2 > \"$output_file\""
     elif [[ "$file" == *.fastq.bz2 ]]; then
-        echo "bzcat \"$file\" | awk 'NR%4==1 || NR%4==2 && length(\$0) >= 30 || NR%4==3 || NR%4==0' | bzip2 > \"${file}.tmp.bz2\""
+        # For FASTQ files: process four lines at a time; only print the full record if the sequence line (second line) is at least 30 bp.
+        echo "bzcat \"$file\" | awk '{
+            header=\$0;
+            getline seq;
+            getline plus;
+            getline qual;
+            if(length(seq) >= 30) {
+                print header;
+                print seq;
+                print plus;
+                print qual;
+            }
+        }' | bzip2 > \"$output_file\""
     fi
 }
 
-# Function to submit a job with dynamic memory allocation
+# Function to submit a job with dynamic memory allocation for a single file
 submit_job() {
     local file="$1"
     local mem_required
@@ -60,48 +79,27 @@ submit_job() {
            --cpus-per-task=1 \
            --mem="$mem_required" \
            --time=4:00:00 \
-           --wrap="
-    $filter_command;
-    if [[ -s \"${file}.tmp.bz2\" ]]; then mv \"${file}.tmp.bz2\" \"$file\"; else rm -f \"${file}.tmp.bz2\"; fi
-    "
+           --wrap="$filter_command"
 }
 
-# Create a logs directory if it doesn't exist
-mkdir -p logs
+# Maximum number of concurrent jobs allowed
+MAX_JOBS=50
 
-# Counter for submitted jobs
-SUBMITTED_JOBS=0
-
-# Submit the first batch of 50 jobs
-while [[ "$SUBMITTED_JOBS" -lt 50 && -s "$FILE_LIST" ]]; do
-    read -r file <&3 || break
+# Submit jobs for each file while ensuring we never exceed MAX_JOBS running concurrently
+for file in "${files[@]}"; do
+    # Wait if the number of running filter jobs has reached MAX_JOBS
+    while (( $(squeue --noheader -n filter_job | wc -l) >= MAX_JOBS )); do
+        sleep 10
+    done
     submit_job "$file"
-    ((SUBMITTED_JOBS++))
-done 3<"$FILE_LIST"
-
-# Process remaining files dynamically
-while [[ -s "$FILE_LIST" ]]; do
-    sleep 10  # Wait a bit before checking for open slots
-
-    # Check running job count
-    running_jobs=$(squeue --name=filter_job --noheader | wc -l)
-
-    # Submit new jobs as slots free up
-    while [[ "$running_jobs" -lt 50 && -s "$FILE_LIST" ]]; do
-        read -r file <&3 || break
-        submit_job "$file"
-        ((running_jobs++))
-    done 3<"$FILE_LIST"
 done
 
 echo "All jobs submitted. Waiting for completion..."
 
-# Wait for all jobs to finish before exiting
-while squeue --name=filter_job --format="%i" | grep -q '[0-9]'; do
+# Wait until all submitted filter jobs are finished
+while squeue --noheader -n filter_job | grep -q '[0-9]'; do
     sleep 60
     echo "Waiting for remaining jobs to finish..."
 done
 
 echo "All jobs are complete!"
-rm -f "$FILE_LIST"
-
