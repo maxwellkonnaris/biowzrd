@@ -3,11 +3,14 @@ import pandas as pd
 import argparse
 import sys
 import time
+import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 LOG_FILE = "fetch_log.txt"
 
 def log_message(message):
-    """Write log messages to a file."""
+    """Append a message to fetch_log.txt (for consistent logging)."""
     with open(LOG_FILE, "a") as log_file:
         log_file.write(message + "\n")
 
@@ -19,88 +22,153 @@ experiment_options = {
     "its-gene-amplicon": "ITS Gene Amplicon (Fungal)"
 }
 
-# Set up argument parser
-parser = argparse.ArgumentParser(
-    description="Fetch bulk metadata from MGnify and save it as a CSV file."
-)
-parser.add_argument(
-    "--experiment",
-    type=str,
-    choices=experiment_options.keys(),
-    default="16s-rrna-gene-amplicon",
-    help="Specify the experiment type. Available options: metagenomic, 16s-rrna-gene-amplicon (default), 18s-rrna-gene-amplicon, its-gene-amplicon."
-)
-args = parser.parse_args()
-experiment_type = args.experiment
+# A global counter to track how many samples we have processed so far.
+processed_count = 0
+# A lock to avoid race conditions when threads update processed_count or write logs.
+processed_lock = threading.Lock()
+# We'll store the time when we start fetching (set in main()).
+start_time = None
 
-# Clear previous logs
-with open(LOG_FILE, "w") as log_file:
-    log_file.write("=== Bulk Fetch Script Execution Started ===\n")
-
-print("\n🔹 **MGnify Bulk Metadata Fetcher** 🔹")
-print(f"✅ Fetching bulk metadata for: {experiment_options[experiment_type]}")
-print(f"📌 Progress is logged to `{LOG_FILE}`.")
-
-def fetch_bulk_metadata(experiment_type):
+def fetch_page(url):
     """
-    Fetch metadata for all samples using the bulk endpoint.
-    We assume the API supports a page_size parameter that returns
-    all (or most) samples with full details in one (or a few) requests.
+    Fetch a single page's worth of sample data from MGnify and parse the JSON
+    into our standard metadata dict format.
     """
+    global processed_count
+
+    # Perform the GET request
+    resp = requests.get(url)
+    if resp.status_code != 200:
+        log_message(f"❌ Error fetching data from {url}: HTTP {resp.status_code}")
+        return []
+
+    data = resp.json()
+    samples = data.get("data", [])
+    page_results = []
+    for sample in samples:
+        attributes = sample.get("attributes", {})
+        relationships = sample.get("relationships", {})
+        study_info = relationships.get("study", {}).get("data", {})
+        metadata = {
+            "sample_accession": sample.get("id", "N/A"),
+            "biome": attributes.get("biome", "N/A"),
+            "environment": attributes.get("environment_material", "N/A"),
+            "temperature": attributes.get("environment_temperature", "N/A"),
+            "salinity": attributes.get("environment_salinity", "N/A"),
+            "pH": attributes.get("environment_ph", "N/A"),
+            "latitude": attributes.get("latitude", "N/A"),
+            "longitude": attributes.get("longitude", "N/A"),
+            "collection_date": attributes.get("collection_date", "N/A"),
+            "study_accession": study_info.get("id", "N/A"),
+            "experiment_type": attributes.get("experiment_type", "N/A"),
+        }
+        page_results.append(metadata)
+
+    # Update our global progress counter and log if we cross another 1000 boundary
+    with processed_lock:
+        old_count = processed_count
+        processed_count += len(page_results)
+        # If, for instance, old_count=2999 and new_count=3003, we've crossed 3000
+        # So let's check if we've crossed a multiple of 1000 in this batch
+        check_range = range(old_count // 1000 + 1, processed_count // 1000 + 1)
+        if len(check_range) > 0:  # We crossed at least one multiple of 1000
+            elapsed_time = time.time() - start_time
+            log_message(f"Processed {processed_count} samples... (Elapsed Time: {elapsed_time:.2f} seconds)")
+
+    return page_results
+
+def main():
+    global start_time
+    parser = argparse.ArgumentParser(
+        description="Fetch bulk metadata from MGnify and save it as a CSV file."
+    )
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        choices=experiment_options.keys(),
+        default="16s-rrna-gene-amplicon",
+        help=("Specify the experiment type. Available options: "
+              "metagenomic, 16s-rrna-gene-amplicon (default), "
+              "18s-rrna-gene-amplicon, its-gene-amplicon.")
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=8,
+        help="Number of threads to use in parallel fetching."
+    )
+    args = parser.parse_args()
+    experiment_type = args.experiment
+    max_workers = args.threads
+
+    # 1) Clear previous logs and write a "start" message
+    with open(LOG_FILE, "w") as log_file:
+        log_file.write("=== Bulk Fetch Script Execution Started ===\n")
+    log_message(f"Experiment type: {experiment_options[experiment_type]}")
+    log_message(f"Threads: {max_workers}")
+
+    print("\n🔹 **MGnify Bulk Metadata Fetcher** 🔹")
+    print(f"✅ Fetching bulk metadata for: {experiment_options[experiment_type]}")
+    print(f"📌 Progress is logged to `{LOG_FILE}`.")
+
+    # 2) We do an initial request just to discover the total count (and maybe grab page=1).
     base_url = "https://www.ebi.ac.uk/metagenomics/api/latest/samples"
-    # Adjust the page_size as needed. The browser may be using a similar parameter.
-    url = f"{base_url}?experiment-type={experiment_type}&page_size=10000"
-    metadata_list = []
+    page_size = 1000  # or 2000, 5000, etc. Fine-tune as needed.
+    # Page 1 request
+    first_page_url = f"{base_url}?experiment-type={experiment_type}&page_size={page_size}&page=1"
+    resp = requests.get(first_page_url)
+    if resp.status_code != 200:
+        error_message = f"❌ Error fetching first page: {resp.status_code}"
+        print(error_message)
+        log_message(error_message)
+        sys.exit(1)
+
+    data = resp.json()
+    meta_pagination = data.get("meta", {}).get("pagination", {})
+    total_count = meta_pagination.get("count")
+    if not total_count:
+        print("Could not determine 'count' from API response; aborting.")
+        log_message("Could not determine 'count' from API. Aborting.")
+        sys.exit(1)
+
+    num_pages = math.ceil(total_count / page_size)
+    log_message(f"Total samples reported: {total_count}")
+    log_message(f"Total pages needed: {num_pages}")
+
+    # 3) Start concurrency to fetch all pages, including page=1
+    all_results = []
+    all_page_urls = []
+    for page_idx in range(1, num_pages + 1):
+        url = f"{base_url}?experiment-type={experiment_type}&page_size={page_size}&page={page_idx}"
+        all_page_urls.append(url)
+
     start_time = time.time()
-    processed_count = 0
+    log_message("Starting parallel fetch of all pages...")
 
-    while url:
-        response = requests.get(url)
-        if response.status_code != 200:
-            error_message = f"❌ Error fetching data: {response.status_code}"
-            print(error_message)
-            log_message(error_message)
-            break
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {executor.submit(fetch_page, url): url for url in all_page_urls}
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                page_data = future.result()
+                all_results.extend(page_data)
+            except Exception as exc:
+                log_message(f"❌ Exception fetching page {url}: {exc}")
 
-        data = response.json()
-        for sample in data.get("data", []):
-            metadata = {
-                "sample_accession": sample.get("id", "N/A"),
-                "biome": sample.get("attributes", {}).get("biome", "N/A"),
-                "environment": sample.get("attributes", {}).get("environment_material", "N/A"),
-                "temperature": sample.get("attributes", {}).get("environment_temperature", "N/A"),
-                "salinity": sample.get("attributes", {}).get("environment_salinity", "N/A"),
-                "pH": sample.get("attributes", {}).get("environment_ph", "N/A"),
-                "latitude": sample.get("attributes", {}).get("latitude", "N/A"),
-                "longitude": sample.get("attributes", {}).get("longitude", "N/A"),
-                "collection_date": sample.get("attributes", {}).get("collection_date", "N/A"),
-                "study_accession": sample.get("relationships", {}).get("study", {}).get("data", {}).get("id", "N/A"),
-                "experiment_type": sample.get("attributes", {}).get("experiment_type", experiment_type)
-            }
-            metadata_list.append(metadata)
-            processed_count += 1
-            # Optionally log progress every 1000 samples
-            if processed_count % 1000 == 0:
-                elapsed_time = time.time() - start_time
-                log_message(f"Processed {processed_count} samples... (Elapsed Time: {elapsed_time:.2f} seconds)")
-
-        # Move to the next page if available (if pagination is still in effect)
-        url = data.get("links", {}).get("next")
-    
     total_time = time.time() - start_time
-    print(f"\n✅ Retrieved metadata for {len(metadata_list)} samples in {total_time:.2f} seconds.")
-    log_message(f"✅ Completed fetching metadata for {len(metadata_list)} samples in {total_time:.2f} seconds.")
-    return metadata_list
+    print(f"\n✅ Retrieved metadata for {len(all_results)} samples in {total_time:.2f} seconds.")
+    log_message(f"✅ Completed fetching metadata for {len(all_results)} samples in {total_time:.2f} seconds.")
 
-# Fetch the bulk metadata
-metadata = fetch_bulk_metadata(experiment_type)
+    # 4) Convert metadata to a DataFrame and save to CSV
+    df = pd.DataFrame(all_results)
+    csv_filename = f"mgnify_bulk_metadata_{experiment_type.replace('-', '_')}.csv"
+    df.to_csv(csv_filename, index=False)
 
-# Convert metadata to a DataFrame and save to CSV
-df = pd.DataFrame(metadata)
-csv_filename = f"mgnify_bulk_metadata_{experiment_type.replace('-', '_')}.csv"
-df.to_csv(csv_filename, index=False)
+    print(f"\n✅ **Metadata saved to '{csv_filename}'.** 🎉")
+    log_message(f"✅ Metadata saved to '{csv_filename}'.")
+    print("\n🎯 Bulk fetching completed. Check `fetch_log.txt` for details.")
+    log_message("🎯 Bulk fetching completed successfully.")
 
-print(f"\n✅ **Metadata saved to '{csv_filename}'.** 🎉")
-log_message(f"✅ Metadata saved to '{csv_filename}'.")
-print("\n🎯 Bulk fetching completed. Check `fetch_log.txt` for details.")
-log_message("🎯 Bulk fetching completed successfully.")
+
+if __name__ == "__main__":
+    main()
