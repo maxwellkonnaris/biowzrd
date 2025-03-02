@@ -23,3 +23,7 @@ Packages required: aws (see download script for linux)
 ## MG-RAST (MGRAST/)
 1. Download the metadata to obtain metagenome_ids. You can specify the query further as prompted or add the --default flag to download amplicon 16s samples from ion torrent and illumina sequencing technology. (sbatch retrievemetadata.sh)
 2. sh downloadmgrast.sh is the combined script which will submit slurm jobs. This will begin downloading preprocessed and host removed fasta files for the metagenome_ids you've specified, in fasta.gz format. 
+
+## MGnify (MGnify/)
+1. Download the metadata to obtain sample ids. You can specify the query further to obtain either shotgun metagenomic, 16s/18s/ITS amplicon sequence metadata which is outputted in CSV format. (python fetch_mgnify_samples.py)
+2. Use the sample accession to download the sequencing files.
