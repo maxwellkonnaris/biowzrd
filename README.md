@@ -19,3 +19,7 @@ Packages required: aws (see download script for linux)
 1. Navigate to home directory and Install aws (installaws.sh)
 2. Download all trimmed 16s sequence files in fa.bzip format (downloadHMP_16s_trimmed.sh)
 3. Remove reads with length < 30 (removereads.sh)
+
+## MG-RAST (MGRAST/)
+1. Download the metadata to obtain metagenome_ids. You can specify the query further as prompted or add the --default flag to download amplicon 16s samples from ion torrent and illumina sequencing technology. (sbatch retrievemetadata.sh)
+2. I made a few different scripts, one is a combined version of the other two. sh downloadmg-rast.sh is the combined script which will submit slurm jobs. otherwise run sh downloadwrapper.sh. This will begin downloading preprocessed and host removed fasta files for the metagenome_ids you've specified, in fasta.gz format. 
