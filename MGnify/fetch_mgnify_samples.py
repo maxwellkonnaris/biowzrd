@@ -2,6 +2,14 @@ import requests
 import pandas as pd
 import argparse
 import sys
+import time
+
+LOG_FILE = "fetch_log.txt"
+
+def log_message(message):
+    """Write log messages to a file."""
+    with open(LOG_FILE, "a") as log_file:
+        log_file.write(message + "\n")
 
 # Define available experiment types
 experiment_options = {
@@ -16,7 +24,6 @@ parser = argparse.ArgumentParser(
     description="Fetch metadata from MGnify based on experiment type and save it as a CSV file."
 )
 
-# Add argument for experiment type
 parser.add_argument(
     "--experiment",
     type=str,
@@ -25,58 +32,67 @@ parser.add_argument(
     help="Specify the experiment type. Available options: metagenomic, 16s-rrna-gene-amplicon (default), 18s-rrna-gene-amplicon, its-gene-amplicon."
 )
 
-# Parse command-line arguments
 args = parser.parse_args()
 experiment_type = args.experiment  # Get the selected experiment type
 
-# Print usage instructions for clarity
+# Clear previous logs
+with open(LOG_FILE, "w") as log_file:
+    log_file.write("=== Fetch Script Execution Started ===\n")
+
 print("\n🔹 **MGnify Metadata Fetcher** 🔹")
-print("This script retrieves metadata from MGnify for a selected experiment type and saves it as a CSV file.\n")
-print("📌 **Available Experiment Types:**")
-for key, value in experiment_options.items():
-    print(f"  {key} - {value}")
+print(f"✅ Fetching metadata for: {experiment_options[experiment_type]}\n")
+print(f"📌 Fetching progress is logged to `{LOG_FILE}`.")
 
-print("\n✅ **Using Experiment Type:**", experiment_options[experiment_type])
-print("\n📌 **Example Usage:**")
-print("   python fetch_mgnify_samples.py --experiment metagenomic")
-print("   python fetch_mgnify_samples.py --experiment 18s-rrna-gene-amplicon\n")
-
-# Base URL for fetching samples
-base_url = "https://www.ebi.ac.uk/metagenomics/api/latest/samples"
-
-# Function to fetch sample accessions
 def fetch_samples(experiment_type):
+    """Fetch ALL available samples from MGnify and log progress."""
+    base_url = "https://www.ebi.ac.uk/metagenomics/api/latest/samples"
     sample_accessions = []
     next_page = f"{base_url}?experiment-type={experiment_type}"
     
-    print(f"\n🔄 Fetching samples for '{experiment_options[experiment_type]}'...")
-    
+    print(f"\n🔍 Fetching ALL available samples for '{experiment_options[experiment_type]}'... (this may take a while)")
+    log_message(f"Fetching samples for {experiment_type} started.")
+
+    start_time = time.time()
+    processed_count = 0
+
     while next_page:
         response = requests.get(next_page)
         
-        # Error handling for bad requests
         if response.status_code != 200:
-            print(f"❌ Error fetching data: {response.status_code}")
-            sys.exit(1)
-        
+            error_message = f"❌ Error fetching data: {response.status_code}"
+            print(error_message)
+            log_message(error_message)
+            return []
+
         data = response.json()
 
-        # Extract sample accessions
         for sample in data["data"]:
             sample_accessions.append(sample["id"])  # 'id' contains the sample accession
-        
-        # Get next page if available
-        next_page = data["links"].get("next")
+            processed_count += 1
+
+            # Log every 1000 samples instead of printing
+            if processed_count % 1000 == 0:
+                elapsed_time = time.time() - start_time
+                log_message(f"Processed {processed_count} samples... (Elapsed Time: {elapsed_time:.2f} seconds)")
+
+        next_page = data["links"].get("next")  # Get next page if available
     
-    print(f"✅ Retrieved {len(sample_accessions)} sample accessions.\n")
+    total_time = time.time() - start_time
+    print(f"\n✅ Retrieved {len(sample_accessions)} samples in {total_time:.2f} seconds.")
+    log_message(f"✅ Completed fetching {len(sample_accessions)} samples in {total_time:.2f} seconds.")
+    
     return sample_accessions
 
-# Function to fetch metadata for samples
 def fetch_metadata(accessions):
+    """Fetch metadata for each sample and log progress."""
     metadata_list = []
     metadata_url_base = "https://www.ebi.ac.uk/metagenomics/api/latest/samples/"
     
-    print("🔄 Fetching metadata for each sample...")
+    print("\n🔄 Fetching metadata for each sample...")
+    log_message("Fetching metadata started.")
+
+    start_time = time.time()
+    processed_count = 0
 
     for accession in accessions:
         response = requests.get(f"{metadata_url_base}{accession}")
@@ -98,16 +114,27 @@ def fetch_metadata(accessions):
                 "experiment_type": data["attributes"].get("experiment_type", experiment_type)
             }
             metadata_list.append(metadata)
+
+            processed_count += 1
+
+            # Log every 1000 samples
+            if processed_count % 1000 == 0:
+                elapsed_time = time.time() - start_time
+                log_message(f"Processed metadata for {processed_count} samples... (Elapsed Time: {elapsed_time:.2f} seconds)")
+
+    total_time = time.time() - start_time
+    print(f"\n✅ Retrieved metadata for {len(metadata_list)} samples in {total_time:.2f} seconds.")
+    log_message(f"✅ Completed fetching metadata for {len(metadata_list)} samples in {total_time:.2f} seconds.")
     
-    print(f"✅ Retrieved metadata for {len(metadata_list)} samples.\n")
     return metadata_list
 
-# Fetch samples based on user-selected experiment type
+# Fetch ALL samples
 sample_accessions = fetch_samples(experiment_type)
 
 # Stop if no samples were found
 if not sample_accessions:
     print("❌ No samples found for this experiment type.")
+    log_message("❌ No samples found. Script terminated.")
     sys.exit(1)
 
 metadata = fetch_metadata(sample_accessions)
@@ -119,4 +146,8 @@ df = pd.DataFrame(metadata)
 csv_filename = f"mgnify_samples_metadata_{experiment_type.replace('-', '_')}.csv"
 df.to_csv(csv_filename, index=False)
 
-print(f"✅ **Metadata saved to '{csv_filename}'.** 🎉")
+print(f"\n✅ **Metadata saved to '{csv_filename}'.** 🎉")
+log_message(f"✅ Metadata saved to '{csv_filename}'.")
+
+print("\n🎯 Fetching completed. Check `fetch_log.txt` for details.")
+log_message("🎯 Fetching completed successfully.")
