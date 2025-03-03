@@ -53,6 +53,7 @@ Packages required: aws (see download script for linux)
 2. sh downloadmgrast.sh is the combined script which will submit slurm jobs. This will begin downloading preprocessed and host removed fasta files for the metagenome_ids you've specified, in fasta.gz format. 
 
 ## MGnify (MGnify/)
+Packages optional: git lfs
 1. Download the metadata to obtain sample ids. You can specify the query further to obtain either shotgun metagenomic, 16s/18s/ITS amplicon sequence metadata which is outputted in CSV format. (python fetch_mgnify_samples.py) ----- metadata file provided for 16s amplicon sequences, but need to pull with git lfs pull
 2. Obtain the unique accessions or sample IDs to generate the output for downloadingfastq.sh
 
