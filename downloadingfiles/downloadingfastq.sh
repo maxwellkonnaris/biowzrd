@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=fastq_download
-#SBATCH --output=logs/slurm_%A.out
-#SBATCH --error=logs/slurm_%A.err
+#SBATCH --output=%x_logs/slurm_%A.out
+#SBATCH --error=%x_logs/slurm_%A.err
 #SBATCH --time=48:00:00
 #SBATCH --mem=4G
 #SBATCH --cpus-per-task=1
@@ -16,7 +16,10 @@ WORKDIR="$(pwd)"
 CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
 LOCK_FILE="${WORKDIR}/checkpoint.lock"
 
-mkdir -p jobs logs fastq_data metadata
+# Ensure we are working in the right directory
+cd "$WORKDIR" || { echo "❌ ERROR: Unable to change to working directory $WORKDIR"; exit 1; }
+
+mkdir -p "${WORKDIR}/jobs" "${WORKDIR}/logs" "${WORKDIR}/fastq_data" "${WORKDIR}/metadata"
 
 # Ensure checkpoint file exists
 touch "${CHECKPOINT_FILE}"
@@ -41,15 +44,15 @@ get_provider() {
         SRP) echo "sra" ;;  # SRA Study
         ERP|DRP) echo "ena" ;;  # ENA/DRP Study
         PRJ)
-            echo "❌ ERROR: BioProject accessions (PRJ...) must be resolved to Studies (SRP/ERP/DRP) first." >> "logs/$ACCESSION.err"
+            echo "❌ ERROR: BioProject accessions (PRJ...) must be resolved to Studies (SRP/ERP/DRP) first." >> "${WORKDIR}/logs/${ACCESSION}.err"
             exit 1
             ;;
         SAM)
-            echo "❌ ERROR: BioSample accessions (SAM...) must be resolved to Samples (SRS/ERS/DRS) first." >> "logs/$ACCESSION.err"
+            echo "❌ ERROR: BioSample accessions (SAM...) must be resolved to Samples (SRS/ERS/DRS) first." >> "${WORKDIR}/logs/${ACCESSION}.err"
             exit 1
             ;;
         *)
-            echo "❌ ERROR: Unknown accession type: $ACCESSION" >> "logs/$ACCESSION.err"
+            echo "❌ ERROR: Unknown accession type: $ACCESSION" >> "${WORKDIR}/logs/${ACCESSION}.err"
             exit 1
             ;;
     esac
@@ -71,28 +74,27 @@ while read -r ACCESSION; do
     #######################################
     # Create an individual job script
     #######################################
-    JOB_SCRIPT="jobs/download_${ACCESSION}.sh"
+    JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
     PROVIDER=$(get_provider "${ACCESSION}")
     if [[ -z "$PROVIDER" ]]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') ⏩ Skipping ${ACCESSION}: Invalid or unsupported accession type." >> logs/skipped_accessions.log
+        echo "$(date '+%Y-%m-%d %H:%M:%S') ⏩ Skipping ${ACCESSION}: Invalid or unsupported accession type." >> "${WORKDIR}/logs/skipped_accessions.log"
         continue  # Skip processing if accession is invalid
     fi
     
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
-#SBATCH --output=logs/${ACCESSION}.out
-#SBATCH --error=logs/${ACCESSION}.err
-#SBATCH --time=05:00:00
+#SBATCH --output=${WORKDIR}/logs/${ACCESSION}.out
+#SBATCH --error=${WORKDIR}/logs/${ACCESSION}.err
+#SBATCH --time=02:00:00
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-# We capture WORKDIR from the environment so we can reference it within the script
-WORKDIR="${WORKDIR}"
-CHECKPOINT_FILE="${CHECKPOINT_FILE}"
-LOCK_FILE="${LOCK_FILE}"
-FASTQ_DIR="\${WORKDIR}/fastq_data"
+# Set working directory
+cd "${WORKDIR}" || { echo "❌ ERROR: Unable to change to working directory ${WORKDIR}"; exit 1; }
+
+FASTQ_DIR="${WORKDIR}/fastq_data"
 
 echo "🔹 Downloading FASTQ files for ${ACCESSION} using provider: ${PROVIDER}"
 
@@ -107,21 +109,20 @@ fastq-dl --accession "${ACCESSION}" \\
 ########################################
 METADATA_FILENAME="${ACCESSION}-run-info.tsv"
 ORIG_METADATA_FILE="\${FASTQ_DIR}/\${METADATA_FILENAME}"
-ALL_METADATA_FILE="\${WORKDIR}/metadata/all_fastq_run_info.tsv"
+ALL_METADATA_FILE="${WORKDIR}/metadata/all_fastq_run_info.tsv"
 
 if [[ -f "\${ORIG_METADATA_FILE}" ]]; then
     echo "🔹 Moving metadata file to metadata/ folder."
-    mv "\${ORIG_METADATA_FILE}" "\${WORKDIR}/metadata/"
+    mv "\${ORIG_METADATA_FILE}" "${WORKDIR}/metadata/"
     
-    # Now the metadata file is at: \${WORKDIR}/metadata/\${METADATA_FILENAME}
     echo "🔹 Appending metadata to all_fastq_run_info.tsv with locking."
     (
         flock -x 200  # Acquire exclusive lock
-        cat "\${WORKDIR}/metadata/\${METADATA_FILENAME}" >> "\${ALL_METADATA_FILE}"
-    ) 200>"\${LOCK_FILE}"
+        cat "${WORKDIR}/metadata/\${METADATA_FILENAME}" >> "\${ALL_METADATA_FILE}"
+    ) 200>"${LOCK_FILE}"
     
     echo "🔹 Removing individual metadata file."
-    rm -f "\${WORKDIR}/metadata/\${METADATA_FILENAME}"
+    rm -f "${WORKDIR}/metadata/\${METADATA_FILENAME}"
 else
     echo "⚠️ WARNING: No metadata file found for ${ACCESSION}."
 fi
@@ -133,7 +134,7 @@ shopt -s nullglob
 ALL_FASTQS=( "\${FASTQ_DIR}"/*.fastq "\${FASTQ_DIR}"/*.fastq.gz )
 
 if [ "\${#ALL_FASTQS[@]}" -eq 0 ]; then
-    echo "❌ ERROR: No FASTQ files found for ${ACCESSION}" >> "logs/${ACCESSION}.err"
+    echo "❌ ERROR: No FASTQ files found for ${ACCESSION}" >> "${WORKDIR}/logs/${ACCESSION}.err"
     exit 1
 fi
 
@@ -147,12 +148,11 @@ for FILE in "\${FASTQ_DIR}"/*.fastq; do
     fi
 done
 
-# Re-check if gzipped FASTQs exist
 shopt -s nullglob
 ALL_GZ_FASTQS=( "\${FASTQ_DIR}"/*.fastq.gz )
 
 if [ "\${#ALL_GZ_FASTQS[@]}" -eq 0 ]; then
-    echo "❌ ERROR: No gzipped FASTQ files found for ${ACCESSION}, skipping completion record." >> "logs/${ACCESSION}.err"
+    echo "❌ ERROR: No gzipped FASTQ files found for ${ACCESSION}, skipping completion record." >> "${WORKDIR}/logs/${ACCESSION}.err"
     exit 1
 fi
 
@@ -161,8 +161,8 @@ fi
 ########################################
 (
     flock -x 200
-    echo "${ACCESSION}" >> "\${CHECKPOINT_FILE}"
-) 200>"\${LOCK_FILE}"
+    echo "${ACCESSION}" >> "${CHECKPOINT_FILE}"
+) 200>"${LOCK_FILE}"
 
 ########################################
 # Delete .sra if present
@@ -177,8 +177,8 @@ fi
 # Clean up logs if everything is fine
 ########################################
 echo "✅ Successfully downloaded and gzipped FASTQ files for ${ACCESSION}."
-rm -f "logs/\${ACCESSION}.out" "logs/\${ACCESSION}.err"
-rm -f "jobs/download_${ACCESSION}.sh"
+rm -f "${WORKDIR}/logs/${ACCESSION}.out" "${WORKDIR}/logs/${ACCESSION}.err"
+rm -f "${JOB_SCRIPT}"
 EOF
 
     chmod +x "$JOB_SCRIPT"
@@ -195,12 +195,12 @@ EOF
     #######################################
     if [[ $COUNT -ge $BATCH_SIZE ]]; then
         echo "⏳ Waiting for batch of $BATCH_SIZE jobs to complete..."
-        while [ "\$(squeue --format="%j" -u \$USER | grep -c "fastq_")" -ge "$BATCH_SIZE" ]; do
+        while [ "$(squeue --format="%j" -u $USER | grep -c "fastq_")" -ge "$BATCH_SIZE" ]; do
             sleep 60
         done
         COUNT=0
     fi
 
-done < run_accessions.txt
+done < "${WORKDIR}/run_accessions.txt"
 
 echo "🎉 All $TOTAL_JOBS jobs submitted!"
