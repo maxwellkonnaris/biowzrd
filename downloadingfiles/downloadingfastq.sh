@@ -149,6 +149,7 @@ fi
 echo "✅ Finished ${ACCESSION}."
 
 rm -f "logs/${ACCESSION}.out" "logs/${ACCESSION}.err"
+rm -f "jobs/download_${ACCESSION}.sh"
 EOF
 
     chmod +x "$JOB_SCRIPT"
