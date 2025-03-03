@@ -77,7 +77,10 @@ while read -r ACCESSION; do
     #######################################
     JOB_SCRIPT="jobs/download_${ACCESSION}.sh"
     PROVIDER=$(get_provider "${ACCESSION}")
-
+    if [[ -z "$PROVIDER" ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') ⏩ Skipping ${ACCESSION}: Invalid or unsupported accession type." >> logs/skipped_accessions.log
+        continue  # Skip processing if accession is invalid
+    fi
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
