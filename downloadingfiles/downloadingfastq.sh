@@ -9,14 +9,22 @@
 
 # Number of jobs to submit at a time
 BATCH_SIZE=50
-CHECKPOINT_FILE="completed_accessions.txt"
-LOCK_FILE="checkpoint.lock"
+
+# Use absolute paths where possible
+WORKDIR="$(pwd)"
+CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
+LOCK_FILE="${WORKDIR}/checkpoint.lock"
+RUN_INFO_LOCK_FILE="${WORKDIR}/run_info.lock"
+ALL_RUN_INFO_FILE="${WORKDIR}/metadata/all_fastq_run_info.tsv"
 
 # Create required directories
 mkdir -p jobs logs fastq_data metadata
 
 # Create checkpoint file if it doesn't exist
-touch "$CHECKPOINT_FILE"
+touch "${CHECKPOINT_FILE}"
+
+# Create the combined run-info file if it doesn't exist
+touch "${ALL_RUN_INFO_FILE}"
 
 # Counter for batch submission
 COUNT=0
@@ -25,15 +33,18 @@ TOTAL_JOBS=0
 # Loop through each accession in run_accessions.txt
 while read -r ACCESSION; do
 
+    # Skip empty lines
+    [[ -z "$ACCESSION" ]] && continue
+
     # Skip accessions that have already been processed
-    if grep -Fxq "${ACCESSION}" "$CHECKPOINT_FILE"; then
+    if grep -Fxq "${ACCESSION}" "${CHECKPOINT_FILE}"; then
         echo "⏩ Skipping ${ACCESSION}, already processed."
         continue
     fi
 
     JOB_SCRIPT="jobs/download_${ACCESSION}.sh"
 
-    # Create individual SLURM job script for each accession
+    # Create the individual SLURM job script
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
@@ -44,10 +55,18 @@ while read -r ACCESSION; do
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-FASTQ_DIR="fastq_data"
-METADATA_DIR="metadata/"
+########################
+# Absolute paths
+########################
+CHECKPOINT_FILE="${CHECKPOINT_FILE}"
+LOCK_FILE="${LOCK_FILE}"
+RUN_INFO_LOCK_FILE="${RUN_INFO_LOCK_FILE}"
+ALL_RUN_INFO_FILE="${ALL_RUN_INFO_FILE}"
 
-mkdir -p \${FASTQ_DIR} \${METADATA_DIR}
+FASTQ_DIR="${WORKDIR}/fastq_data"
+METADATA_DIR="${WORKDIR}/metadata"
+
+mkdir -p "\${FASTQ_DIR}" "\${METADATA_DIR}"
 
 # Detect provider: ENA or SRA
 PROVIDER="ena"  # Default to ENA
@@ -55,41 +74,64 @@ if [[ "${ACCESSION}" == SRR* || "${ACCESSION}" == ERR* || "${ACCESSION}" == DRR*
     PROVIDER="sra"
 fi
 
-# Download FASTQ files with retries
 echo "🔹 Downloading ${ACCESSION} from \${PROVIDER}"
 for attempt in {1..3}; do
-    fastq-dl -a ${ACCESSION} --provider \${PROVIDER} --cpus 4 -o \${FASTQ_DIR} && break
+    fastq-dl -a ${ACCESSION} --provider "\${PROVIDER}" --cpus 4 -o "\${FASTQ_DIR}" && break
     echo "⚠️ Attempt \$attempt failed for ${ACCESSION}, retrying in 60 seconds..."
     sleep 60
 done
 
-# Ensure FASTQ files exist before proceeding
-if ! ls \${FASTQ_DIR}/${ACCESSION}*.fastq* &>/dev/null; then
-    echo "❌ ERROR: Download failed for ${ACCESSION}" >> logs/${ACCESSION}.err
+# Verify FASTQ files were produced
+if ! ls "\${FASTQ_DIR}/${ACCESSION}"*.fastq* &>/dev/null; then
+    echo "❌ ERROR: Download failed for ${ACCESSION}" >> "logs/${ACCESSION}.err"
     exit 1
 fi
 
-# Move metadata JSON file to metadata folder
-mv \${FASTQ_DIR}/${ACCESSION}.metadata.json \${METADATA_DIR}/ 2>/dev/null || echo "⚠️ No metadata file found for ${ACCESSION}"
-
-# Ensure all FASTQ files are gzipped
-for FILE in \${FASTQ_DIR}/${ACCESSION}*.fastq; do
+# Gzip any uncompressed FASTQs
+for FILE in "\${FASTQ_DIR}/${ACCESSION}"*.fastq; do
     if [[ -f "\$FILE" && "\$FILE" != *.gz ]]; then
         echo "🔹 Gzipping: \$FILE"
         gzip "\$FILE"
     fi
 done
 
-# Locking mechanism to prevent race condition in checkpointing
+########################
+# Move & rename run-info
+########################
+# By default, fastq-dl writes "fastq-run-info.tsv" in the output directory.
+# So rename it to avoid overwriting across different accessions.
+if [[ -f "\${FASTQ_DIR}/fastq-run-info.tsv" ]]; then
+    RUN_INFO_FILE="\${METADATA_DIR}/${ACCESSION}.fastq-run-info.tsv"
+    mv "\${FASTQ_DIR}/fastq-run-info.tsv" "\$RUN_INFO_FILE"
+
+    # Append to the combined file (all_fastq_run_info.tsv), with a lock
+    (
+       flock -x 300
+       cat "\$RUN_INFO_FILE" >> "\$ALL_RUN_INFO_FILE"
+    ) 300>"\${RUN_INFO_LOCK_FILE}"
+fi
+
+########################
+# Move metadata JSON
+########################
+# Move the metadata JSON file to the metadata folder (may not exist for every provider)
+if [[ -f "\${FASTQ_DIR}/${ACCESSION}.metadata.json" ]]; then
+    mv "\${FASTQ_DIR}/${ACCESSION}.metadata.json" "\${METADATA_DIR}/"
+else
+    echo "⚠️ No metadata JSON found for ${ACCESSION}"
+fi
+
+########################
+# Record in checkpoint
+########################
 (
     flock -x 200
-    echo "${ACCESSION}" >> "$CHECKPOINT_FILE"
-) 200>"$LOCK_FILE"
+    echo "${ACCESSION}" >> "\${CHECKPOINT_FILE}"
+) 200>"\${LOCK_FILE}"
 
-echo "✅ Finished ${ACCESSION}, metadata stored in \${METADATA_DIR}/${ACCESSION}.metadata.json"
+echo "✅ Finished ${ACCESSION}, run-info in \${METADATA_DIR}/${ACCESSION}.fastq-run-info.tsv"
 EOF
 
-    # Make script executable
     chmod +x "$JOB_SCRIPT"
 
     # Submit the job
@@ -99,13 +141,13 @@ EOF
     COUNT=$((COUNT + 1))
     TOTAL_JOBS=$((TOTAL_JOBS + 1))
 
-    # Wait if too many jobs are in the queue
+    # If we’ve hit the batch size, wait until the queue has fewer jobs
     if [[ $COUNT -ge $BATCH_SIZE ]]; then
         echo "⏳ Waiting for batch of $BATCH_SIZE jobs to complete..."
-        while [[ $(squeue --format="%j" -u $USER | grep -c "fastq_") -ge $BATCH_SIZE ]]; do
-            sleep 60  # Check job queue every 60 seconds
+        while [[ \$(squeue --format="%j" -u $USER | grep -c "fastq_") -ge $BATCH_SIZE ]]; do
+            sleep 60
         done
-        COUNT=0  # Reset counter after batch completes
+        COUNT=0
     fi
 
 done < run_accessions.txt
