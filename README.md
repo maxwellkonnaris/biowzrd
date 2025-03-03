@@ -49,4 +49,5 @@ Packages required: aws (see download script for linux)
 
 ## MGnify (MGnify/)
 1. Download the metadata to obtain sample ids. You can specify the query further to obtain either shotgun metagenomic, 16s/18s/ITS amplicon sequence metadata which is outputted in CSV format. (python fetch_mgnify_samples.py)
-2. Use the sample accession to download the sequencing files.
+2. Obtain the unique accessions or sample IDs to generate the output for downloadingfastq.sh
+3. Use the sample accession to download the sequencing files with downloadingfastq.sh
