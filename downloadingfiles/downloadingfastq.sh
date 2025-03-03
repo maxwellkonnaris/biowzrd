@@ -73,7 +73,7 @@ fi
 
 echo "🔹 Downloading ${ACCESSION} from \${PROVIDER}"
 
-# We use --prefix to ensure each run-info file is named uniquely, e.g. "SRS123-run-info.tsv"
+# We use --prefix so each run-info file is named uniquely: e.g. "SRS123-run-info.tsv"
 for attempt in {1..3}; do
     fastq-dl --accession "${ACCESSION}" \\
              --provider "\${PROVIDER}" \\
@@ -89,8 +89,6 @@ done
 ########################################
 # Verify that at least one FASTQ exists
 ########################################
-# Because a sample accession (SRS...) can map to multiple SRR files,
-# we just check that at least 1 .fastq or .fastq.gz was downloaded.
 shopt -s nullglob
 ALL_FASTQS=( "\${FASTQ_DIR}"/*.fastq "\${FASTQ_DIR}"/*.fastq.gz )
 if [ "\${#ALL_FASTQS[@]}" -eq 0 ]; then
@@ -123,16 +121,17 @@ if [[ -f "\$RUN_INFO_FILE" ]]; then
        flock -x 300
        cat "\$NEW_RUN_INFO" >> "\$ALL_RUN_INFO_FILE"
     ) 300>"\${RUN_INFO_LOCK_FILE}"
+
+    # Remove now that it's merged
+    rm -f "\$NEW_RUN_INFO"
 else
-    echo "⚠️ No run-info TSV found for ${ACCESSION}. Possibly a single-run SRA with no separate file?"
+    echo "⚠️ No run-info TSV found for ${ACCESSION}. Possibly multi-run or no separate file?"
 fi
 
 ########################################
 # Move metadata JSON(s)
 ########################################
-# fastq-dl might produce multiple JSONs if multiple runs were associated with the accession
 if compgen -G "\${FASTQ_DIR}/*.metadata.json" > /dev/null; then
-    echo "🔹 Moving JSON metadata files to \${METADATA_DIR}"
     mv "\${FASTQ_DIR}"/*.metadata.json "\${METADATA_DIR}/"
 fi
 
@@ -144,7 +143,12 @@ fi
     echo "${ACCESSION}" >> "\${CHECKPOINT_FILE}"
 ) 200>"\${LOCK_FILE}"
 
+########################################
+# All done – remove logs
+########################################
 echo "✅ Finished ${ACCESSION}."
+
+rm -f "logs/${ACCESSION}.out" "logs/${ACCESSION}.err"
 EOF
 
     chmod +x "$JOB_SCRIPT"
