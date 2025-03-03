@@ -15,14 +15,11 @@ BATCH_SIZE=50
 WORKDIR="$(pwd)"
 CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
 LOCK_FILE="${WORKDIR}/checkpoint.lock"
-RUN_INFO_LOCK_FILE="${WORKDIR}/run_info.lock"
-ALL_RUN_INFO_FILE="${WORKDIR}/metadata/all_fastq_run_info.tsv"
 
 mkdir -p jobs logs fastq_data metadata
 
-# Ensure these files exist
+# Ensure the checkpoint file exists
 touch "${CHECKPOINT_FILE}"
-touch "${ALL_RUN_INFO_FILE}"
 
 COUNT=0
 TOTAL_JOBS=0
@@ -57,13 +54,9 @@ while read -r ACCESSION; do
 # Absolute paths
 CHECKPOINT_FILE="${CHECKPOINT_FILE}"
 LOCK_FILE="${LOCK_FILE}"
-RUN_INFO_LOCK_FILE="${RUN_INFO_LOCK_FILE}"
-ALL_RUN_INFO_FILE="${ALL_RUN_INFO_FILE}"
-
 FASTQ_DIR="${WORKDIR}/fastq_data"
-METADATA_DIR="${WORKDIR}/metadata"
 
-mkdir -p "\${FASTQ_DIR}" "\${METADATA_DIR}"
+mkdir -p "\${FASTQ_DIR}"
 
 # Detect provider automatically if accession starts with SRR/ERR/DRR
 PROVIDER="ena"
@@ -71,19 +64,24 @@ if [[ "${ACCESSION}" == SRR* || "${ACCESSION}" == ERR* || "${ACCESSION}" == DRR*
     PROVIDER="sra"
 fi
 
-echo "🔹 Downloading ${ACCESSION} from \${PROVIDER}"
+# Convert SRS to SRR before downloading (if needed)
+RUN_ACCESSIONS="${ACCESSION}"
+if [[ "${ACCESSION}" == SRS* || "${ACCESSION}" == ERS* ]]; then
+    RUN_ACCESSIONS=\$(curl -ks "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ACCESSION}&result=read_run&fields=run_accession" | tail -n +2)
 
-# We use --prefix so each run-info file is named uniquely: e.g. "SRS123-run-info.tsv"
-for attempt in {1..3}; do
-    fastq-dl --accession "${ACCESSION}" \\
+    if [[ -z "\$RUN_ACCESSIONS" ]]; then
+        echo "❌ ERROR: No runs found for ${ACCESSION} (likely an SRS accession)" >> "logs/${ACCESSION}.err"
+        exit 1
+    fi
+fi
+
+echo "🔹 Downloading FASTQ files for ${ACCESSION} from \${PROVIDER}"
+
+for SRR in \$RUN_ACCESSIONS; do
+    fastq-dl --accession "\$SRR" \\
              --provider "\${PROVIDER}" \\
              --cpus 4 \\
-             --prefix "${ACCESSION}" \\
-             --outdir "\${FASTQ_DIR}" \\
-        && break
-
-    echo "⚠️ Attempt \$attempt failed for ${ACCESSION}, retrying in 60 seconds..."
-    sleep 60
+             --outdir "\${FASTQ_DIR}"
 done
 
 ########################################
@@ -91,6 +89,7 @@ done
 ########################################
 shopt -s nullglob
 ALL_FASTQS=( "\${FASTQ_DIR}"/*.fastq "\${FASTQ_DIR}"/*.fastq.gz )
+
 if [ "\${#ALL_FASTQS[@]}" -eq 0 ]; then
     echo "❌ ERROR: No FASTQ files found for ${ACCESSION}" >> "logs/${ACCESSION}.err"
     exit 1
@@ -106,33 +105,13 @@ for FILE in "\${FASTQ_DIR}"/*.fastq; do
     fi
 done
 
-########################################
-# Move & combine run-info file(s)
-########################################
-# fastq-dl with --prefix => e.g.  SRS123-run-info.tsv
-RUN_INFO_FILE="\${FASTQ_DIR}/${ACCESSION}-run-info.tsv"
-if [[ -f "\$RUN_INFO_FILE" ]]; then
-    # Move it to metadata
-    NEW_RUN_INFO="\${METADATA_DIR}/${ACCESSION}-run-info.tsv"
-    mv "\$RUN_INFO_FILE" "\$NEW_RUN_INFO"
+# Re-check if gzipped FASTQs exist
+shopt -s nullglob
+ALL_GZ_FASTQS=( "\${FASTQ_DIR}"/*.fastq.gz )
 
-    # Append to single master file
-    (
-       flock -x 300
-       cat "\$NEW_RUN_INFO" >> "\$ALL_RUN_INFO_FILE"
-    ) 300>"\${RUN_INFO_LOCK_FILE}"
-
-    # Remove now that it's merged
-    rm -f "\$NEW_RUN_INFO"
-else
-    echo "⚠️ No run-info TSV found for ${ACCESSION}. Possibly multi-run or no separate file?"
-fi
-
-########################################
-# Move metadata JSON(s)
-########################################
-if compgen -G "\${FASTQ_DIR}/*.metadata.json" > /dev/null; then
-    mv "\${FASTQ_DIR}"/*.metadata.json "\${METADATA_DIR}/"
+if [ "\${#ALL_GZ_FASTQS[@]}" -eq 0 ]; then
+    echo "❌ ERROR: No gzipped FASTQ files found for ${ACCESSION}, skipping completion record." >> "logs/${ACCESSION}.err"
+    exit 1
 fi
 
 ########################################
@@ -144,10 +123,9 @@ fi
 ) 200>"\${LOCK_FILE}"
 
 ########################################
-# All done – remove logs
+# Clean up logs if everything is fine
 ########################################
-echo "✅ Finished ${ACCESSION}."
-
+echo "✅ Successfully downloaded and gzipped FASTQ files for ${ACCESSION}."
 rm -f "logs/${ACCESSION}.out" "logs/${ACCESSION}.err"
 rm -f "jobs/download_${ACCESSION}.sh"
 EOF
