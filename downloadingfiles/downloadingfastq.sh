@@ -2,8 +2,8 @@
 #SBATCH --job-name=fastq_download
 #SBATCH --output=logs/slurm_%A.out
 #SBATCH --error=logs/slurm_%A.err
-#SBATCH --time=24:00:00
-#SBATCH --mem=8G
+#SBATCH --time=48:00:00
+#SBATCH --mem=4G
 #SBATCH --cpus-per-task=1
 #SBATCH --ntasks=1
 
