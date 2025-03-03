@@ -10,6 +10,7 @@
 # Number of jobs to submit at a time
 BATCH_SIZE=50
 CHECKPOINT_FILE="completed_accessions.txt"
+LOCK_FILE="checkpoint.lock"
 
 # Create required directories
 mkdir -p jobs logs fastq_data metadata
@@ -48,18 +49,28 @@ METADATA_DIR="metadata/"
 
 mkdir -p \${FASTQ_DIR} \${METADATA_DIR}
 
-# Check provider type: ENA or SRA
+# Detect provider: ENA or SRA
 PROVIDER="ena"  # Default to ENA
-
 if [[ "${ACCESSION}" == SRR* || "${ACCESSION}" == ERR* || "${ACCESSION}" == DRR* ]]; then
     PROVIDER="sra"
 fi
 
-# Download FASTQ files with 4 threads and retries
-fastq-dl -a ${ACCESSION} --provider \${PROVIDER} --cpus 4 -o \${FASTQ_DIR}
+# Download FASTQ files with retries
+echo "🔹 Downloading ${ACCESSION} from \${PROVIDER}"
+for attempt in {1..3}; do
+    fastq-dl -a ${ACCESSION} --provider \${PROVIDER} --cpus 4 -o \${FASTQ_DIR} && break
+    echo "⚠️ Attempt \$attempt failed for ${ACCESSION}, retrying in 60 seconds..."
+    sleep 60
+done
+
+# Ensure FASTQ files exist before proceeding
+if ! ls \${FASTQ_DIR}/${ACCESSION}*.fastq* &>/dev/null; then
+    echo "❌ ERROR: Download failed for ${ACCESSION}" >> logs/${ACCESSION}.err
+    exit 1
+fi
 
 # Move metadata JSON file to metadata folder
-mv \${FASTQ_DIR}/${ACCESSION}.metadata.json \${METADATA_DIR}/
+mv \${FASTQ_DIR}/${ACCESSION}.metadata.json \${METADATA_DIR}/ 2>/dev/null || echo "⚠️ No metadata file found for ${ACCESSION}"
 
 # Ensure all FASTQ files are gzipped
 for FILE in \${FASTQ_DIR}/${ACCESSION}*.fastq; do
@@ -69,8 +80,11 @@ for FILE in \${FASTQ_DIR}/${ACCESSION}*.fastq; do
     fi
 done
 
-# Mark this accession as completed
-echo "${ACCESSION}" >> "$CHECKPOINT_FILE"
+# Locking mechanism to prevent race condition in checkpointing
+(
+    flock -x 200
+    echo "${ACCESSION}" >> "$CHECKPOINT_FILE"
+) 200>"$LOCK_FILE"
 
 echo "✅ Finished ${ACCESSION}, metadata stored in \${METADATA_DIR}/${ACCESSION}.metadata.json"
 EOF
@@ -85,10 +99,10 @@ EOF
     COUNT=$((COUNT + 1))
     TOTAL_JOBS=$((TOTAL_JOBS + 1))
 
-    # If 50 jobs have been submitted, wait for them to finish before submitting more
+    # Wait if too many jobs are in the queue
     if [[ $COUNT -ge $BATCH_SIZE ]]; then
         echo "⏳ Waiting for batch of $BATCH_SIZE jobs to complete..."
-        while [[ $(squeue -u $USER | grep -c "fastq_") -ge $BATCH_SIZE ]]; do
+        while [[ $(squeue --format="%j" -u $USER | grep -c "fastq_") -ge $BATCH_SIZE ]]; do
             sleep 60  # Check job queue every 60 seconds
         done
         COUNT=0  # Reset counter after batch completes
@@ -97,4 +111,3 @@ EOF
 done < run_accessions.txt
 
 echo "🎉 All $TOTAL_JOBS jobs submitted!"
-
