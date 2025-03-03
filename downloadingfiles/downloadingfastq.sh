@@ -100,7 +100,30 @@ echo "🔹 Downloading FASTQ files for ${ACCESSION} using provider: ${PROVIDER}"
 fastq-dl --accession "${ACCESSION}" \\
          --provider "${PROVIDER}" \\
          --cpus 4 \\
+         --prefix "${ACCESSION}" \\
          --outdir "\${FASTQ_DIR}"
+
+########################################
+# Move metadata file and append to all_fastq_run_info.tsv
+########################################
+METADATA_FILE="${ACCESSION}-run-info.tsv"
+ALL_METADATA_FILE="metadata/all_fastq_run_info.tsv"
+
+if [[ -f "\${METADATA_FILE}" ]]; then
+    echo "🔹 Moving metadata file to metadata directory."
+    mv "\${METADATA_FILE}" metadata/
+    
+    echo "🔹 Appending metadata to all_fastq_run_info.tsv with locking."
+    (
+        flock -x 200  # Acquire exclusive lock
+        cat "metadata/\${METADATA_FILE}" >> "\${ALL_METADATA_FILE}"
+    ) 200>"\${LOCK_FILE}"  # Lock on a dedicated file
+    
+    echo "🔹 Removing individual metadata file."
+    rm -f "metadata/\${METADATA_FILE}"
+else
+    echo "⚠️ WARNING: No metadata file found for ${ACCESSION}."
+fi
 
 ########################################
 # Verify that at least one FASTQ exists
