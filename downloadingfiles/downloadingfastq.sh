@@ -18,11 +18,46 @@ LOCK_FILE="${WORKDIR}/checkpoint.lock"
 
 mkdir -p jobs logs fastq_data metadata
 
-# Ensure the checkpoint file exists
+# Ensure checkpoint file exists
 touch "${CHECKPOINT_FILE}"
 
 COUNT=0
 TOTAL_JOBS=0
+
+#######################################
+# Function to Determine the Correct Provider
+#######################################
+get_provider() {
+    ACCESSION=$1
+    PREFIX=${ACCESSION:0:3}
+
+    case "$PREFIX" in
+        SRR) echo "sra" ;;  # NCBI SRA Run
+        ERR|DRR) echo "ena" ;;  # ENA/DRR Run (European/Japanese)
+
+        SRX) echo "sra" ;;  # SRA Experiment
+        ERX|DRX) echo "ena" ;;  # ENA/DRX Experiment
+
+        SRS) echo "sra" ;;  # SRA Sample
+        ERS|DRS) echo "ena" ;;  # ENA Sample
+
+        SRP) echo "sra" ;;  # SRA Study
+        ERP|DRP) echo "ena" ;;  # ENA/DRP Study
+
+        PRJ) 
+            echo "❌ ERROR: BioProject accessions (PRJ...) must be resolved to Studies (SRP/ERP/DRP) first." >> "logs/$ACCESSION.err"
+            exit 1
+            ;;
+        SAM) 
+            echo "❌ ERROR: BioSample accessions (SAM...) must be resolved to Samples (SRS/ERS/DRS) first." >> "logs/$ACCESSION.err"
+            exit 1
+            ;;
+        *)
+            echo "❌ ERROR: Unknown accession type: $ACCESSION" >> "logs/$ACCESSION.err"
+            exit 1
+            ;;
+    esac
+}
 
 #######################################
 # Iterate over run_accessions.txt
@@ -41,6 +76,8 @@ while read -r ACCESSION; do
     # Create an individual job script
     #######################################
     JOB_SCRIPT="jobs/download_${ACCESSION}.sh"
+    PROVIDER=$(get_provider "${ACCESSION}")
+
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
@@ -58,31 +95,12 @@ FASTQ_DIR="${WORKDIR}/fastq_data"
 
 mkdir -p "\${FASTQ_DIR}"
 
-# Detect provider automatically if accession starts with SRR/ERR/DRR
-PROVIDER="ena"
-if [[ "${ACCESSION}" == SRR* || "${ACCESSION}" == ERR* || "${ACCESSION}" == DRR* ]]; then
-    PROVIDER="sra"
-fi
+echo "🔹 Downloading FASTQ files for ${ACCESSION} using provider: ${PROVIDER}"
 
-# Convert SRS to SRR before downloading (if needed)
-RUN_ACCESSIONS="${ACCESSION}"
-if [[ "${ACCESSION}" == SRS* || "${ACCESSION}" == ERS* ]]; then
-    RUN_ACCESSIONS=\$(curl -ks "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ACCESSION}&result=read_run&fields=run_accession" | tail -n +2)
-
-    if [[ -z "\$RUN_ACCESSIONS" ]]; then
-        echo "❌ ERROR: No runs found for ${ACCESSION} (likely an SRS accession)" >> "logs/${ACCESSION}.err"
-        exit 1
-    fi
-fi
-
-echo "🔹 Downloading FASTQ files for ${ACCESSION} from \${PROVIDER}"
-
-for SRR in \$RUN_ACCESSIONS; do
-    fastq-dl --accession "\$SRR" \\
-             --provider "\${PROVIDER}" \\
-             --cpus 4 \\
-             --outdir "\${FASTQ_DIR}"
-done
+fastq-dl --accession "${ACCESSION}" \\
+         --provider "${PROVIDER}" \\
+         --cpus 4 \\
+         --outdir "\${FASTQ_DIR}"
 
 ########################################
 # Verify that at least one FASTQ exists
