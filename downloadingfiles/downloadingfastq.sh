@@ -94,9 +94,7 @@ while read -r ACCESSION; do
 # Absolute paths
 CHECKPOINT_FILE="${CHECKPOINT_FILE}"
 LOCK_FILE="${LOCK_FILE}"
-FASTQ_DIR="${WORKDIR}/fastq_data"
-
-mkdir -p "\${FASTQ_DIR}"
+FASTQ_DIR="\${WORKDIR}/fastq_data"
 
 echo "🔹 Downloading FASTQ files for ${ACCESSION} using provider: ${PROVIDER}"
 
@@ -109,21 +107,21 @@ fastq-dl --accession "${ACCESSION}" \\
 ########################################
 # Move metadata file and append to all_fastq_run_info.tsv
 ########################################
-METADATA_FILE="${ACCESSION}-run-info.tsv"
-ALL_METADATA_FILE="metadata/all_fastq_run_info.tsv"
+METADATA_FILE="\${FASTQ_DIR}/\${ACCESSION}-run-info.tsv"
+ALL_METADATA_FILE="\${WORKDIR}/metadata/all_fastq_run_info.tsv"
 
 if [[ -f "\${METADATA_FILE}" ]]; then
     echo "🔹 Moving metadata file to metadata directory."
-    mv "\${METADATA_FILE}" metadata/
+    mv "\${METADATA_FILE}" "\${WORKDIR}/metadata/"
     
     echo "🔹 Appending metadata to all_fastq_run_info.tsv with locking."
     (
         flock -x 200  # Acquire exclusive lock
-        cat "metadata/\${METADATA_FILE}" >> "\${ALL_METADATA_FILE}"
+        cat "\${WORKDIR}/metadata/\${METADATA_FILE}" >> "\${ALL_METADATA_FILE}"
     ) 200>"\${LOCK_FILE}"  # Lock on a dedicated file
     
     echo "🔹 Removing individual metadata file."
-    rm -f "metadata/\${METADATA_FILE}"
+    rm -f "\${WORKDIR}/metadata/\${METADATA_FILE}"
 else
     echo "⚠️ WARNING: No metadata file found for ${ACCESSION}."
 fi
@@ -170,8 +168,9 @@ fi
 # Clean up logs if everything is fine
 ########################################
 echo "✅ Successfully downloaded and gzipped FASTQ files for ${ACCESSION}."
-rm -f "logs/${ACCESSION}.out" "logs/${ACCESSION}.err"
+rm -f "logs/\${ACCESSION}.out" "logs/\${ACCESSION}.err"
 rm -f "jobs/download_${ACCESSION}.sh"
+rm -f "fastq_data/\${ACCESSION}.sra"
 EOF
 
     chmod +x "$JOB_SCRIPT"
