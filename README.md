@@ -57,7 +57,7 @@ Packages required: aws (see download script for linux)
 2. Obtain the unique accessions or sample IDs to generate the output for downloadingfastq.sh
 
 ```bash
-awk -F'\t' 'NR>1 && !seen[$1]++ {print $5}' mgnify_samples_16s-rrna-gene-amplicon.csv > studies.txt
+awk -F',' 'NR>1 && !seen[$1]++ {print $5}' mgnify_samples_16s-rrna-gene-amplicon.csv > studies.txt
 ```
    
 4. Use the sample accession to download the sequencing files with downloadingfastq.sh
