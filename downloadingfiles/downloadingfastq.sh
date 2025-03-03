@@ -7,44 +7,43 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --ntasks=1
 
-# Number of jobs to submit at a time
+#######################################
+# Configuration
+#######################################
 BATCH_SIZE=50
 
-# Use absolute paths where possible
 WORKDIR="$(pwd)"
 CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
 LOCK_FILE="${WORKDIR}/checkpoint.lock"
 RUN_INFO_LOCK_FILE="${WORKDIR}/run_info.lock"
 ALL_RUN_INFO_FILE="${WORKDIR}/metadata/all_fastq_run_info.tsv"
 
-# Create required directories
 mkdir -p jobs logs fastq_data metadata
 
-# Create checkpoint file if it doesn't exist
+# Ensure these files exist
 touch "${CHECKPOINT_FILE}"
-
-# Create the combined run-info file if it doesn't exist
 touch "${ALL_RUN_INFO_FILE}"
 
-# Counter for batch submission
 COUNT=0
 TOTAL_JOBS=0
 
-# Loop through each accession in run_accessions.txt
+#######################################
+# Iterate over run_accessions.txt
+#######################################
 while read -r ACCESSION; do
-
     # Skip empty lines
     [[ -z "$ACCESSION" ]] && continue
 
-    # Skip accessions that have already been processed
+    # Check if ACCESSION is already done
     if grep -Fxq "${ACCESSION}" "${CHECKPOINT_FILE}"; then
         echo "⏩ Skipping ${ACCESSION}, already processed."
         continue
     fi
 
+    #######################################
+    # Create an individual job script
+    #######################################
     JOB_SCRIPT="jobs/download_${ACCESSION}.sh"
-
-    # Create the individual SLURM job script
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
@@ -55,9 +54,7 @@ while read -r ACCESSION; do
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-########################
 # Absolute paths
-########################
 CHECKPOINT_FILE="${CHECKPOINT_FILE}"
 LOCK_FILE="${LOCK_FILE}"
 RUN_INFO_LOCK_FILE="${RUN_INFO_LOCK_FILE}"
@@ -68,83 +65,103 @@ METADATA_DIR="${WORKDIR}/metadata"
 
 mkdir -p "\${FASTQ_DIR}" "\${METADATA_DIR}"
 
-# Detect provider: ENA or SRA
-PROVIDER="ena"  # Default to ENA
+# Detect provider automatically if accession starts with SRR/ERR/DRR
+PROVIDER="ena"
 if [[ "${ACCESSION}" == SRR* || "${ACCESSION}" == ERR* || "${ACCESSION}" == DRR* ]]; then
     PROVIDER="sra"
 fi
 
 echo "🔹 Downloading ${ACCESSION} from \${PROVIDER}"
+
+# We use --prefix to ensure each run-info file is named uniquely, e.g. "SRS123-run-info.tsv"
 for attempt in {1..3}; do
-    fastq-dl -a ${ACCESSION} --provider "\${PROVIDER}" --cpus 4 -o "\${FASTQ_DIR}" && break
+    fastq-dl --accession "${ACCESSION}" \\
+             --provider "\${PROVIDER}" \\
+             --cpus 4 \\
+             --prefix "${ACCESSION}" \\
+             --outdir "\${FASTQ_DIR}" \\
+        && break
+
     echo "⚠️ Attempt \$attempt failed for ${ACCESSION}, retrying in 60 seconds..."
     sleep 60
 done
 
-# Verify FASTQ files were produced
-if ! ls "\${FASTQ_DIR}/${ACCESSION}"*.fastq* &>/dev/null; then
-    echo "❌ ERROR: Download failed for ${ACCESSION}" >> "logs/${ACCESSION}.err"
+########################################
+# Verify that at least one FASTQ exists
+########################################
+# Because a sample accession (SRS...) can map to multiple SRR files,
+# we just check that at least 1 .fastq or .fastq.gz was downloaded.
+shopt -s nullglob
+ALL_FASTQS=( "\${FASTQ_DIR}"/*.fastq "\${FASTQ_DIR}"/*.fastq.gz )
+if [ "\${#ALL_FASTQS[@]}" -eq 0 ]; then
+    echo "❌ ERROR: No FASTQ files found for ${ACCESSION}" >> "logs/${ACCESSION}.err"
     exit 1
 fi
 
-# Gzip any uncompressed FASTQs
-for FILE in "\${FASTQ_DIR}/${ACCESSION}"*.fastq; do
+########################################
+# Ensure all FASTQs are gzipped
+########################################
+for FILE in "\${FASTQ_DIR}"/*.fastq; do
     if [[ -f "\$FILE" && "\$FILE" != *.gz ]]; then
         echo "🔹 Gzipping: \$FILE"
         gzip "\$FILE"
     fi
 done
 
-########################
-# Move & rename run-info
-########################
-# By default, fastq-dl writes "fastq-run-info.tsv" in the output directory.
-# So rename it to avoid overwriting across different accessions.
-if [[ -f "\${FASTQ_DIR}/fastq-run-info.tsv" ]]; then
-    RUN_INFO_FILE="\${METADATA_DIR}/${ACCESSION}.fastq-run-info.tsv"
-    mv "\${FASTQ_DIR}/fastq-run-info.tsv" "\$RUN_INFO_FILE"
+########################################
+# Move & combine run-info file(s)
+########################################
+# fastq-dl with --prefix => e.g.  SRS123-run-info.tsv
+RUN_INFO_FILE="\${FASTQ_DIR}/${ACCESSION}-run-info.tsv"
+if [[ -f "\$RUN_INFO_FILE" ]]; then
+    # Move it to metadata
+    NEW_RUN_INFO="\${METADATA_DIR}/${ACCESSION}-run-info.tsv"
+    mv "\$RUN_INFO_FILE" "\$NEW_RUN_INFO"
 
-    # Append to the combined file (all_fastq_run_info.tsv), with a lock
+    # Append to single master file
     (
        flock -x 300
-       cat "\$RUN_INFO_FILE" >> "\$ALL_RUN_INFO_FILE"
+       cat "\$NEW_RUN_INFO" >> "\$ALL_RUN_INFO_FILE"
     ) 300>"\${RUN_INFO_LOCK_FILE}"
-fi
-
-########################
-# Move metadata JSON
-########################
-# Move the metadata JSON file to the metadata folder (may not exist for every provider)
-if [[ -f "\${FASTQ_DIR}/${ACCESSION}.metadata.json" ]]; then
-    mv "\${FASTQ_DIR}/${ACCESSION}.metadata.json" "\${METADATA_DIR}/"
 else
-    echo "⚠️ No metadata JSON found for ${ACCESSION}"
+    echo "⚠️ No run-info TSV found for ${ACCESSION}. Possibly a single-run SRA with no separate file?"
 fi
 
-########################
-# Record in checkpoint
-########################
+########################################
+# Move metadata JSON(s)
+########################################
+# fastq-dl might produce multiple JSONs if multiple runs were associated with the accession
+if compgen -G "\${FASTQ_DIR}/*.metadata.json" > /dev/null; then
+    echo "🔹 Moving JSON metadata files to \${METADATA_DIR}"
+    mv "\${FASTQ_DIR}"/*.metadata.json "\${METADATA_DIR}/"
+fi
+
+########################################
+# Record success in checkpoint
+########################################
 (
     flock -x 200
     echo "${ACCESSION}" >> "\${CHECKPOINT_FILE}"
 ) 200>"\${LOCK_FILE}"
 
-echo "✅ Finished ${ACCESSION}, run-info in \${METADATA_DIR}/${ACCESSION}.fastq-run-info.tsv"
+echo "✅ Finished ${ACCESSION}."
 EOF
 
     chmod +x "$JOB_SCRIPT"
 
-    # Submit the job
+    # Submit job
     sbatch "$JOB_SCRIPT"
     echo "✅ Submitted job for ${ACCESSION}"
 
     COUNT=$((COUNT + 1))
     TOTAL_JOBS=$((TOTAL_JOBS + 1))
 
-    # If we’ve hit the batch size, wait until the queue has fewer jobs
+    #######################################
+    # Batch queue limit
+    #######################################
     if [[ $COUNT -ge $BATCH_SIZE ]]; then
         echo "⏳ Waiting for batch of $BATCH_SIZE jobs to complete..."
-        while [[ \$(squeue --format="%j" -u $USER | grep -c "fastq_") -ge $BATCH_SIZE ]]; do
+        while [ "$(squeue --format="%j" -u $USER | grep -c "fastq_")" -ge "$BATCH_SIZE" ]; do
             sleep 60
         done
         COUNT=0
