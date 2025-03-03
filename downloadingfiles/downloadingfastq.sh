@@ -10,7 +10,7 @@
 #######################################
 # Configuration
 #######################################
-BATCH_SIZE=50
+BATCH_SIZE=75
 
 WORKDIR="$(pwd)"
 CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
