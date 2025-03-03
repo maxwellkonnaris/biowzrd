@@ -28,6 +28,11 @@ Packages required: NCBI toolkit, fastq-dl
    - this will give you a list of all of the run accessions in the bioproject
 3. run binary file downloadingfastq.sh
 
+If you wanted to obtain the full SRA metadata (1.6GB as of 3/2/25):
+```bash
+search -db sra -query "16S[All Fields] AND amplicon[Strategy]" | efetch -format runinfo > sra_16s_metadata.csv
+```
+
 ## Quality control (nonassemblyQC/ or assemblyQC/)
 Packages required: fastp
 1. Perform absolute minimal quality control from publicly available sequences. This is with the assumption that host reads and adapters, if not paired-end sequences, are removed. In NCBI SRA see this statement: https://www.ncbi.nlm.nih.gov/sra/docs/submit/ for Metagenomic data. 
