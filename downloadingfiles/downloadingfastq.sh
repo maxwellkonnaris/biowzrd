@@ -34,21 +34,17 @@ get_provider() {
     case "$PREFIX" in
         SRR) echo "sra" ;;  # NCBI SRA Run
         ERR|DRR) echo "ena" ;;  # ENA/DRR Run (European/Japanese)
-
         SRX) echo "sra" ;;  # SRA Experiment
         ERX|DRX) echo "ena" ;;  # ENA/DRX Experiment
-
         SRS) echo "sra" ;;  # SRA Sample
         ERS|DRS) echo "ena" ;;  # ENA Sample
-
         SRP) echo "sra" ;;  # SRA Study
         ERP|DRP) echo "ena" ;;  # ENA/DRP Study
-
-        PRJ) 
+        PRJ)
             echo "❌ ERROR: BioProject accessions (PRJ...) must be resolved to Studies (SRP/ERP/DRP) first." >> "logs/$ACCESSION.err"
             exit 1
             ;;
-        SAM) 
+        SAM)
             echo "❌ ERROR: BioSample accessions (SAM...) must be resolved to Samples (SRS/ERS/DRS) first." >> "logs/$ACCESSION.err"
             exit 1
             ;;
@@ -81,6 +77,7 @@ while read -r ACCESSION; do
         echo "$(date '+%Y-%m-%d %H:%M:%S') ⏩ Skipping ${ACCESSION}: Invalid or unsupported accession type." >> logs/skipped_accessions.log
         continue  # Skip processing if accession is invalid
     fi
+    
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
@@ -91,7 +88,8 @@ while read -r ACCESSION; do
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-# Absolute paths
+# We capture WORKDIR from the environment so we can reference it within the script
+WORKDIR="${WORKDIR}"
 CHECKPOINT_FILE="${CHECKPOINT_FILE}"
 LOCK_FILE="${LOCK_FILE}"
 FASTQ_DIR="\${WORKDIR}/fastq_data"
@@ -107,21 +105,23 @@ fastq-dl --accession "${ACCESSION}" \\
 ########################################
 # Move metadata file and append to all_fastq_run_info.tsv
 ########################################
-METADATA_FILE="\${FASTQ_DIR}/\${ACCESSION}-run-info.tsv"
+METADATA_FILENAME="${ACCESSION}-run-info.tsv"
+ORIG_METADATA_FILE="\${FASTQ_DIR}/\${METADATA_FILENAME}"
 ALL_METADATA_FILE="\${WORKDIR}/metadata/all_fastq_run_info.tsv"
 
-if [[ -f "\${METADATA_FILE}" ]]; then
-    echo "🔹 Moving metadata file to metadata directory."
-    mv "\${METADATA_FILE}" "\${WORKDIR}/metadata/"
+if [[ -f "\${ORIG_METADATA_FILE}" ]]; then
+    echo "🔹 Moving metadata file to metadata/ folder."
+    mv "\${ORIG_METADATA_FILE}" "\${WORKDIR}/metadata/"
     
+    # Now the metadata file is at: \${WORKDIR}/metadata/\${METADATA_FILENAME}
     echo "🔹 Appending metadata to all_fastq_run_info.tsv with locking."
     (
         flock -x 200  # Acquire exclusive lock
-        cat "\${WORKDIR}/metadata/\${METADATA_FILE}" >> "\${ALL_METADATA_FILE}"
-    ) 200>"\${LOCK_FILE}"  # Lock on a dedicated file
+        cat "\${WORKDIR}/metadata/\${METADATA_FILENAME}" >> "\${ALL_METADATA_FILE}"
+    ) 200>"\${LOCK_FILE}"
     
     echo "🔹 Removing individual metadata file."
-    rm -f "\${WORKDIR}/metadata/\${METADATA_FILE}"
+    rm -f "\${WORKDIR}/metadata/\${METADATA_FILENAME}"
 else
     echo "⚠️ WARNING: No metadata file found for ${ACCESSION}."
 fi
@@ -165,12 +165,20 @@ fi
 ) 200>"\${LOCK_FILE}"
 
 ########################################
+# Delete .sra if present
+########################################
+SRA_FILE="\${FASTQ_DIR}/${ACCESSION}.sra"
+if [[ -f "\${SRA_FILE}" ]]; then
+    echo "🔹 Removing leftover .sra file: \${SRA_FILE}"
+    rm -f "\${SRA_FILE}"
+fi
+
+########################################
 # Clean up logs if everything is fine
 ########################################
 echo "✅ Successfully downloaded and gzipped FASTQ files for ${ACCESSION}."
 rm -f "logs/\${ACCESSION}.out" "logs/\${ACCESSION}.err"
 rm -f "jobs/download_${ACCESSION}.sh"
-rm -f "fastq_data/\${ACCESSION}.sra"
 EOF
 
     chmod +x "$JOB_SCRIPT"
@@ -187,7 +195,7 @@ EOF
     #######################################
     if [[ $COUNT -ge $BATCH_SIZE ]]; then
         echo "⏳ Waiting for batch of $BATCH_SIZE jobs to complete..."
-        while [ "$(squeue --format="%j" -u $USER | grep -c "fastq_")" -ge "$BATCH_SIZE" ]; do
+        while [ "\$(squeue --format="%j" -u \$USER | grep -c "fastq_")" -ge "$BATCH_SIZE" ]; do
             sleep 60
         done
         COUNT=0
