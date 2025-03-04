@@ -64,15 +64,16 @@ search_results <- tryCatch({
 })
 
 # Check if the search returned results
-if (is.null(search_results$ids)) {
+if (is.null(search_results$count)) {
   cat("No records found. Check your query or API key.\n")
 } else {
-  total_records <- search_results$count
+  # Convert total_records to a string to avoid errors in cat()
+  total_records <- as.character(search_results$count)
   cat("Total Records Found:", total_records, "\n")
 }
 
 # If no records are found, test with a simpler query
-if (total_records == 0) {
+if (exists("total_records") && total_records == "0") {
   cat("Testing with a simpler query: 'Human Microbiome Project'\n")
   test_query <- "Human Microbiome Project"
   test_results <- tryCatch({
@@ -83,10 +84,10 @@ if (total_records == 0) {
     stop("NCBI API error: ", e$message)
   })
   
-  if (is.null(test_results$ids)) {
+  if (is.null(test_results$count)) {
     cat("No records found even with a simpler query. Check your API key or network connection.\n")
   } else {
-    cat("Test Query Records Found:", test_results$count, "\n")
+    cat("Test Query Records Found:", as.character(test_results$count), "\n")
   }
 }
 
