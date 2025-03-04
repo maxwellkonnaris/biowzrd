@@ -77,20 +77,43 @@ process_kmer() {
 # Function to process all k-mer sizes for a single sample
 process_sample() {
     SAMPLE_NAME="$1"
+    JOB_SCRIPT="logs/job_kmer_${SAMPLE_NAME}.sh"
     echo "$(date '+%Y-%m-%d %H:%M:%S') Starting processing for sample $SAMPLE_NAME" >> "$JOB_LOG"
 
-    # Process each k-mer size in parallel using GNU Parallel
-    export -f process_kmer
-    export INPUT_DIR OUTPUT_DIR THREADS HASH_SIZE MAX_RETRIES JOB_LOG
-    echo "$KMER_RANGE" | tr ' ' '\n' | parallel -j $THREADS "process_kmer '$SAMPLE_NAME' {}"
+    # Create a job script for this sample
+    cat <<EOT > "$JOB_SCRIPT"
+#!/bin/bash
+#SBATCH --job-name=kmer_${SAMPLE_NAME}
+#SBATCH --output=logs/${SAMPLE_NAME}_kmer.out
+#SBATCH --error=logs/${SAMPLE_NAME}_kmer.err
+#SBATCH --time=02:00:00
+#SBATCH --mem=8G
+#SBATCH --cpus-per-task=4
+#SBATCH --ntasks=1
 
-    # Mark the sample as completed if all k-mer sizes were processed successfully
-    if [[ $? -eq 0 ]]; then
-        echo "$SAMPLE_NAME" >> "$CHECKPOINT_FILE"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') Finished processing sample $SAMPLE_NAME" >> "$JOB_LOG"
-    else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') Some k-mer sizes failed for sample $SAMPLE_NAME. Check logs for details." >> "$JOB_LOG"
-    fi
+# Process each k-mer size in parallel using GNU Parallel
+export -f process_kmer
+export INPUT_DIR OUTPUT_DIR THREADS HASH_SIZE MAX_RETRIES JOB_LOG
+echo "$KMER_RANGE" | tr ' ' '\n' | parallel -j $THREADS "process_kmer '$SAMPLE_NAME' {}"
+
+# Mark the sample as completed if all k-mer sizes were processed successfully
+if [[ \$? -eq 0 ]]; then
+    echo "$SAMPLE_NAME" >> "$CHECKPOINT_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Finished processing sample $SAMPLE_NAME" >> "$JOB_LOG"
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Some k-mer sizes failed for sample $SAMPLE_NAME. Check logs for details." >> "$JOB_LOG"
+fi
+
+# Remove the job script after completion
+rm -f "$JOB_SCRIPT"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removed job script: $JOB_SCRIPT" >> "$JOB_LOG"
+EOT
+
+    # Make the job script executable
+    chmod +x "$JOB_SCRIPT"
+
+    # Submit the job script
+    sbatch "$JOB_SCRIPT"
 }
 
 # Get list of all FASTQ files in the input directory
@@ -124,10 +147,14 @@ if [[ $TOTAL_FILES -eq 0 ]]; then
     exit 0
 fi
 
-# Submit jobs as a job array
-echo "$(date '+%Y-%m-%d %H:%M:%S') Submitting jobs as a SLURM array..." >> "$JOB_LOG"
-sbatch --array=1-${#FILES_TO_PROCESS[@]}%$BATCH_SIZE --job-name="kmer_array" --output="$JOB_LOG" --error="$JOB_LOG" \
-    --time=02:00:00 --mem=8G --cpus-per-task=$THREADS --ntasks=1 \
-    --wrap="$(declare -f process_sample process_kmer); export INPUT_DIR OUTPUT_DIR THREADS HASH_SIZE MAX_RETRIES KMER_RANGE JOB_LOG; process_sample '${FILES_TO_PROCESS[$SLURM_ARRAY_TASK_ID - 1]}'"
+# Submit jobs in batches
+for (( i=0; i<TOTAL_FILES; i+=BATCH_SIZE )); do
+    BATCH=("${FILES_TO_PROCESS[@]:i:BATCH_SIZE}")
+    for SAMPLE in "${BATCH[@]}"; do
+        process_sample "$SAMPLE"
+    done
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Submitted batch of ${#BATCH[@]} jobs." >> "$JOB_LOG"
+    sleep 5  # Short pause to prevent overwhelming the scheduler
+done
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') All jobs submitted!" >> "$JOB_LOG"
