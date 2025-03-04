@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# KEEP IN MIND THIS IS HEAVY DOWNLOADING
+
 # Check if R is installed, install if missing
 if ! command -v R &> /dev/null; then
     echo "R is not installed. Installing R..."
