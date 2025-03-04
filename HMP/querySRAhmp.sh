@@ -8,13 +8,20 @@ fi
 
 # Create the R script to fetch metadata
 cat <<EOF > hmp_16s_query.R
+# Set CRAN mirror explicitly
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
+# Install required packages
+install.packages("rentrez", dependencies=TRUE)
+install.packages("jsonlite", dependencies=TRUE)
+install.packages("httr", dependencies=TRUE)
+install.packages("RSQLite", dependencies=TRUE)
+
 # Load necessary libraries
-install.packages("rentrez")
-install.packages("jsonlite")
-install.packages("httr")
 library(rentrez)
 library(jsonlite)
 library(httr)
+library(RSQLite)
 
 # Define search term for Human Microbiome Project
 search_term <- "Human Microbiome Project[Title] AND 16S[Title] AND Illumina[Title]"
@@ -46,9 +53,7 @@ write.csv(sra_df, "HMP_16S_Illumina.csv", row.names=FALSE)
 # Display first few rows
 print(head(sra_df))
 
-# Install and connect SQLite
-install.packages("RSQLite")
-library(RSQLite)
+# Store in SQLite
 db <- dbConnect(SQLite(), "HMP_16S_Illumina.sqlite")
 dbWriteTable(db, "sra_metadata", sra_df, overwrite=TRUE)
 dbDisconnect(db)
