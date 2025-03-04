@@ -6,71 +6,52 @@ if ! command -v R &> /dev/null; then
     conda install -y r-base
 fi
 
-# Create an R script to download SRAmetadb.sqlite and query it
+# Create the R script to fetch metadata
 cat <<EOF > hmp_16s_query.R
-# Set CRAN mirror explicitly
-options(repos = c(CRAN = "https://cloud.r-project.org/"))
+# Load necessary libraries
+install.packages("rentrez")
+install.packages("jsonlite")
+install.packages("httr")
+library(rentrez)
+library(jsonlite)
+library(httr)
 
-# Install required packages
-if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-BiocManager::install("SRAdb", ask=FALSE)
-install.packages("RSQLite", dependencies=TRUE)
+# Define search term for Human Microbiome Project
+search_term <- "Human Microbiome Project[Title] AND 16S[Title] AND Illumina[Title]"
 
-# Load libraries
-library(SRAdb)
-library(RSQLite)
+# Search SRA for matching studies
+search_results <- entrez_search(db="sra", term=search_term, retmax=500)
 
-# Define the database path
-sqlfile <- "SRAmetadb.sqlite"
+# Get details for all found IDs
+sra_metadata <- entrez_summary(db="sra", id=search_results\$ids)
 
-# Download the SRA database if it doesn't exist
-if (!file.exists(sqlfile)) {
-    message("Downloading SRAmetadb.sqlite, this may take some time...")
-    sqlfile <- getSRAdbFile()
-}
+# Convert to a dataframe
+metadata_list <- lapply(sra_metadata, function(x) data.frame(
+  Run = x\$accession,
+  Study = x\$study,
+  Title = x\$title,
+  Platform = x\$platform,
+  Strategy = x\$librarystrategy,
+  Source = x\$librarysource,
+  Layout = x\$librarylayout,
+  stringsAsFactors = FALSE
+))
 
-# Verify that the file was downloaded
-if (!file.exists(sqlfile)) {
-    stop("ERROR: Failed to download SRAmetadb.sqlite. Please check your network connection or try again later.")
-}
-
-# Connect to the SRA database
-sra_con <- dbConnect(RSQLite::SQLite(), sqlfile)
-
-# Check available tables
-tables <- dbListTables(sra_con)
-print(tables)  # Print available tables for debugging
-
-# Determine the correct table name for runs
-if ("run" %in% tables) {
-    table_name <- "run"
-} else if ("sra_run" %in% tables) {
-    table_name <- "sra_run"
-} else {
-    stop("Neither 'run' nor 'sra_run' table found in the database.")
-}
-
-# Construct SQL query dynamically
-query <- sprintf("
-SELECT %s.run_accession, %s.*, experiment.*, study.*
-FROM %s
-JOIN experiment ON %s.experiment_accession = experiment.experiment_accession
-JOIN study ON experiment.study_accession = study.study_accession
-WHERE study.study_title LIKE 'Human Microbiome Project%%'
-AND experiment.library_strategy = 'AMPLICON'
-AND experiment.platform LIKE '%%Illumina%%'", table_name, table_name, table_name, table_name)
-
-# Execute the query
-hmp_16s_illumina <- dbGetQuery(sra_con, query)
+# Combine all results into a single dataframe
+sra_df <- do.call(rbind, metadata_list)
 
 # Save results to CSV
-write.csv(hmp_16s_illumina, 'HMP_16S_Illumina.csv', row.names=FALSE)
+write.csv(sra_df, "HMP_16S_Illumina.csv", row.names=FALSE)
 
-# Show first few rows
-print(head(hmp_16s_illumina))
+# Display first few rows
+print(head(sra_df))
 
-# Disconnect from database
-dbDisconnect(sra_con)
+# Install and connect SQLite
+install.packages("RSQLite")
+library(RSQLite)
+db <- dbConnect(SQLite(), "HMP_16S_Illumina.sqlite")
+dbWriteTable(db, "sra_metadata", sra_df, overwrite=TRUE)
+dbDisconnect(db)
 EOF
 
 # Run the R script
