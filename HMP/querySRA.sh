@@ -64,7 +64,7 @@ search_results <- tryCatch({
 })
 
 # Check if the search returned results
-if (is.null(search_results$ids) {
+if (is.null(search_results$ids)) {
   cat("No records found. Check your query or API key.\n")
 } else {
   total_records <- search_results$count
