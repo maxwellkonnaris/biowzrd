@@ -49,63 +49,72 @@ search_query <- "$SEARCH_QUERY"
 db_name <- "sra"
 batch_size <- 500  # Adjustable
 delay_time <- 1  # Time delay to avoid API limits
+max_retries <- 3  # Maximum number of retries for failed batches
 
 # Perform initial search
 search_results <- tryCatch({
   entrez_search(db = db_name, term = search_query, retmax = 0, use_history = TRUE)
 }, error = function(e) {
-  stop("NCBI API error: ", e$message)
+  stop("NCBI API error: ", e\$message)
 })
 
-total_records <- search_results$count
+total_records <- search_results\$count
 cat("Total Records Found:", total_records, "\\n")
+
+# Function to fetch and parse a batch of records
+fetch_batch <- function(start, batch_size, search_results, db_name) {
+  retries <- 0
+  while (retries < max_retries) {
+    tryCatch({
+      metadata_xml <- entrez_fetch(db = db_name, web_history = search_results\$web_history, rettype = "xml", retstart = start, retmax = batch_size)
+      parsed_metadata <- read_xml(metadata_xml)
+      
+      # Extract metadata fields dynamically
+      all_nodes <- xml_find_all(parsed_metadata, "//*")  # Get all XML nodes
+      field_names <- unique(xml_name(all_nodes))  # Extract unique field names
+      
+      # Store extracted data
+      batch_data <- list()
+      for (field in field_names) {
+        batch_data[[field]] <- xml_find_all(parsed_metadata, paste0("//", field)) %>% xml_text()
+      }
+      
+      # Standardize all fields to the same length
+      max_length <- max(sapply(batch_data, length))
+      for (field in names(batch_data)) {
+        batch_data[[field]] <- c(batch_data[[field]], rep(NA, max_length - length(batch_data[[field]])))
+      }
+      
+      # Convert batch data to dataframe
+      batch_metadata <- as_tibble(batch_data)
+      return(batch_metadata)
+    }, error = function(e) {
+      retries <- retries + 1
+      cat("Retry", retries, "for batch starting at", start, "due to error:", e\$message, "\\n")
+      Sys.sleep(delay_time * retries)  # Increase delay with each retry
+    })
+  }
+  warning("Failed to fetch batch starting at", start, "after", max_retries, "retries.")
+  return(NULL)
+}
 
 # Parallel Batch Processing
 batch_indices <- seq(0, total_records, by = batch_size)
 
 all_metadata <- foreach(start = batch_indices, .combine = bind_rows, .packages = c("rentrez", "dplyr", "xml2", "tidyr")) %dopar% {
-  
   cat("Fetching records", start, "to", min(start + batch_size, total_records), "\\n")
-  
-  # Fetch metadata batch with error handling
-  metadata_xml <- tryCatch({
-    entrez_fetch(db = db_name, web_history = search_results\$web_history, rettype = "xml", retstart = start, retmax = batch_size)
-  }, error = function(e) {
-    warning("Failed batch from ", start, " to ", start + batch_size, ": ", e$message)
-    return(NULL)
-  })
-
-  if (is.null(metadata_xml)) return(NULL)
-
-  # Parse XML
-  parsed_metadata <- read_xml(metadata_xml)
-
-  # Extract metadata fields dynamically
-  all_nodes <- xml_find_all(parsed_metadata, "//*")  # Get all XML nodes
-  field_names <- unique(xml_name(all_nodes))  # Extract unique field names
-
-  # Store extracted data
-  batch_data <- list()
-  
-  for (field in field_names) {
-    batch_data[[field]] <- xml_find_all(parsed_metadata, paste0("//", field)) %>% xml_text()
-  }
-
-  # Standardize all fields to the same length
-  max_length <- max(sapply(batch_data, length))
-
-  for (field in names(batch_data)) {
-    batch_data[[field]] <- c(batch_data[[field]], rep(NA, max_length - length(batch_data[[field]])))
-  }
-
-  # Convert batch data to dataframe (ensuring equal-sized columns)
-  batch_metadata <- as_tibble(batch_data)
-
-  return(batch_metadata)
+  fetch_batch(start, batch_size, search_results, db_name)
 }
 
 # Stop parallel processing
 parallel::stopCluster(cl)
+
+# Validate total rows
+if (nrow(all_metadata) != total_records) {
+  warning("Mismatch in total records. Expected:", total_records, "Got:", nrow(all_metadata))
+} else {
+  cat("All records fetched successfully. Total rows:", nrow(all_metadata), "\\n")
+}
 
 # Save raw data
 write_csv(all_metadata, "raw_sra_metadata.csv")
