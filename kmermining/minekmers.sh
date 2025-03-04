@@ -17,6 +17,7 @@ KMER_RANGE="3 4 5 6 7 8"                             # K-mer sizes to process
 BATCH_SIZE=50                                        # Number of jobs to submit at a time
 MAX_RETRIES=3                                        # Max retries for Jellyfish failures
 JOB_LOG="logs/kmer_jobs.log"                         # Single log file for all logs
+MAX_JOBS=1000                                        # Maximum number of child jobs to submit
 
 # Create necessary directories
 mkdir -p "$OUTPUT_DIR"
@@ -90,6 +91,7 @@ process_sample() {
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
+#SBATCH --dependency=afterok:$SLURM_JOB_ID  # Add dependency on the parent job
 
 # Process each k-mer size in parallel using GNU Parallel
 export -f process_kmer
@@ -148,10 +150,24 @@ if [[ $TOTAL_FILES -eq 0 ]]; then
 fi
 
 # Submit jobs in batches
+JOB_COUNT=0
 for (( i=0; i<TOTAL_FILES; i+=BATCH_SIZE )); do
+    # Check if the parent job is still running
+    if ! squeue -j $SLURM_JOB_ID &> /dev/null; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') Parent job canceled. Exiting." >> "$JOB_LOG"
+        exit 1
+    fi
+
+    # Check if the maximum number of jobs has been reached
+    if [[ $JOB_COUNT -ge $MAX_JOBS ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') Reached maximum number of jobs ($MAX_JOBS). Exiting." >> "$JOB_LOG"
+        exit 0
+    fi
+
     BATCH=("${FILES_TO_PROCESS[@]:i:BATCH_SIZE}")
     for SAMPLE in "${BATCH[@]}"; do
         process_sample "$SAMPLE"
+        JOB_COUNT=$((JOB_COUNT + 1))
     done
     echo "$(date '+%Y-%m-%d %H:%M:%S') Submitted batch of ${#BATCH[@]} jobs." >> "$JOB_LOG"
     sleep 5  # Short pause to prevent overwhelming the scheduler
