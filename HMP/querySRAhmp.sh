@@ -1,15 +1,25 @@
 #!/bin/bash
 
-# KEEP IN MIND THIS IS HEAVY DOWNLOADING
-
-# Check if R is installed, install if missing
+# Check if R is installed via Conda, install if missing
 if ! command -v R &> /dev/null; then
-    echo "R is not installed. Installing R..."
+    echo "R is not installed. Installing R using Conda..."
     conda install -y r-base
+fi
+
+# Define the SRA database file path
+SRA_DB="SRAmetadb.sqlite"
+
+# Check if the SRA database already exists
+if [ ! -f "$SRA_DB" ]; then
+    echo "SRAmetadb.sqlite not found. Downloading..."
+    wget https://s3.amazonaws.com/starbuck1/sradb/SRAmetadb.sqlite -O SRAmetadb.sqlite
 fi
 
 # Create an R script
 cat <<EOF > hmp_16s_query.R
+# Set CRAN mirror explicitly
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
 # Load required packages
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install("SRAdb", ask=FALSE)
@@ -19,24 +29,17 @@ install.packages("RSQLite", dependencies=TRUE)
 library(SRAdb)
 library(RSQLite)
 
-# Download the SRA metadata database
-sqlfile <- getSRAdbFile()
+# Define the database path
+sqlfile <- "SRAmetadb.sqlite"
 
 # Connect to the database
 sra_con <- dbConnect(RSQLite::SQLite(), sqlfile)
 
-# Define query for HMP 16S sequencing on Illumina
-query <- "
-SELECT run.run_accession, run.*, experiment.*, study.*
-FROM run
-JOIN experiment ON run.experiment_accession = experiment.experiment_accession
-JOIN study ON experiment.study_accession = study.study_accession
-WHERE study.study_title LIKE 'Human Microbiome Project%'
-AND experiment.library_strategy = 'AMPLICON'
-AND experiment.platform LIKE '%Illumina%'"
+# Use getSRA() to retrieve metadata for HMP 16S Illumina sequencing
+hmp_data <- getSRA(search_terms = "Human Microbiome Project", con = sra_con)
 
-# Execute query
-hmp_16s_illumina <- dbGetQuery(sra_con, query)
+# Filter for only 16S sequencing and Illumina platform
+hmp_16s_illumina <- subset(hmp_data, library_strategy == "AMPLICON" & grepl("Illumina", platform))
 
 # Save results to a CSV file
 write.csv(hmp_16s_illumina, 'HMP_16S_Illumina.csv', row.names=FALSE)
