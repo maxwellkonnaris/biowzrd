@@ -8,7 +8,7 @@
 #SBATCH --ntasks=1
 
 # Configuration (all in one file)
-INPUT_DIR="/storage/home/mak6930/scratch/all/qc"       # Location of trimmed FASTQ files
+INPUT_DIR="/storage/home/mak6930/scratch/all/qc"       # Location of FASTQ files
 OUTPUT_DIR="/storage/home/mak6930/scratch/all/kmer_counts"  # Where Jellyfish outputs go
 CHECKPOINT_FILE="completed_kmer.txt"                  # File to track completed samples
 HASH_SIZE="1G"                                       # Hash size parameter for Jellyfish
@@ -37,24 +37,33 @@ process_kmer() {
     # Retry loop for Jellyfish
     retry_count=0
     while [[ $retry_count -lt $MAX_RETRIES ]]; do
-        if [[ -f "$INPUT_DIR/${SAMPLE_NAME}_trimmed_1.fastq.gz" && -f "$INPUT_DIR/${SAMPLE_NAME}_trimmed_2.fastq.gz" ]]; then
+        # Check for paired-end files (Sample_name_1.fastq.gz and Sample_name_2.fastq.gz)
+        if [[ -f "$INPUT_DIR/${SAMPLE_NAME}_1.fastq.gz" && -f "$INPUT_DIR/${SAMPLE_NAME}_2.fastq.gz" ]]; then
             jellyfish count -m "$KMER_SIZE" -s "$HASH_SIZE" -t "$THREADS" -C -o "$JF_OUTPUT" \
-                <(zcat "$INPUT_DIR/${SAMPLE_NAME}_trimmed_1.fastq.gz" "$INPUT_DIR/${SAMPLE_NAME}_trimmed_2.fastq.gz")
-        elif [[ -f "$INPUT_DIR/${SAMPLE_NAME}_trimmed.fastq.gz" ]]; then
+                <(zcat "$INPUT_DIR/${SAMPLE_NAME}_1.fastq.gz" "$INPUT_DIR/${SAMPLE_NAME}_2.fastq.gz")
+        # Check for single-end files (Sample_name.fastq.gz)
+        elif [[ -f "$INPUT_DIR/${SAMPLE_NAME}.fastq.gz" ]]; then
             jellyfish count -m "$KMER_SIZE" -s "$HASH_SIZE" -t "$THREADS" -C -o "$JF_OUTPUT" \
-                <(zcat "$INPUT_DIR/${SAMPLE_NAME}_trimmed.fastq.gz")
+                <(zcat "$INPUT_DIR/${SAMPLE_NAME}.fastq.gz")
         else
-            echo "$(date '+%Y-%m-%d %H:%M:%S') No valid trimmed FASTQ found for sample $SAMPLE_NAME at k-mer $KMER_SIZE. Skipping." >> "$JOB_LOG"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') No valid FASTQ files found for sample $SAMPLE_NAME at k-mer $KMER_SIZE. Skipping." >> "$JOB_LOG"
             return 1
         fi
 
         # Check if Jellyfish succeeded
         if [[ $? -eq 0 ]]; then
+            # Dump the k-mer counts into a human-readable format
             jellyfish dump -c -t -o "$TXT_OUTPUT" "$JF_OUTPUT"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') Finished processing sample $SAMPLE_NAME with k-mer size $KMER_SIZE" >> "$JOB_LOG"
-            # Remove temporary Jellyfish binary file to save space
-            rm -f "$JF_OUTPUT"
-            return 0
+            if [[ $? -eq 0 ]]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') Finished processing sample $SAMPLE_NAME with k-mer size $KMER_SIZE" >> "$JOB_LOG"
+                # Remove the temporary Jellyfish binary file to save space
+                rm -f "$JF_OUTPUT"
+                echo "$(date '+%Y-%m-%d %H:%M:%S') Removed temporary file: $JF_OUTPUT" >> "$JOB_LOG"
+                return 0
+            else
+                echo "$(date '+%Y-%m-%d %H:%M:%S') Failed to dump k-mer counts for sample $SAMPLE_NAME at k-mer $KMER_SIZE. Skipping." >> "$JOB_LOG"
+                return 1
+            fi
         else
             retry_count=$((retry_count + 1))
             echo "$(date '+%Y-%m-%d %H:%M:%S') Jellyfish failed for sample $SAMPLE_NAME at k-mer $KMER_SIZE (attempt $retry_count/$MAX_RETRIES). Retrying..." >> "$JOB_LOG"
@@ -84,10 +93,24 @@ process_sample() {
     fi
 }
 
-# Get list of unprocessed samples
+# Get list of all FASTQ files in the input directory
+FASTQ_FILES=("$INPUT_DIR"/*.fastq.gz)
+
+# Extract unique sample names
+declare -A SAMPLE_NAMES
+for FILE in "${FASTQ_FILES[@]}"; do
+    # Extract base name (e.g., Sample_name_1.fastq.gz -> Sample_name)
+    BASE_NAME=$(basename "$FILE" .fastq.gz)
+    SAMPLE_NAME="${BASE_NAME%_[12]}"  # Remove _1 or _2 suffix for paired-end files
+    SAMPLE_NAMES["$SAMPLE_NAME"]=1
+done
+
+# Convert associative array keys to a list of unique sample names
+UNIQUE_SAMPLES=("${!SAMPLE_NAMES[@]}")
+
+# Filter out already processed samples
 FILES_TO_PROCESS=()
-for FILE in "$INPUT_DIR"/*_trimmed.fastq.gz "$INPUT_DIR"/*_trimmed_1.fastq.gz; do
-    SAMPLE_NAME=$(basename "$FILE" | sed -E 's/(_trimmed_1|_trimmed_2|_trimmed)?\.fastq\.gz//')
+for SAMPLE_NAME in "${UNIQUE_SAMPLES[@]}"; do
     if ! grep -q "^$SAMPLE_NAME$" "$CHECKPOINT_FILE"; then
         FILES_TO_PROCESS+=("$SAMPLE_NAME")
     fi
