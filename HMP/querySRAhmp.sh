@@ -6,21 +6,12 @@ if ! command -v R &> /dev/null; then
     conda install -y r-base
 fi
 
-# Define the SRA database file path
-SRA_DB="SRAmetadb.sqlite"
-
-# Check if the SRA database already exists
-if [ ! -f "$SRA_DB" ]; then
-    echo "SRAmetadb.sqlite not found. Downloading..."
-    wget https://s3.amazonaws.com/starbuck1/sradb/SRAmetadb.sqlite -O SRAmetadb.sqlite
-fi
-
-# Create an R script
+# Create an R script to download SRAmetadb.sqlite and query it
 cat <<EOF > hmp_16s_query.R
 # Set CRAN mirror explicitly
 options(repos = c(CRAN = "https://cloud.r-project.org/"))
 
-# Load required packages
+# Install required packages
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install("SRAdb", ask=FALSE)
 install.packages("RSQLite", dependencies=TRUE)
@@ -32,16 +23,47 @@ library(RSQLite)
 # Define the database path
 sqlfile <- "SRAmetadb.sqlite"
 
-# Connect to the database
+# Download the SRA database if it doesn't exist
+if (!file.exists(sqlfile)) {
+    message("Downloading SRAmetadb.sqlite, this may take some time...")
+    sqlfile <- getSRAdbFile()
+}
+
+# Verify that the file was downloaded
+if (!file.exists(sqlfile)) {
+    stop("ERROR: Failed to download SRAmetadb.sqlite. Please check your network connection or try again later.")
+}
+
+# Connect to the SRA database
 sra_con <- dbConnect(RSQLite::SQLite(), sqlfile)
 
-# Use getSRA() to retrieve metadata for HMP 16S Illumina sequencing
-hmp_data <- getSRA(search_terms = "Human Microbiome Project", con = sra_con)
+# Check available tables
+tables <- dbListTables(sra_con)
+print(tables)  # Print available tables for debugging
 
-# Filter for only 16S sequencing and Illumina platform
-hmp_16s_illumina <- subset(hmp_data, library_strategy == "AMPLICON" & grepl("Illumina", platform))
+# Determine the correct table name for runs
+if ("run" %in% tables) {
+    table_name <- "run"
+} else if ("sra_run" %in% tables) {
+    table_name <- "sra_run"
+} else {
+    stop("Neither 'run' nor 'sra_run' table found in the database.")
+}
 
-# Save results to a CSV file
+# Construct SQL query dynamically
+query <- sprintf("
+SELECT %s.run_accession, %s.*, experiment.*, study.*
+FROM %s
+JOIN experiment ON %s.experiment_accession = experiment.experiment_accession
+JOIN study ON experiment.study_accession = study.study_accession
+WHERE study.study_title LIKE 'Human Microbiome Project%%'
+AND experiment.library_strategy = 'AMPLICON'
+AND experiment.platform LIKE '%%Illumina%%'", table_name, table_name, table_name, table_name)
+
+# Execute the query
+hmp_16s_illumina <- dbGetQuery(sra_con, query)
+
+# Save results to CSV
 write.csv(hmp_16s_illumina, 'HMP_16S_Illumina.csv', row.names=FALSE)
 
 # Show first few rows
