@@ -10,7 +10,7 @@
 #######################################
 # Configuration
 #######################################
-BATCH_SIZE=50  # Number of accessions per job
+MAX_JOBS=50  # Maximum number of concurrent jobs
 WORKDIR="$(pwd)"
 CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
 LOCK_FILE="${WORKDIR}/checkpoint.lock"
@@ -73,7 +73,7 @@ process_accession() {
     # Download FASTQ files
     fastq-dl --accession "$ACCESSION" \
              --provider "$PROVIDER" \
-             --cpus 2 \
+             --cpus 4 \
              --prefix "$ACCESSION" \
              --outdir "${WORKDIR}/fastq_data"
 
@@ -146,30 +146,27 @@ process_accession() {
 }
 
 #######################################
-# Function to Process a Batch of Accessions
+# Function to Submit a Job for an Accession
 #######################################
-process_batch() {
-    local BATCH=("$@")
-    local BATCH_ID=$(date +%s)  # Unique identifier for the batch
-    local JOB_SCRIPT="${WORKDIR}/jobs/download_batch_${BATCH_ID}.sh"
+submit_job() {
+    local ACCESSION=$1
+    local JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
 
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
-#SBATCH --job-name=fastq_batch_${BATCH_ID}
-#SBATCH --output=${WORKDIR}/logs/batch_${BATCH_ID}.out
-#SBATCH --error=${WORKDIR}/logs/batch_${BATCH_ID}.err
+#SBATCH --job-name=fastq_${ACCESSION}
+#SBATCH --output=${WORKDIR}/logs/${ACCESSION}.out
+#SBATCH --error=${WORKDIR}/logs/${ACCESSION}.err
 #SBATCH --time=02:00:00
-#SBATCH --mem=16G
-#SBATCH --cpus-per-task=8
+#SBATCH --mem=8G
+#SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-# Set working directory
-cd "${WORKDIR}" || { echo "❌ ERROR: Unable to change to working directory ${WORKDIR}"; exit 1; }
+# Source functions and variables from the parent script
+source "${WORKDIR}/$0"
 
-# Process each accession in the batch
-for ACCESSION in "${BATCH[@]}"; do
-    process_accession "\$ACCESSION"
-done
+# Process the accession
+process_accession "$ACCESSION"
 
 # Clean up logs if everything is fine
 rm -f "${JOB_SCRIPT}"
@@ -177,15 +174,13 @@ EOF
 
     chmod +x "$JOB_SCRIPT"
     sbatch "$JOB_SCRIPT"
-    echo "✅ Submitted batch job for ${#BATCH[@]} accessions (Batch ID: ${BATCH_ID})."
+    echo "✅ Submitted job for ${ACCESSION}"
 }
 
 #######################################
 # Main Script Logic
 #######################################
-COUNT=0
 TOTAL_JOBS=0
-BATCH=()
 
 while read -r ACCESSION; do
     # Skip empty lines
@@ -197,23 +192,15 @@ while read -r ACCESSION; do
         continue
     fi
 
-    # Add accession to batch
-    BATCH+=("$ACCESSION")
-    COUNT=$((COUNT + 1))
-    TOTAL_JOBS=$((TOTAL_JOBS + 1))
+    # Wait until the number of running jobs is below MAX_JOBS
+    while [ "$(squeue -u $USER --format="%j" | grep -c "fastq_")" -ge "$MAX_JOBS" ]; do
+        sleep 60  # Wait for 1 minute before checking again
+    done
 
-    # Submit batch if size is reached
-    if [[ $COUNT -ge $BATCH_SIZE ]]; then
-        process_batch "${BATCH[@]}"
-        BATCH=()
-        COUNT=0
-    fi
+    # Submit a job for the accession
+    submit_job "$ACCESSION"
+    TOTAL_JOBS=$((TOTAL_JOBS + 1))
 
 done < "$ACCESSIONS_FILE"
 
-# Submit remaining accessions in the last batch
-if [[ ${#BATCH[@]} -gt 0 ]]; then
-    process_batch "${BATCH[@]}"
-fi
-
-echo "🎉 All $TOTAL_JOBS accessions submitted in batches!"
+echo "🎉 All $TOTAL_JOBS jobs submitted!"
