@@ -14,7 +14,7 @@ CHECKPOINT_FILE="completed_kmer.txt"                  # File to track completed 
 HASH_SIZE="1G"                                       # Hash size parameter for Jellyfish
 THREADS=4                                            # Number of threads for Jellyfish
 KMER_RANGE="3 4 5 6 7 8"                             # K-mer sizes to process
-BATCH_SIZE=50                                        # Number of jobs to submit at a time
+MAX_JOBS=5                                           # Maximum number of jobs to run concurrently
 MAX_RETRIES=3                                        # Max retries for Jellyfish failures
 JOB_LOG="logs/kmer_jobs.log"                         # Single log file for all logs
 
@@ -148,20 +148,23 @@ if [[ $TOTAL_FILES -eq 0 ]]; then
     exit 0
 fi
 
-# Submit jobs in batches
-for (( i=0; i<TOTAL_FILES; i+=BATCH_SIZE )); do
-    # Check if the parent job is still running
-    if ! squeue -j $SLURM_JOB_ID &> /dev/null; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') Parent job canceled. Exiting." >> "$JOB_LOG"
-        exit 1
-    fi
+# Function to count the number of running jobs
+count_running_jobs() {
+    squeue -u $USER -o "%i" -h | wc -l
+}
 
-    BATCH=("${FILES_TO_PROCESS[@]:i:BATCH_SIZE}")
-    for SAMPLE in "${BATCH[@]}"; do
-        process_sample "$SAMPLE"
-    done
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Submitted batch of ${#BATCH[@]} jobs." >> "$JOB_LOG"
-    sleep 5  # Short pause to prevent overwhelming the scheduler
+# Submit jobs, maintaining a maximum of MAX_JOBS running at any time
+INDEX=0
+while [[ $INDEX -lt $TOTAL_FILES ]]; do
+    RUNNING_JOBS=$(count_running_jobs)
+    if [[ $RUNNING_JOBS -lt $MAX_JOBS ]]; then
+        SAMPLE_NAME="${FILES_TO_PROCESS[$INDEX]}"
+        process_sample "$SAMPLE_NAME"
+        INDEX=$((INDEX + 1))
+        echo "$(date '+%Y-%m-%d %H:%M:%S') Submitted job for sample $SAMPLE_NAME. Running jobs: $RUNNING_JOBS" >> "$JOB_LOG"
+    else
+        sleep 10  # Wait before checking again
+    fi
 done
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') All jobs submitted!" >> "$JOB_LOG"
