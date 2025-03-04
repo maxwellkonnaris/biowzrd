@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --ntasks=1
 
-# Configuration (all in one file)
+# Configuration 
 INPUT_DIR="/storage/home/mak6930/scratch/all/qc"       # Location of FASTQ files
 OUTPUT_DIR="/storage/home/mak6930/scratch/all/kmer_counts"  # Where Jellyfish outputs go
 CHECKPOINT_FILE="completed_kmer.txt"                  # File to track completed samples
