@@ -50,7 +50,8 @@ Packages required: aws (see download script for linux)
 
 ```R
 # Download all of the metadata for HMP amplicon sequences generated from illumina sequencers
-# install.packages("rentrez")
+#library(devtools)
+#install_github("ropensci/rentrez")
 library(rentrez)
 search_results <- entrez_search(db="sra", term="Human Microbiome Project AND amplicon[Strategy] AND Illumina[Platform]", retmax=0, use_history=TRUE)
 ```
