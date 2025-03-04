@@ -74,49 +74,6 @@ process_kmer() {
     return 1
 }
 
-# Function to process all k-mer sizes for a single sample
-process_sample() {
-    SAMPLE_NAME="$1"
-    JOB_SCRIPT="logs/job_kmer_${SAMPLE_NAME}.sh"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Starting processing for sample $SAMPLE_NAME" >> "$JOB_LOG"
-
-    # Create a job script for this sample
-    cat <<EOT > "$JOB_SCRIPT"
-#!/bin/bash
-#SBATCH --job-name=kmer_${SAMPLE_NAME}
-#SBATCH --output=logs/${SAMPLE_NAME}_kmer.out
-#SBATCH --error=logs/${SAMPLE_NAME}_kmer.err
-#SBATCH --time=02:00:00
-#SBATCH --mem=8G
-#SBATCH --cpus-per-task=4
-#SBATCH --ntasks=1
-#SBATCH --dependency=afterok:$SLURM_JOB_ID  # Add dependency on the parent job
-
-# Process each k-mer size in parallel using GNU Parallel
-export -f process_kmer
-export INPUT_DIR OUTPUT_DIR THREADS HASH_SIZE MAX_RETRIES JOB_LOG
-echo "$KMER_RANGE" | tr ' ' '\n' | parallel -j $THREADS "process_kmer '$SAMPLE_NAME' {}"
-
-# Mark the sample as completed if all k-mer sizes were processed successfully
-if [[ \$? -eq 0 ]]; then
-    echo "$SAMPLE_NAME" >> "$CHECKPOINT_FILE"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Finished processing sample $SAMPLE_NAME" >> "$JOB_LOG"
-else
-    echo "$(date '+%Y-%m-%d %H:%M:%S') Some k-mer sizes failed for sample $SAMPLE_NAME. Check logs for details." >> "$JOB_LOG"
-fi
-
-# Remove the job script after completion
-rm -f "$JOB_SCRIPT"
-echo "$(date '+%Y-%m-%d %H:%M:%S') Removed job script: $JOB_SCRIPT" >> "$JOB_LOG"
-EOT
-
-    # Make the job script executable
-    chmod +x "$JOB_SCRIPT"
-
-    # Submit the job script
-    sbatch "$JOB_SCRIPT"
-}
-
 # Get list of all FASTQ files in the input directory
 FASTQ_FILES=("$INPUT_DIR"/*.fastq.gz)
 
@@ -159,7 +116,43 @@ while [[ $INDEX -lt $TOTAL_FILES ]]; do
     RUNNING_JOBS=$(count_running_jobs)
     if [[ $RUNNING_JOBS -lt $MAX_JOBS ]]; then
         SAMPLE_NAME="${FILES_TO_PROCESS[$INDEX]}"
-        process_sample "$SAMPLE_NAME"
+        JOB_SCRIPT="logs/job_kmer_${SAMPLE_NAME}.sh"
+
+        # Create a job script for this sample
+        cat <<EOT > "$JOB_SCRIPT"
+#!/bin/bash
+#SBATCH --job-name=kmer_${SAMPLE_NAME}
+#SBATCH --output=logs/${SAMPLE_NAME}_kmer.out
+#SBATCH --error=logs/${SAMPLE_NAME}_kmer.err
+#SBATCH --time=02:00:00
+#SBATCH --mem=8G
+#SBATCH --cpus-per-task=4
+#SBATCH --ntasks=1
+#SBATCH --dependency=afterok:$SLURM_JOB_ID  # Add dependency on the parent job
+
+# Process each k-mer size in parallel using GNU Parallel
+export -f process_kmer
+export INPUT_DIR OUTPUT_DIR THREADS HASH_SIZE MAX_RETRIES JOB_LOG
+echo "$KMER_RANGE" | tr ' ' '\n' | parallel -j $THREADS "process_kmer '$SAMPLE_NAME' {}"
+
+# Mark the sample as completed if all k-mer sizes were processed successfully
+if [[ \$? -eq 0 ]]; then
+    echo "$SAMPLE_NAME" >> "$CHECKPOINT_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Finished processing sample $SAMPLE_NAME" >> "$JOB_LOG"
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Some k-mer sizes failed for sample $SAMPLE_NAME. Check logs for details." >> "$JOB_LOG"
+fi
+
+# Remove the job script after completion
+rm -f "$JOB_SCRIPT"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Removed job script: $JOB_SCRIPT" >> "$JOB_LOG"
+EOT
+
+        # Make the job script executable
+        chmod +x "$JOB_SCRIPT"
+
+        # Submit the job script
+        sbatch "$JOB_SCRIPT"
         INDEX=$((INDEX + 1))
         echo "$(date '+%Y-%m-%d %H:%M:%S') Submitted job for sample $SAMPLE_NAME. Running jobs: $RUNNING_JOBS" >> "$JOB_LOG"
     else
