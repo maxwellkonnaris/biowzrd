@@ -49,11 +49,18 @@ Packages required: aws (see download script for linux)
 3. Remove reads with length < 30 (removereads.sh)
 
 ```R
-# Download all of the metadata for HMP amplicon sequences generated from illumina sequencers
+# See how many sequences there are for HMP amplicon sequences generated from illumina sequencers
+
 #library(devtools)
 #install_github("ropensci/rentrez")
 library(rentrez)
 search_results <- entrez_search(db="sra", term="Human Microbiome Project AND amplicon[Strategy] AND Illumina[Platform]", retmax=0, use_history=TRUE)
+```
+
+```bash
+# Download all of the metadata for a specific query:
+
+./hmp_16s_fetch.sh -q "Human Microbiome Project AND 16S[Strategy] AND Illumina[Platform]"
 ```
 
 ## MG-RAST (MGRAST/)
