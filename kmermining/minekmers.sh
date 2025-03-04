@@ -3,7 +3,7 @@
 #SBATCH --output=logs/kmer_jobs.log  # Single log file for all output
 #SBATCH --error=logs/kmer_jobs.log   # Single log file for all errors
 #SBATCH --time=48:00:00
-#SBATCH --mem=8G
+#SBATCH --mem=4G
 #SBATCH --cpus-per-task=1
 #SBATCH --ntasks=1
 
