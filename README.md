@@ -48,6 +48,13 @@ Packages required: aws (see download script for linux)
 2. Download all trimmed 16s sequence files in fa.bzip format (downloadHMP_16s_trimmed.sh)
 3. Remove reads with length < 30 (removereads.sh)
 
+```R
+# Download all of the metadata for HMP amplicon sequences generated from illumina sequencers
+# install.packages("rentrez")
+library(rentrez)
+search_results <- entrez_search(db="sra", term="Human Microbiome Project AND amplicon[Strategy] AND Illumina[Platform]", retmax=0, use_history=TRUE)
+```
+
 ## MG-RAST (MGRAST/)
 1. Download the metadata to obtain metagenome_ids. You can specify the query further as prompted or add the --default flag to download amplicon 16s samples from ion torrent and illumina sequencing technology. (sbatch retrievemetadata.sh)
 2. sh downloadmgrast.sh is the combined script which will submit slurm jobs. This will begin downloading preprocessed and host removed fasta files for the metagenome_ids you've specified, in fasta.gz format. 
