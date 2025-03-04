@@ -194,7 +194,7 @@ while read -r ACCESSION; do
 
     # Wait until the number of running jobs is below MAX_JOBS
     while [ "$(squeue -u $USER --format="%j" | grep -c "fastq_")" -ge "$MAX_JOBS" ]; do
-        sleep 60  # Wait for 1 minute before checking again
+        sleep 10  # Wait for 10 sec before checking again
     done
 
     # Submit a job for the accession
