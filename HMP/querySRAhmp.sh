@@ -1,63 +1,119 @@
 #!/bin/bash
 
-# Check if R is installed via Conda, install if missing
+# Default query (if user does not provide one)
+SEARCH_QUERY="Human Microbiome Project AND amplicon[Strategy] AND Illumina[Platform]"
+
+# Function to show usage
+usage() {
+    echo "Usage: $0 [-q \"<NCBI Search Query>\"]"
+    echo "Example: $0 -q \"Human Microbiome Project AND amplicon[Strategy] AND Illumina[Platform]\""
+    exit 1
+}
+
+# Parse command-line options
+while getopts "q:" opt; do
+    case $opt in
+        q) SEARCH_QUERY="$OPTARG" ;;
+        *) usage ;;
+    esac
+done
+
+# Ensure R is installed via Conda, install if missing
 if ! command -v R &> /dev/null; then
     echo "R is not installed. Installing R using Conda..."
     conda install -y r-base
 fi
 
-# Create the R script to fetch metadata
+# Create the R script dynamically with the user-provided query
 cat <<EOF > hmp_16s_query.R
 # Set CRAN mirror explicitly
 options(repos = c(CRAN = "https://cloud.r-project.org/"))
 
-# Install required packages
-install.packages("rentrez", dependencies=TRUE)
-install.packages("jsonlite", dependencies=TRUE)
-install.packages("httr", dependencies=TRUE)
-install.packages("RSQLite", dependencies=TRUE)
+# Load required libraries, install if missing
+required_packages <- c("rentrez", "dplyr", "stringr", "purrr", "xml2", "tidyr", "readr", "foreach", "doParallel")
 
-# Load necessary libraries
-library(rentrez)
-library(jsonlite)
-library(httr)
-library(RSQLite)
+for (pkg in required_packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
 
-# Define search term for Human Microbiome Project
-search_term <- "Human Microbiome Project[Title] AND 16S[Title] AND Illumina[Title]"
+# Parallel Processing Setup
+num_cores <- parallel::detectCores() - 1  # Use all available cores minus one
+cl <- parallel::makeCluster(num_cores)
+doParallel::registerDoParallel(cl)
 
-# Search SRA for matching studies
-search_results <- entrez_search(db="sra", term=search_term, retmax=500)
+# Define search parameters (Injected from Bash script)
+search_query <- "$SEARCH_QUERY"
+db_name <- "sra"
+batch_size <- 500  # Adjustable
+delay_time <- 1  # Time delay to avoid API limits
 
-# Get details for all found IDs
-sra_metadata <- entrez_summary(db="sra", id=search_results\$ids)
+# Perform initial search
+search_results <- tryCatch({
+  entrez_search(db = db_name, term = search_query, retmax = 0, use_history = TRUE)
+}, error = function(e) {
+  stop("NCBI API error: ", e$message)
+})
 
-# Convert to a dataframe
-metadata_list <- lapply(sra_metadata, function(x) data.frame(
-  Run = x\$accession,
-  Study = x\$study,
-  Title = x\$title,
-  Platform = x\$platform,
-  Strategy = x\$librarystrategy,
-  Source = x\$librarysource,
-  Layout = x\$librarylayout,
-  stringsAsFactors = FALSE
-))
+total_records <- search_results$count
+cat("Total Records Found:", total_records, "\\n")
 
-# Combine all results into a single dataframe
-sra_df <- do.call(rbind, metadata_list)
+# Parallel Batch Processing
+batch_indices <- seq(0, total_records, by = batch_size)
 
-# Save results to CSV
-write.csv(sra_df, "HMP_16S_Illumina.csv", row.names=FALSE)
+all_metadata <- foreach(start = batch_indices, .combine = bind_rows, .packages = c("rentrez", "dplyr", "xml2", "tidyr")) %dopar% {
+  
+  cat("Fetching records", start, "to", min(start + batch_size, total_records), "\\n")
+  
+  # Fetch metadata batch with error handling
+  metadata_xml <- tryCatch({
+    entrez_fetch(db = db_name, web_history = search_results\$web_history, rettype = "xml", retstart = start, retmax = batch_size)
+  }, error = function(e) {
+    warning("Failed batch from ", start, " to ", start + batch_size, ": ", e$message)
+    return(NULL)
+  })
 
-# Display first few rows
-print(head(sra_df))
+  if (is.null(metadata_xml)) return(NULL)
 
-# Store in SQLite
-db <- dbConnect(SQLite(), "HMP_16S_Illumina.sqlite")
-dbWriteTable(db, "sra_metadata", sra_df, overwrite=TRUE)
-dbDisconnect(db)
+  # Parse XML
+  parsed_metadata <- read_xml(metadata_xml)
+
+  # Extract metadata fields dynamically
+  all_nodes <- xml_find_all(parsed_metadata, "//*")  # Get all XML nodes
+  field_names <- unique(xml_name(all_nodes))  # Extract unique field names
+
+  # Store extracted data
+  batch_data <- list()
+  
+  for (field in field_names) {
+    batch_data[[field]] <- xml_find_all(parsed_metadata, paste0("//", field)) %>% xml_text()
+  }
+
+  # Standardize all fields to the same length
+  max_length <- max(sapply(batch_data, length))
+
+  for (field in names(batch_data)) {
+    batch_data[[field]] <- c(batch_data[[field]], rep(NA, max_length - length(batch_data[[field]])))
+  }
+
+  # Convert batch data to dataframe (ensuring equal-sized columns)
+  batch_metadata <- as_tibble(batch_data)
+
+  return(batch_metadata)
+}
+
+# Stop parallel processing
+parallel::stopCluster(cl)
+
+# Save raw data
+write_csv(all_metadata, "raw_sra_metadata.csv")
+
+cat("Raw metadata saved successfully: raw_sra_metadata.csv\\n")
 EOF
 
 # Run the R script
 Rscript hmp_16s_query.R
+
+echo "Script execution completed."
