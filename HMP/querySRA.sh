@@ -51,15 +51,44 @@ batch_size <- 500  # Adjustable
 delay_time <- 1  # Time delay to avoid API limits
 max_retries <- 3  # Maximum number of retries for failed batches
 
+# Print the query for debugging
+cat("Search Query:", search_query, "\n")
+
 # Perform initial search
 search_results <- tryCatch({
-  entrez_search(db = db_name, term = search_query, retmax = 0, use_history = TRUE)
+  result <- entrez_search(db = db_name, term = search_query, retmax = 0, use_history = TRUE)
+  cat("API Response Received.\n")
+  result
 }, error = function(e) {
-  stop("NCBI API error: ", e\$message)
+  stop("NCBI API error: ", e$message)
 })
 
-total_records <- search_results\$count
-cat("Total Records Found:", total_records, "\\n")
+# Check if the search returned results
+if (is.null(search_results$ids) {
+  cat("No records found. Check your query or API key.\n")
+} else {
+  total_records <- search_results$count
+  cat("Total Records Found:", total_records, "\n")
+}
+
+# If no records are found, test with a simpler query
+if (total_records == 0) {
+  cat("Testing with a simpler query: 'Human Microbiome Project'\n")
+  test_query <- "Human Microbiome Project"
+  test_results <- tryCatch({
+    result <- entrez_search(db = db_name, term = test_query, retmax = 0, use_history = TRUE)
+    cat("API Response for Test Query Received.\n")
+    result
+  }, error = function(e) {
+    stop("NCBI API error: ", e$message)
+  })
+  
+  if (is.null(test_results$ids)) {
+    cat("No records found even with a simpler query. Check your API key or network connection.\n")
+  } else {
+    cat("Test Query Records Found:", test_results$count, "\n")
+  }
+}
 
 # Function to fetch and parse a batch of records
 fetch_batch <- function(start, batch_size, search_results, db_name) {
