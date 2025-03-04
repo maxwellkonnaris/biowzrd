@@ -24,6 +24,8 @@ if ! command -v R &> /dev/null; then
     conda install -y r-base
 fi
 
+ESCAPED_QUERY=$(echo "$SEARCH_QUERY" | sed "s/\"/\\\\\"/g")
+
 # Create the R script dynamically with the user-provided query
 cat <<EOF > hmp_16s_query.R
 # Set CRAN mirror explicitly
@@ -44,33 +46,20 @@ num_cores <- parallel::detectCores() - 1  # Use all available cores minus one
 cl <- parallel::makeCluster(num_cores)
 doParallel::registerDoParallel(cl)
 
-# Define search parameters (Injected from Bash script)
-search_query <- "$SEARCH_QUERY"
-db_name <- "sra"
 batch_size <- 500  # Adjustable
 delay_time <- 1  # Time delay to avoid API limits
 max_retries <- 3  # Maximum number of retries for failed batches
+search_query <- "$ESCAPED_QUERY"
 
-# Print the query for debugging
-cat("Search Query:", search_query, "\n")
+search_results <- entrez_search(
+  db = "sra",
+  term = search_query,
+  retmax = 0,
+  use_history = TRUE
+)
 
-# Perform initial search
-search_results <- tryCatch({
-  result <- entrez_search(db = db_name, term = search_query, retmax = 0, use_history = TRUE)
-  cat("API Response Received.\n")
-  result
-}, error = function(e) {
-  stop("NCBI API error: ", e$message)
-})
-
-# Check if the search returned results
-if (is.null(search_results$count)) {
-  cat("No records found. Check your query or API key.\n")
-} else {
-  # Convert total_records to a string to avoid errors in cat()
-  total_records <- as.character(search_results$count)
-  cat("Total Records Found:", total_records, "\n")
-}
+total_records <- search_results$count
+cat("Total Records Found:", total_records, "\n")
 
 # If no records are found, test with a simpler query
 if (exists("total_records") && total_records == "0") {
@@ -133,7 +122,7 @@ batch_indices <- seq(0, total_records, by = batch_size)
 
 all_metadata <- foreach(start = batch_indices, .combine = bind_rows, .packages = c("rentrez", "dplyr", "xml2", "tidyr")) %dopar% {
   cat("Fetching records", start, "to", min(start + batch_size, total_records), "\\n")
-  fetch_batch(start, batch_size, search_results, db_name)
+  fetch_batch(start, batch_size, search_results, "sra")
 }
 
 # Stop parallel processing
