@@ -60,7 +60,7 @@ search_results <- entrez_search(db="sra", term="Human Microbiome Project AND amp
 ```bash
 # Download all of the metadata for a specific query:
 
-./hmp_16s_fetch.sh -q "Human Microbiome Project AND 16S[Strategy] AND Illumina[Platform]"
+./querySRA.sh -q "Human Microbiome Project AND 16S[Strategy] AND Illumina[Platform]"
 ```
 
 ## MG-RAST (MGRAST/)
