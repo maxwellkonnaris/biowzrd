@@ -57,17 +57,107 @@ get_provider() {
 }
 
 #######################################
+# Function to Process a Single Accession
+#######################################
+process_accession() {
+    local ACCESSION=$1
+    local PROVIDER=$(get_provider "$ACCESSION")
+
+    if [[ -z "$PROVIDER" ]]; then
+        echo "❌ ERROR: Invalid provider for accession $ACCESSION" >> "${WORKDIR}/logs/${ACCESSION}.err"
+        return 1
+    fi
+
+    echo "🔹 Downloading FASTQ files for $ACCESSION using provider: $PROVIDER"
+
+    # Download FASTQ files
+    fastq-dl --accession "$ACCESSION" \
+             --provider "$PROVIDER" \
+             --cpus 2 \
+             --prefix "$ACCESSION" \
+             --outdir "${WORKDIR}/fastq_data"
+
+    # Check if download was successful
+    if [[ $? -ne 0 ]]; then
+        echo "❌ ERROR: Failed to download FASTQ files for $ACCESSION" >> "${WORKDIR}/logs/${ACCESSION}.err"
+        return 1
+    fi
+
+    # Verify that at least one FASTQ exists
+    shopt -s nullglob
+    ALL_FASTQS=("${WORKDIR}/fastq_data"/*.fastq "${WORKDIR}/fastq_data"/*.fastq.gz)
+
+    if [ "${#ALL_FASTQS[@]}" -eq 0 ]; then
+        echo "❌ ERROR: No FASTQ files found for $ACCESSION" >> "${WORKDIR}/logs/${ACCESSION}.err"
+        return 1
+    fi
+
+    # Ensure all FASTQs are gzipped
+    for FILE in "${WORKDIR}/fastq_data"/*.fastq; do
+        if [[ -f "$FILE" && "$FILE" != *.gz ]]; then
+            echo "🔹 Gzipping: $FILE"
+            gzip "$FILE"
+        fi
+    done
+
+    shopt -s nullglob
+    ALL_GZ_FASTQS=("${WORKDIR}/fastq_data"/*.fastq.gz)
+
+    if [ "${#ALL_GZ_FASTQS[@]}" -eq 0 ]; then
+        echo "❌ ERROR: No gzipped FASTQ files found for $ACCESSION" >> "${WORKDIR}/logs/${ACCESSION}.err"
+        return 1
+    fi
+
+    # Move metadata file and append to all_fastq_run_info.tsv
+    METADATA_FILENAME="${ACCESSION}-run-info.tsv"
+    ORIG_METADATA_FILE="${WORKDIR}/fastq_data/${METADATA_FILENAME}"
+    ALL_METADATA_FILE="${WORKDIR}/metadata/all_fastq_run_info.tsv"
+
+    if [[ -f "$ORIG_METADATA_FILE" ]]; then
+        echo "🔹 Moving metadata file to metadata/ folder."
+        mv "$ORIG_METADATA_FILE" "${WORKDIR}/metadata/"
+        
+        echo "🔹 Appending metadata to all_fastq_run_info.tsv with locking."
+        (
+            flock -x 200  # Acquire exclusive lock
+            cat "${WORKDIR}/metadata/${METADATA_FILENAME}" >> "$ALL_METADATA_FILE"
+        ) 200>"${LOCK_FILE}"
+        
+        echo "🔹 Removing individual metadata file."
+        rm -f "${WORKDIR}/metadata/${METADATA_FILENAME}"
+    else
+        echo "⚠️ WARNING: No metadata file found for $ACCESSION."
+    fi
+
+    # Record success in checkpoint
+    (
+        flock -x 200
+        echo "$ACCESSION" >> "$CHECKPOINT_FILE"
+    ) 200>"${LOCK_FILE}"
+
+    # Delete .sra if present
+    SRA_FILE="${WORKDIR}/fastq_data/${ACCESSION}.sra"
+    if [[ -f "$SRA_FILE" ]]; then
+        echo "🔹 Removing leftover .sra file: $SRA_FILE"
+        rm -f "$SRA_FILE"
+    fi
+
+    echo "✅ Successfully downloaded and gzipped FASTQ files for $ACCESSION."
+}
+
+#######################################
 # Function to Process a Batch of Accessions
 #######################################
 process_batch() {
     local BATCH=("$@")
-    local JOB_SCRIPT="${WORKDIR}/jobs/download_batch_$(date +%s).sh"
+    local BATCH_ID=$(date +%s)  # Unique identifier for the batch
+    local JOB_SCRIPT="${WORKDIR}/jobs/download_batch_${BATCH_ID}.sh"
 
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
-#SBATCH --job-name=fastq_batch
-#SBATCH --output=${WORKDIR}/logs/batch_%j.out
-#SBATCH --error=${WORKDIR}/logs/batch_%j.err
+#SBATCH --job-name=fastq_batch_${BATCH_ID}
+#SBATCH --output=${WORKDIR}/logs/batch_${BATCH_ID}.out
+#SBATCH --error=${WORKDIR}/logs/batch_${BATCH_ID}.err
 #SBATCH --time=02:00:00
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=8
@@ -76,97 +166,10 @@ process_batch() {
 # Set working directory
 cd "${WORKDIR}" || { echo "❌ ERROR: Unable to change to working directory ${WORKDIR}"; exit 1; }
 
-FASTQ_DIR="${WORKDIR}/fastq_data"
-
-# Function to download a single accession
-download_accession() {
-    local ACCESSION=\$1
-    local PROVIDER=\$(get_provider "\$ACCESSION")
-
-    echo "🔹 Downloading FASTQ files for \${ACCESSION} using provider: \${PROVIDER}"
-
-    # Download FASTQ files
-    fastq-dl --accession "\${ACCESSION}" \\
-             --provider "\${PROVIDER}" \\
-             --cpus 2 \\
-             --prefix "\${ACCESSION}" \\
-             --outdir "\${FASTQ_DIR}"
-
-    # Check if download was successful
-    if [[ \$? -ne 0 ]]; then
-        echo "❌ ERROR: Failed to download FASTQ files for \${ACCESSION}" >> "${WORKDIR}/logs/\${ACCESSION}.err"
-        return 1
-    fi
-
-    # Move metadata file and append to all_fastq_run_info.tsv
-    METADATA_FILENAME="\${ACCESSION}-run-info.tsv"
-    ORIG_METADATA_FILE="\${FASTQ_DIR}/\${METADATA_FILENAME}"
-    ALL_METADATA_FILE="${WORKDIR}/metadata/all_fastq_run_info.tsv"
-
-    if [[ -f "\${ORIG_METADATA_FILE}" ]]; then
-        echo "🔹 Moving metadata file to metadata/ folder."
-        mv "\${ORIG_METADATA_FILE}" "${WORKDIR}/metadata/"
-        
-        echo "🔹 Appending metadata to all_fastq_run_info.tsv with locking."
-        (
-            flock -x 200  # Acquire exclusive lock
-            cat "${WORKDIR}/metadata/\${METADATA_FILENAME}" >> "\${ALL_METADATA_FILE}"
-        ) 200>"${LOCK_FILE}"
-        
-        echo "🔹 Removing individual metadata file."
-        rm -f "${WORKDIR}/metadata/\${METADATA_FILENAME}"
-    else
-        echo "⚠️ WARNING: No metadata file found for \${ACCESSION}."
-    fi
-
-    # Verify that at least one FASTQ exists
-    shopt -s nullglob
-    ALL_FASTQS=( "\${FASTQ_DIR}"/*.fastq "\${FASTQ_DIR}"/*.fastq.gz )
-
-    if [ "\${#ALL_FASTQS[@]}" -eq 0 ]; then
-        echo "❌ ERROR: No FASTQ files found for \${ACCESSION}" >> "${WORKDIR}/logs/\${ACCESSION}.err"
-        return 1
-    fi
-
-    # Ensure all FASTQs are gzipped
-    for FILE in "\${FASTQ_DIR}"/*.fastq; do
-        if [[ -f "\$FILE" && "\$FILE" != *.gz ]]; then
-            echo "🔹 Gzipping: \$FILE"
-            gzip "\$FILE"
-        fi
-    done
-
-    shopt -s nullglob
-    ALL_GZ_FASTQS=( "\${FASTQ_DIR}"/*.fastq.gz )
-
-    if [ "\${#ALL_GZ_FASTQS[@]}" -eq 0 ]; then
-        echo "❌ ERROR: No gzipped FASTQ files found for \${ACCESSION}, skipping completion record." >> "${WORKDIR}/logs/\${ACCESSION}.err"
-        return 1
-    fi
-
-    # Record success in checkpoint
-    (
-        flock -x 200
-        echo "\${ACCESSION}" >> "${CHECKPOINT_FILE}"
-    ) 200>"${LOCK_FILE}"
-
-    # Delete .sra if present
-    SRA_FILE="\${FASTQ_DIR}/\${ACCESSION}.sra"
-    if [[ -f "\${SRA_FILE}" ]]; then
-        echo "🔹 Removing leftover .sra file: \${SRA_FILE}"
-        rm -f "\${SRA_FILE}"
-    fi
-
-    echo "✅ Successfully downloaded and gzipped FASTQ files for \${ACCESSION}."
-}
-
-# Export functions and variables for GNU Parallel
-export -f download_accession get_provider
-export WORKDIR FASTQ_DIR LOCK_FILE CHECKPOINT_FILE
-
-# Process accessions in parallel
-echo "🔹 Processing batch of ${#BATCH[@]} accessions in parallel..."
-parallel -j 4 download_accession ::: "${BATCH[@]}"
+# Process each accession in the batch
+for ACCESSION in "${BATCH[@]}"; do
+    process_accession "\$ACCESSION"
+done
 
 # Clean up logs if everything is fine
 rm -f "${JOB_SCRIPT}"
@@ -174,7 +177,7 @@ EOF
 
     chmod +x "$JOB_SCRIPT"
     sbatch "$JOB_SCRIPT"
-    echo "✅ Submitted batch job for ${#BATCH[@]} accessions."
+    echo "✅ Submitted batch job for ${#BATCH[@]} accessions (Batch ID: ${BATCH_ID})."
 }
 
 #######################################
