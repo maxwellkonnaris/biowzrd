@@ -3,12 +3,11 @@
 #SBATCH --output=fastq_processing_%j.out
 #SBATCH --error=fastq_processing_%j.err
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16  # Adjust based on your cluster
+#SBATCH --cpus-per-task=16  # Adjust for your cluster
 #SBATCH --mem=16G           # Adjust as needed
-#SBATCH --time=48:00:00     # Adjust time limit (hh:mm:ss)
+#SBATCH --time=48:00:00     # Adjust as needed
 
-# Load any necessary modules (if required, e.g., for parallel)
-module load parallel
+module load parallel  # Load GNU parallel if necessary
 
 # Directory containing FASTQ files
 INPUT_DIR="./fastq_files"
@@ -16,7 +15,7 @@ OUTPUT_FILE="output.tsv"
 LOCKFILE="/tmp/fastq_processing.lock"
 
 # Ensure output file exists with header row
-echo -e "Filename\tAccession\tInstrument\tRun\tFlowcell_ID\tLane\tTile\tX\tY\tRead\tIsFiltered\tControl\tIndex" > "$OUTPUT_FILE"
+echo -e "Filename\tAccession\tFormat\tInstrument\tRun\tFlowcell_ID\tLane\tTile\tX\tY\tRead\tIsFiltered\tControl\tIndex" > "$OUTPUT_FILE"
 
 # Function to process a single FASTQ file
 process_fastq() {
@@ -27,9 +26,16 @@ process_fastq() {
     zcat "$file" | sed -n '1~4p' | awk -v filename="$file" -v accession="$accession" '
     BEGIN { OFS="\t" }
     {
-        match($0, /^@([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^ ]+) ([^:]+):([^:]+):([^:]+):([^ ]+)/, a);
-        if (RLENGTH > 0) {
-            print filename, accession, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11];
+        if ($1 ~ /^@(SRR|ERR|DRR)/) {  # SRA/ENA/DDBJ Format
+            match($0, /^@([^ ]+) ([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^ ]+) length=[0-9]+/, a);
+            if (RLENGTH > 0) {
+                print filename, accession, "SRA/ENA/DDBJ", a[2], a[3], a[4], a[5], a[6], a[7], a[8], "-", "-", "-", "-";
+            }
+        } else if ($1 ~ /^@[A-Za-z0-9]+:[0-9]+:/) {  # Illumina Format
+            match($0, /^@([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^ ]+) ([^:]+):([^:]+):([^:]+):([^ ]+)/, a);
+            if (RLENGTH > 0) {
+                print filename, accession, "Illumina", a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11];
+            }
         }
     }' | flock "$LOCKFILE" tee -a "$OUTPUT_FILE" >/dev/null
 }
