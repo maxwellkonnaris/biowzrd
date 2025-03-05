@@ -1,4 +1,5 @@
 #!/bin/bash
+#OBTAINING METADATA FROM SRA
 
 # Default query (if user does not provide one)
 SEARCH_QUERY="Human Microbiome Project AND amplicon[Strategy] AND Illumina[Platform]"
