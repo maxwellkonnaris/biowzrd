@@ -73,7 +73,7 @@ search_results <- entrez_search(
   use_history = TRUE
 )
 
-total_records <- search_results\$count
+total_records <- search_results$count
 message("Total Records Found: ", total_records)
 flush.console()
 
@@ -84,7 +84,7 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
   retries <- 0
   while (retries < max_retries) {
     tryCatch({
-      metadata_xml <- entrez_fetch(db = db_name, web_history = search_results\$web_history, rettype = "xml", retstart = start, retmax = batch_size)
+      metadata_xml <- entrez_fetch(db = db_name, web_history = search_results$web_history, rettype = "xml", retstart = start, retmax = batch_size)
       parsed_metadata <- read_xml(metadata_xml)
       
       if (is.null(parsed_metadata)) {
@@ -115,7 +115,7 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
       return(batch_metadata)
     }, error = function(e) {
       retries <- retries + 1
-      message("Retry ", retries, " for batch at ", start, " due to error: ", e\$message)
+      message("Retry ", retries, " for batch at ", start, " due to error: ", e$message)
       flush.console()
       Sys.sleep(delay_time * retries)  # Increase delay with each retry
     })
@@ -142,19 +142,44 @@ if (nrow(all_metadata) != total_records) {
   flush.console()
 }
 
-write_csv(all_metadata, "raw_sra_metadata.csv", progress = FALSE)
+# Ensure all columns are character type
+all_metadata <- all_metadata %>%
+  mutate(across(everything(), as.character))
+
+# Identify and log list-columns (if any)
+problematic_columns <- names(all_metadata)[sapply(all_metadata, is.list)]
+if (length(problematic_columns) > 0) {
+    message("Warning: The following columns are lists and may cause formatting issues: ", 
+            paste(problematic_columns, collapse = ", "))
+    
+    # Convert list columns to semicolon-separated strings
+    all_metadata <- all_metadata %>%
+        mutate(across(where(is.list), ~map_chr(.x, ~paste(.x, collapse = "; "))))
+}
+
+# Remove duplicate rows
+all_metadata <- distinct(all_metadata)
+
+# Truncate overly long fields (>10,000 characters)
+truncate_long_fields <- function(x) {
+  ifelse(nchar(x) > 10000, substr(x, 1, 10000), x)
+}
+
+all_metadata <- all_metadata %>%
+  mutate(across(everything(), truncate_long_fields))
+
+# Check for embedded commas in fields
+contains_commas <- sapply(all_metadata, function(col) any(grepl(",", col, fixed = TRUE)))
+message("Columns containing commas: ", paste(names(all_metadata)[contains_commas], collapse = ", "))
+
+# Write cleaned metadata to CSV
+write_csv(all_metadata, "raw_sra_metadata.csv", na = "", progress = FALSE)
+
 message("Data saved successfully: raw_sra_metadata.csv")
 flush.console()
 EOF
 
 # Run the R script and ensure console output is displayed immediately
-Rscript hmp_16s_query.R | tee real_time_log.txt
-
-# Fix newlines breaking rows
-# awk 'BEGIN{FS=OFS=","} {if (NF!=84) {printf "%s ", $0} else {print $0}} END {print ""}' raw_sra_metadata.csv > clean_sra_metadata.csv
-# sort clean_sra_metadata.csv | uniq > clean_sra_metadata.csv
-echo "Final Row Count: $(wc -l < clean_sra_metadata.csv)"
-
-
+Rscript hmp_16s_query.R
 
 echo "Script execution completed."
