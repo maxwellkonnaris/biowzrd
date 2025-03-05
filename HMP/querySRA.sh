@@ -36,8 +36,7 @@ flush.console()
 
 # Define required packages
 required_packages <- c("rentrez", "dplyr", "stringr", "purrr", "xml2", 
-                       "tidyr", "readr", "foreach", "doParallel", 
-                       "future", "furrr", "parallelly")
+                       "tidyr", "readr")
 
 # Identify missing packages
 missing_packages <- required_packages[!required_packages %in% installed.packages()[, "Package"]]
@@ -52,39 +51,11 @@ if (length(missing_packages) > 0) {
 # Load all packages and check if any failed
 loaded_packages <- sapply(required_packages, function(pkg) require(pkg, character.only = TRUE))
 
-# Ensure furrr is properly loaded
-if (!loaded_packages["furrr"]) {
-    message("furrr package not found. Installing now...")
-    flush.console()
-    install.packages("furrr", dependencies = TRUE)
-    library(furrr)
-}
-
 # Warn the user if any package failed to load
 if (any(!loaded_packages)) {
     warning("The following packages failed to load: ", 
             paste(required_packages[!loaded_packages], collapse = ", "))
     flush.console()
-}
-
-# Detect available CPU cores, respecting system limits
-available_cores <- parallelly::availableCores()
-message("Available CPU cores: ", available_cores)
-flush.console()
-
-# If only 1 core is available, run sequentially
-if (available_cores <= 1) {
-  message("Only 1 core available. Running sequentially...")
-  flush.console()
-  plan(sequential)  # Use sequential processing
-  batch_size <- 10000  # Larger batch size for sequential processing
-} else {
-  # Use fewer cores than available to avoid overloading the system
-  num_cores <- min(available_cores - 1, 4)  # Use at most 4 cores
-  message("Using ", num_cores, " cores for parallel processing...")
-  flush.console()
-  plan(multisession, workers = num_cores)  # Use future's multisession for parallel processing
-  batch_size <- 1000  # Smaller batch size for parallel processing
 }
 
 delay_time <- 3  # Increased delay to avoid API limits
@@ -157,23 +128,14 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
   return(NULL)
 }
 
-batch_indices <- seq(0, total_records - 1, by = batch_size)
+batch_indices <- seq(0, total_records - 1, by = 10000)  # Larger batch size for sequential processing
 
-if (available_cores <= 1) {
-  all_metadata <- map_dfr(batch_indices, function(start) {
-    message("Fetching records ", start, " to ", min(start + batch_size, total_records))
+all_metadata <- map_dfr(batch_indices, function(start) {
+    message("Fetching records ", start, " to ", min(start + 10000, total_records))
     flush.console()
-    result <- fetch_batch(start, batch_size, search_results, "sra")
+    result <- fetch_batch(start, 10000, search_results, "sra")
     return(result)
-  })
-} else {
-  all_metadata <- future_map_dfr(batch_indices, function(start) {
-    message("Fetching records ", start, " to ", min(start + batch_size, total_records))
-    flush.console()
-    result <- fetch_batch(start, batch_size, search_results, "sra")
-    return(result)
-  }, .options = furrr_options(seed = TRUE))
-}
+})
 
 if (nrow(all_metadata) != total_records) {
   warning("Mismatch in total records. Expected:", total_records, "Got:", nrow(all_metadata))
