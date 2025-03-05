@@ -59,7 +59,7 @@ search_results <- entrez_search(
 )
 
 total_records <- search_results$count
-print("Total Records Found:", total_records, "\n")
+message("Total Records Found: ", total_records)
 
 # Function to fetch and parse a batch of records
 fetch_batch <- function(start, batch_size, search_results, db_name) {
