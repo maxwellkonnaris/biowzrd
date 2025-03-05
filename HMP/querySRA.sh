@@ -32,7 +32,7 @@ cat <<EOF > hmp_16s_query.R
 options(repos = c(CRAN = "https://cloud.r-project.org/"))
 
 # Load required libraries, install if missing
-required_packages <- c("rentrez", "dplyr", "stringr", "purrr", "xml2", "tidyr", "readr", "foreach", "doParallel")
+required_packages <- c("rentrez", "dplyr", "stringr", "purrr", "xml2", "tidyr", "readr", "foreach", "doParallel", "future", "furrr", "parallelly")
 
 for (pkg in required_packages) {
   if (!require(pkg, character.only = TRUE)) {
@@ -41,14 +41,24 @@ for (pkg in required_packages) {
   }
 }
 
-# Parallel Processing Setup
-num_cores <- parallel::detectCores() - 1  # Use all available cores minus one
-cl <- parallel::makeCluster(num_cores)
-doParallel::registerDoParallel(cl)
+# Detect available CPU cores, respecting system limits
+available_cores <- parallelly::availableCores()
+message("Available CPU cores: ", available_cores)
+
+# If only 1 core is available, run sequentially
+if (available_cores <= 1) {
+  message("Only 1 core available. Running sequentially...")
+  plan(sequential)  # Use sequential processing
+} else {
+  # Use fewer cores than available to avoid overloading the system
+  num_cores <- min(available_cores - 1, 4)  # Use at most 4 cores
+  message("Using ", num_cores, " cores for parallel processing...")
+  plan(multisession, workers = num_cores)  # Use future's multisession for parallel processing
+}
 
 batch_size <- 500  # Adjustable
-delay_time <- 1  # Time delay to avoid API limits
-max_retries <- 3  # Maximum number of retries for failed batches
+delay_time <- 3  # Increased delay to avoid API limits
+max_retries <- 5  # Maximum number of retries for failed batches
 search_query <- "$ESCAPED_QUERY"
 
 search_results <- entrez_search(
@@ -61,7 +71,7 @@ search_results <- entrez_search(
 total_records <- search_results\$count
 message("Total Records Found: ", total_records)
 
-# Function to fetch and parse a batch of records
+# Function to fetch and parse a batch of records with retry logic
 fetch_batch <- function(start, batch_size, search_results, db_name) {
   retries <- 0
   while (retries < max_retries) {
@@ -98,16 +108,32 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
   return(NULL)
 }
 
-# Parallel Batch Processing
+# Batch Processing (parallel or sequential depending on available cores)
 batch_indices <- seq(0, total_records, by = batch_size)
 
-all_metadata <- foreach(start = batch_indices, .combine = bind_rows, .packages = c("rentrez", "dplyr", "xml2", "tidyr")) %dopar% {
-  cat("Fetching records", start, "to", min(start + batch_size, total_records), "\\n")
-  fetch_batch(start, batch_size, search_results, "sra")
+if (available_cores <= 1) {
+  # Sequential processing
+  all_metadata <- map_dfr(batch_indices, function(start) {
+    cat("Fetching records", start, "to", min(start + batch_size, total_records), "\\n")
+    result <- fetch_batch(start, batch_size, search_results, "sra")
+    if (is.null(result)) {
+      cat("Failed to fetch batch starting at", start, "after", max_retries, "retries. Skipping...\\n")
+      return(NULL)
+    }
+    return(result)
+  })
+} else {
+  # Parallel processing with future
+  all_metadata <- future_map_dfr(batch_indices, function(start) {
+    cat("Fetching records", start, "to", min(start + batch_size, total_records), "\\n")
+    result <- fetch_batch(start, batch_size, search_results, "sra")
+    if (is.null(result)) {
+      cat("Failed to fetch batch starting at", start, "after", max_retries, "retries. Skipping...\\n")
+      return(NULL)
+    }
+    return(result)
+  }, .options = furrr_options(seed = TRUE))
 }
-
-# Stop parallel processing
-parallel::stopCluster(cl)
 
 # Validate total rows
 if (nrow(all_metadata) != total_records) {
