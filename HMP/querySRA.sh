@@ -135,7 +135,7 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
       # Standardize all fields to the same length
       max_length <- max(sapply(batch_data, length))
       for (field in names(batch_data)) {
-        batch_data[[field]] <- c(batch_data[[field]], rep(NA, max_length - length(batch_data[[field]]))
+        batch_data[[field]] <- c(batch_data[[field]], rep(NA, max_length - length(batch_data[[field]])))
       }
 
       batch_metadata <- as_tibble(batch_data)
