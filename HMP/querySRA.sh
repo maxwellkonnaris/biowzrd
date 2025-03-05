@@ -58,7 +58,7 @@ search_results <- entrez_search(
   use_history = TRUE
 )
 
-total_records <- search_results$count
+total_records <- search_results\$count
 message("Total Records Found: ", total_records)
 
 # Function to fetch and parse a batch of records
