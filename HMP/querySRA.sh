@@ -114,7 +114,7 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
       return(batch_metadata)
     }, error = function(e) {
       retries <- retries + 1
-      message("Retry ", retries, " for batch at ", start, " due to error: ", e$message)
+      message("Retry ", retries, " for batch at ", start, " due to error: ", e\$message)
       flush.console()
       Sys.sleep(delay_time * retries)  # Increase delay with each retry
     })
