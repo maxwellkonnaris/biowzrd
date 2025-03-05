@@ -77,15 +77,16 @@ if (available_cores <= 1) {
   message("Only 1 core available. Running sequentially...")
   flush.console()
   plan(sequential)  # Use sequential processing
+  batch_size <- 10000  # Larger batch size for sequential processing
 } else {
   # Use fewer cores than available to avoid overloading the system
   num_cores <- min(available_cores - 1, 4)  # Use at most 4 cores
   message("Using ", num_cores, " cores for parallel processing...")
   flush.console()
   plan(multisession, workers = num_cores)  # Use future's multisession for parallel processing
+  batch_size <- 1000  # Smaller batch size for parallel processing
 }
 
-batch_size <- 10000  # Adjustable
 delay_time <- 3  # Increased delay to avoid API limits
 max_retries <- 5  # Maximum number of retries for failed batches
 search_query <- "$ESCAPED_QUERY"
