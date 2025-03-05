@@ -76,13 +76,9 @@ total_records <- search_results\$count
 message("Total Records Found: ", total_records)
 flush.console()
 
-log_message <- function(msg) {
-  cat(paste0(Sys.time(), ": ", msg, "\n"), file = "worker_log.txt", append = TRUE)
-}
-
 # Function to fetch and parse a batch of records with retry logic
 fetch_batch <- function(start, batch_size, search_results, db_name) {
-  log_message(paste("Attempting to fetch batch: ", start, " - ", min(start + batch_size, total_records))
+  message("Attempting to fetch batch: ", start, " - ", min(start + batch_size, total_records))
   flush.console()
   retries <- 0
   while (retries < max_retries) {
@@ -91,7 +87,7 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
       parsed_metadata <- read_xml(metadata_xml)
       
       if (is.null(parsed_metadata)) {
-        log_message(paste("Parsed metadata is NULL for batch: ", start))
+        message("Parsed metadata is NULL for batch: ", start)
         flush.console()
         return(NULL)
       }
