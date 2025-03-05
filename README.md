@@ -8,7 +8,7 @@ Follow these steps to **clone the repository** and **run the setup script** to c
    ```
 2. Build conda environment for dependencies and required packages, run:
    ```bash
-   conda create -n biowzrd -f environment.yml
+   conda create -n biowzrd --file environment.txt
    conda list
    conda activate biowzrd
    ```
