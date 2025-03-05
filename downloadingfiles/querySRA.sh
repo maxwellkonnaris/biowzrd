@@ -151,8 +151,8 @@ EOF
 Rscript hmp_16s_query.R | tee real_time_log.txt
 
 # Fix newlines breaking rows
-awk 'BEGIN{FS=OFS=","} {if (NF!=84) {printf "%s ", $0} else {print $0}} END {print ""}' raw_sra_metadata.csv > clean_sra_metadata.csv
-sort clean_sra_metadata.csv | uniq > clean_sra_metadata.csv
+# awk 'BEGIN{FS=OFS=","} {if (NF!=84) {printf "%s ", $0} else {print $0}} END {print ""}' raw_sra_metadata.csv > clean_sra_metadata.csv
+# sort clean_sra_metadata.csv | uniq > clean_sra_metadata.csv
 echo "Final Row Count: $(wc -l < clean_sra_metadata.csv)"
 
 
