@@ -150,4 +150,11 @@ EOF
 # Run the R script and ensure console output is displayed immediately
 Rscript hmp_16s_query.R | tee real_time_log.txt
 
+# Fix newlines breaking rows
+awk 'BEGIN{FS=OFS=","} {if (NF!=84) {printf "%s ", $0} else {print $0}} END {print ""}' raw_sra_metadata.csv > raw_sra_metadata.csv
+sort raw_sra_metadata.csv | uniq > raw_sra_metadata.csv
+echo "Final Row Count: $(wc -l < deduplicated_sra_metadata.csv)"
+
+
+
 echo "Script execution completed."
