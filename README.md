@@ -13,9 +13,9 @@ Follow these steps to **clone the repository** and **run the setup script** to c
    conda activate biowzrd
    ```
 3. Set permissions for setup.py, run:
-  ```bash
+   ```bash
    chmod +x setup.py
-  ```
+   ```
 5. Add executable permissions to all scripts, run:
    ```python
    python setup.py
