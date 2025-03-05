@@ -56,7 +56,7 @@ if (available_cores <= 1) {
   plan(multisession, workers = num_cores)  # Use future's multisession for parallel processing
 }
 
-batch_size <- 500  # Adjustable
+batch_size <- 10000  # Adjustable
 delay_time <- 3  # Increased delay to avoid API limits
 max_retries <- 5  # Maximum number of retries for failed batches
 search_query <- "$ESCAPED_QUERY"
