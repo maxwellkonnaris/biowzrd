@@ -83,7 +83,7 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
   retries <- 0
   while (retries < max_retries) {
     tryCatch({
-      metadata_xml <- entrez_fetch(db = db_name, web_history = search_results$web_history, rettype = "xml", retstart = start, retmax = batch_size)
+      metadata_xml <- entrez_fetch(db = db_name, web_history = search_results\$web_history, rettype = "xml", retstart = start, retmax = batch_size)
       parsed_metadata <- read_xml(metadata_xml)
       
       if (is.null(parsed_metadata)) {
