@@ -47,6 +47,12 @@ if (length(missing_packages) > 0) {
 # Load all packages and check if any failed
 loaded_packages <- sapply(required_packages, function(pkg) require(pkg, character.only = TRUE))
 
+# Ensure furrr is properly loaded
+if (!loaded_packages["furrr"]) {
+    install.packages("furrr", dependencies = TRUE)
+    library(furrr)
+}
+
 # Warn the user if any package failed to load
 if (any(!loaded_packages)) {
     warning("The following packages failed to load: ", 
@@ -85,6 +91,7 @@ message("Total Records Found: ", total_records)
 
 # Function to fetch and parse a batch of records with retry logic
 fetch_batch <- function(start, batch_size, search_results, db_name) {
+  message("Attempting to fetch batch: ", start, " - ", start + batch_size)
   retries <- 0
   while (retries < max_retries) {
     tryCatch({
@@ -120,8 +127,11 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
   return(NULL)
 }
 
-# Batch Processing (parallel or sequential depending on available cores)
-batch_indices <- seq(0, total_records, by = batch_size)
+# Adjust batch indices to cover all records
+batch_indices <- seq(0, total_records - 1, by = batch_size)
+
+# Distribute batch size evenly across cores but do not exceed 10000 per batch
+batch_size_per_core <- max(ceiling(total_records / num_cores), 10000)
 
 if (available_cores <= 1) {
   # Sequential processing
@@ -137,8 +147,8 @@ if (available_cores <= 1) {
 } else {
   # Parallel processing with future
   all_metadata <- future_map_dfr(batch_indices, function(start) {
-    cat("Fetching records", start, "to", min(start + batch_size, total_records), "\\n")
-    result <- fetch_batch(start, batch_size, search_results, "sra")
+    cat("Fetching records", start, "to", min(start + batch_size_per_core, total_records), "\\n")
+    result <- fetch_batch(start, batch_size_per_core, search_results, "sra")
     if (is.null(result)) {
       cat("Failed to fetch batch starting at", start, "after", max_retries, "retries. Skipping...\\n")
       return(NULL)
