@@ -31,14 +31,26 @@ cat <<EOF > hmp_16s_query.R
 # Set CRAN mirror explicitly
 options(repos = c(CRAN = "https://cloud.r-project.org/"))
 
-# Load required libraries, install if missing
-required_packages <- c("rentrez", "dplyr", "stringr", "purrr", "xml2", "tidyr", "readr", "foreach", "doParallel", "future", "furrr", "parallelly")
+# Define required packages
+required_packages <- c("rentrez", "dplyr", "stringr", "purrr", "xml2", 
+                       "tidyr", "readr", "foreach", "doParallel", 
+                       "future", "furrr", "parallelly")
 
-for (pkg in required_packages) {
-  if (!require(pkg, character.only = TRUE)) {
-    install.packages(pkg, dependencies = TRUE)
-    library(pkg, character.only = TRUE)
-  }
+# Identify missing packages
+missing_packages <- required_packages[!required_packages %in% installed.packages()[, "Package"]]
+
+# Install missing packages if any
+if (length(missing_packages) > 0) {
+    install.packages(missing_packages, dependencies = TRUE)
+}
+
+# Load all packages and check if any failed
+loaded_packages <- sapply(required_packages, function(pkg) require(pkg, character.only = TRUE))
+
+# Warn the user if any package failed to load
+if (any(!loaded_packages)) {
+    warning("The following packages failed to load: ", 
+            paste(required_packages[!loaded_packages], collapse = ", "))
 }
 
 # Detect available CPU cores, respecting system limits
@@ -143,9 +155,8 @@ if (nrow(all_metadata) != total_records) {
 }
 
 # Save raw data
-write_csv(all_metadata, "raw_sra_metadata.csv")
-
-cat("Raw metadata saved successfully: raw_sra_metadata.csv\\n")
+write_csv(all_metadata, "raw_sra_metadata.csv", progress = FALSE)
+message("Data saved successfully: raw_sra_metadata.csv")
 EOF
 
 # Run the R script
