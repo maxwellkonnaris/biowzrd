@@ -1,5 +1,3 @@
-List of packages in environment: "/storage/work/mak6930/applicationstorage/micromamba/envs/metagenomics"
-
   Name                           Version       Build                   Channel    
 ────────────────────────────────────────────────────────────────────────────────────
   _libgcc_mutex                  0.1           conda_forge             conda-forge
