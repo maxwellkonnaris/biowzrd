@@ -44,19 +44,20 @@ Packages required: Jellyfish
 
 ## Human Microbiome Project (HMP/)
 Packages required: aws (see download script for linux)
-1. Navigate to home directory and Install aws (installaws.sh)
+1. To download via aws, navigate to home directory and Install aws (installaws.sh)
 2. Download all trimmed 16s sequence files in fa.bzip format (downloadHMP_16s_trimmed.sh)
 3. Remove reads with length < 30 (removereads.sh)
+4. Metadata or downloading via SRA:
 
+To see how many sequences there are for HMP amplicon sequences generated from illumina sequencers
 ```R
-# See how many sequences there are for HMP amplicon sequences generated from illumina sequencers
-
 #library(devtools)
 #install_github("ropensci/rentrez")
 library(rentrez)
 search_results <- entrez_search(db="sra", term="Human Microbiome Project AND amplicon[Strategy] AND Illumina[Platform]", retmax=0, use_history=TRUE)
 ```
 
+Or instead to jump right to downloading the metadata. Note: Default without the -q (query flag) is what is given below.
 ```bash
 # Download all of the metadata for a specific query:
 
