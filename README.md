@@ -28,7 +28,7 @@ Packages required: NCBI toolkit, fastq-dl
    - this will give you a list of all of the run accessions in the bioproject
 3. run binary file downloadingfastq.sh
 
-If you wanted to obtain the full SRA metadata (1.6GB as of 3/2/25) for 16s amplicon sequences:
+If you wanted to obtain the full SRA metadata with only runinfo (1.6GB as of 3/2/25) for 16s amplicon sequences:
 ```bash
 search -db sra -query "16S[All Fields] AND amplicon[Strategy]" | efetch -format runinfo > sra_16s_metadata.csv
 ```
