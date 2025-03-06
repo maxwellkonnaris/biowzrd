@@ -89,69 +89,69 @@ while [[ $INDEX -lt $TOTAL_FILES ]]; do
         JOB_SCRIPT="logs/job_kmer_${FILE_NAME}_${KMER_SIZE}.sh"
 
         # Create a job script for this file and k-mer size
-        cat <<EOT > "$JOB_SCRIPT"
+       cat <<EOT > "$JOB_SCRIPT"
 #!/bin/bash
-#SBATCH --job-name=kmer_${FILE_NAME}_${KMER_SIZE}
-#SBATCH --output=logs/${FILE_NAME}_${KMER_SIZE}_kmer.out
-#SBATCH --error=logs/${FILE_NAME}_${KMER_SIZE}_kmer.err
+#SBATCH --job-name=kmer_\${FILE_NAME}_\${KMER_SIZE}
+#SBATCH --output=logs/\${FILE_NAME}_\${KMER_SIZE}_kmer.out
+#SBATCH --error=logs/\${FILE_NAME}_\${KMER_SIZE}_kmer.err
 #SBATCH --time=02:00:00
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Starting processing for file $FILE_NAME with k-mer size $KMER_SIZE" >> "$JOB_LOG"
+echo "\$(date '+%Y-%m-%d %H:%M:%S') Starting processing for file \$FILE_NAME with k-mer size \$KMER_SIZE" >> "\$JOB_LOG"
 
 # Ensure the output directory exists
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "\$OUTPUT_DIR"
 
 # Define output files
-JF_OUTPUT="$OUTPUT_DIR/${FILE_NAME}_kmer_${KMER_SIZE}.jf"
-TXT_OUTPUT="$OUTPUT_DIR/${FILE_NAME}_kmer_counts_${KMER_SIZE}.txt"
+JF_OUTPUT="\$OUTPUT_DIR/\${FILE_NAME}_kmer_\${KMER_SIZE}.jf"
+TXT_OUTPUT="\$OUTPUT_DIR/\${FILE_NAME}_kmer_counts_\${KMER_SIZE}.txt"
 
 # Debug: Print output file paths
-echo "Output file (Jellyfish): $JF_OUTPUT" >> "$JOB_LOG"
-echo "Output file (Text): $TXT_OUTPUT" >> "$JOB_LOG"
+echo "Output file (Jellyfish): \$JF_OUTPUT" >> "\$JOB_LOG"
+echo "Output file (Text): \$TXT_OUTPUT" >> "\$JOB_LOG"
 
 # Retry loop for Jellyfish
 retry_count=0
-while [[ \$retry_count -lt $MAX_RETRIES ]]; do
-    if [[ -f "$INPUT_DIR/$FILE_NAME" ]]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') Running Jellyfish for $FILE_NAME with k-mer size $KMER_SIZE (attempt \$((retry_count + 1))/$MAX_RETRIES)" >> "$JOB_LOG"
-        jellyfish count -m "$KMER_SIZE" -s "$HASH_SIZE" -t "$THREADS" -C -o "$JF_OUTPUT" \\
-            <(zcat "$INPUT_DIR/$FILE_NAME")
+while [[ \$retry_count -lt \$MAX_RETRIES ]]; do
+    if [[ -f "\$INPUT_DIR/\$FILE_NAME" ]]; then
+        echo "\$(date '+%Y-%m-%d %H:%M:%S') Running Jellyfish for \$FILE_NAME with k-mer size \$KMER_SIZE (attempt \$((retry_count + 1))/\$MAX_RETRIES)" >> "\$JOB_LOG"
+        jellyfish count -m "\$KMER_SIZE" -s "\$HASH_SIZE" -t "\$THREADS" -C -o "\$JF_OUTPUT" \\
+            <(zcat "\$INPUT_DIR/\$FILE_NAME")
         
         # Check if Jellyfish succeeded
         if [[ \$? -eq 0 ]]; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') Jellyfish completed successfully for $FILE_NAME with k-mer size $KMER_SIZE" >> "$JOB_LOG"
+            echo "\$(date '+%Y-%m-%d %H:%M:%S') Jellyfish completed successfully for \$FILE_NAME with k-mer size \$KMER_SIZE" >> "\$JOB_LOG"
             
             # Dump the k-mer counts into a human-readable format
-            jellyfish dump -c -t -o "$TXT_OUTPUT" "$JF_OUTPUT"
+            jellyfish dump -c -t -o "\$TXT_OUTPUT" "\$JF_OUTPUT"
             if [[ \$? -eq 0 ]]; then
-                echo "$(date '+%Y-%m-%d %H:%M:%S') K-mer counts dumped to $TXT_OUTPUT" >> "$JOB_LOG"
+                echo "\$(date '+%Y-%m-%d %H:%M:%S') K-mer counts dumped to \$TXT_OUTPUT" >> "\$JOB_LOG"
                 
                 # Append to checkpoint file only for this k-mer size
-                echo "$FILE_NAME:$KMER_SIZE" >> "$CHECKPOINT_FILE"
-                echo "$(date '+%Y-%m-%d %H:%M:%S') Added $FILE_NAME:$KMER_SIZE to checkpoint file." >> "$JOB_LOG"
+                echo "\$FILE_NAME:\$KMER_SIZE" >> "\$CHECKPOINT_FILE"
+                echo "\$(date '+%Y-%m-%d %H:%M:%S') Added \$FILE_NAME:\$KMER_SIZE to checkpoint file." >> "\$JOB_LOG"
                 
                 # Remove the temporary Jellyfish binary file to save space
-                rm -f "$JF_OUTPUT"
-                echo "$(date '+%Y-%m-%d %H:%M:%S') Removed temporary file: $JF_OUTPUT" >> "$JOB_LOG"
+                rm -f "\$JF_OUTPUT"
+                echo "\$(date '+%Y-%m-%d %H:%M:%S') Removed temporary file: \$JF_OUTPUT" >> "\$JOB_LOG"
                 break
             else
-                echo "$(date '+%Y-%m-%d %H:%M:%S') Failed to dump k-mer counts for $FILE_NAME at k-mer $KMER_SIZE. Skipping." >> "$JOB_LOG"
+                echo "\$(date '+%Y-%m-%d %H:%M:%S') Failed to dump k-mer counts for \$FILE_NAME at k-mer \$KMER_SIZE. Skipping." >> "\$JOB_LOG"
                 retry_count=\$((retry_count + 1))
             fi
         else
             retry_count=\$((retry_count + 1))
-            echo "$(date '+%Y-%m-%d %H:%M:%S') Jellyfish failed for $FILE_NAME at k-mer $KMER_SIZE (attempt \$retry_count/$MAX_RETRIES). Retrying..." >> "$JOB_LOG"
+            echo "\$(date '+%Y-%m-%d %H:%M:%S') Jellyfish failed for \$FILE_NAME at k-mer \$KMER_SIZE (attempt \$retry_count/\$MAX_RETRIES). Retrying..." >> "\$JOB_LOG"
         fi
     else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') No valid FASTQ file found for $FILE_NAME at k-mer $KMER_SIZE. Skipping." >> "$JOB_LOG"
+        echo "\$(date '+%Y-%m-%d %H:%M:%S') No valid FASTQ file found for \$FILE_NAME at k-mer \$KMER_SIZE. Skipping." >> "\$JOB_LOG"
         break
     fi
 done
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') Finished processing file $FILE_NAME with k-mer size $KMER_SIZE" >> "$JOB_LOG"
+echo "\$(date '+%Y-%m-%d %H:%M:%S') Finished processing file \$FILE_NAME with k-mer size \$KMER_SIZE" >> "\$JOB_LOG"
 EOT
 
         # Make the job script executable
