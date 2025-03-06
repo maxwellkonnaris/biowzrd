@@ -46,6 +46,7 @@ submit_job() {
 WORKDIR="$WORKDIR"
 CHECKPOINT_FILE="$CHECKPOINT_FILE"
 LOCK_FILE="$LOCK_FILE"
+SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}*.sra" 
 
 # Function to Determine the Correct Provider
 get_provider() {
@@ -152,11 +153,12 @@ fi
     echo "\$ACCESSION" >> "\$CHECKPOINT_FILE"
 ) 200>"\${LOCK_FILE}"
 
-# Delete .sra if present
-SRA_FILE="\${WORKDIR}/fastq_data/\${ACCESSION}.sra"
-if [[ -f "\$SRA_FILE" ]]; then
-    echo "🔹 Removing leftover .sra file: \$SRA_FILE"
-    rm -f "\$SRA_FILE"
+# Delete all .sra files associated with the accession after FASTQ files are successfully downloaded
+if ls $SRA_FILES 1> /dev/null 2>&1; then
+    echo "🔹 Removing leftover .sra files: $SRA_FILES"
+    rm -f $SRA_FILES
+else
+    echo "🔹 No .sra files found to delete."
 fi
 
 echo "✅ Successfully downloaded and gzipped FASTQ files for \$ACCESSION."
