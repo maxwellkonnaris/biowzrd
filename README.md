@@ -33,6 +33,26 @@ If you wanted to obtain the full SRA metadata with only runinfo (1.6GB as of 3/2
 search -db sra -query "16S[All Fields] AND amplicon[Strategy]" | efetch -format runinfo > sra_16s_metadata.csv
 ```
 
+The -format runinfo command should return a table with columns like:
+
+- Run (Run accession ID)
+- ReleaseDate (Date when data was made public)
+- LoadDate (Date when data was loaded into the SRA database)
+- Spots (Number of sequencing reads)
+- Bases (Total number of bases)
+- Experiment (Experiment accession ID)
+- Sample (Sample accession ID)
+- BioProject (BioProject ID)
+- BioSample (BioSample ID)
+- LibraryStrategy (e.g., AMPLICON)
+- LibrarySource (e.g., METAGENOMIC)
+- LibrarySelection (e.g., PCR)
+- LibraryLayout (SINGLE or PAIRED)
+- Platform (e.g., ILLUMINA)
+- Instrument (e.g., Illumina MiSeq)
+- Study (Study accession ID)
+- CenterName (Name of the sequencing center)
+
 ## Quality control (nonassemblyQC/ or assemblyQC/)
 Packages required: fastp
 1. Perform absolute minimal quality control from publicly available sequences. This is with the assumption that host reads and adapters, if not paired-end sequences, are removed. In NCBI SRA see this statement: https://www.ncbi.nlm.nih.gov/sra/docs/submit/ for Metagenomic data. 
