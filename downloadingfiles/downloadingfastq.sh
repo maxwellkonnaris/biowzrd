@@ -163,6 +163,7 @@ echo "✅ Successfully downloaded and gzipped FASTQ files for \$ACCESSION."
 
 # Clean up logs if everything is fine
 rm -f "$JOB_SCRIPT"
+rm -f "${WORKDIR}/logs/${ACCESSION}.out" "${WORKDIR}/logs/${ACCESSION}.err"
 EOF
 
     chmod +x "$JOB_SCRIPT"
