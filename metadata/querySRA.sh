@@ -73,7 +73,7 @@ search_results <- entrez_search(
   use_history = TRUE
 )
 
-total_records <- search_results$count
+total_records <- search_results\$count
 message("Total Records Found: ", total_records)
 flush.console()
 
@@ -85,7 +85,7 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
   while (retries < max_retries) {
     tryCatch({
       # Fetch metadata in 'native' format
-      metadata_text <- entrez_fetch(db = db_name, web_history = search_results$web_history, 
+      metadata_text <- entrez_fetch(db = db_name, web_history = search_results\$web_history, 
                                     rettype = "native", retmode = "text", 
                                     retstart = start, retmax = batch_size)
       
@@ -98,7 +98,7 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
       
     }, error = function(e) {
       retries <- retries + 1
-      message("Retry ", retries, " for batch at ", start, " due to error: ", e$message)
+      message("Retry ", retries, " for batch at ", start, " due to error: ", e\$message)
       flush.console()
       Sys.sleep(delay_time * retries)  # Increase delay with each retry
     })
