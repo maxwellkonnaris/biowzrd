@@ -84,35 +84,18 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
   retries <- 0
   while (retries < max_retries) {
     tryCatch({
-      metadata_xml <- entrez_fetch(db = db_name, web_history = search_results$web_history, rettype = "xml", retstart = start, retmax = batch_size)
-      parsed_metadata <- read_xml(metadata_xml)
+      # Fetch metadata in 'native' format
+      metadata_text <- entrez_fetch(db = db_name, web_history = search_results$web_history, 
+                                    rettype = "native", retmode = "text", 
+                                    retstart = start, retmax = batch_size)
       
-      if (is.null(parsed_metadata)) {
-        message("Parsed metadata is NULL for batch: ", start)
-        flush.console()
-        return(NULL)
-      }
+      # Convert text into a tibble
+      batch_metadata <- read_delim(metadata_text, delim = "\t", col_types = cols(.default = "c"))
       
       message("Successfully fetched batch: ", start)
       flush.console()
-
-      # Extract metadata fields dynamically
-      all_nodes <- xml_find_all(parsed_metadata, "//*")  # Get all XML nodes
-      field_names <- unique(xml_name(all_nodes))  # Extract unique field names
-
-      batch_data <- list()
-      for (field in field_names) {
-        batch_data[[field]] <- xml_find_all(parsed_metadata, paste0("//", field)) %>% xml_text()
-      }
-
-      # Standardize all fields to the same length
-      max_length <- max(sapply(batch_data, length))
-      for (field in names(batch_data)) {
-        batch_data[[field]] <- c(batch_data[[field]], rep(NA, max_length - length(batch_data[[field]])))
-      }
-
-      batch_metadata <- as_tibble(batch_data)
       return(batch_metadata)
+      
     }, error = function(e) {
       retries <- retries + 1
       message("Retry ", retries, " for batch at ", start, " due to error: ", e$message)
@@ -120,10 +103,12 @@ fetch_batch <- function(start, batch_size, search_results, db_name) {
       Sys.sleep(delay_time * retries)  # Increase delay with each retry
     })
   }
+  
   warning("Failed to fetch batch starting at ", start, " after ", max_retries, " retries.")
   flush.console()
   return(NULL)
 }
+
 
 batch_indices <- seq(0, total_records - 1, by = 10000)  # Larger batch size for sequential processing
 
