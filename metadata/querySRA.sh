@@ -1,4 +1,11 @@
 #!/bin/bash
+#SBATCH --job-name=SRAmetadata
+#SBATCH --output=SRAmetadatapull_%j.out
+#SBATCH --error=SRAmetadatapull_%j.err
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=16G
+#SBATCH --time=48:00:00
 #OBTAINING METADATA FROM SRA
 
 # Default query (if user does not provide one)
