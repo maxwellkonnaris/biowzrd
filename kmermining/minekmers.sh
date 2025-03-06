@@ -60,16 +60,17 @@ while [[ $INDEX -lt $TOTAL_FILES ]]; do
 
                 # Append job logs to the main log file and delete individual logs
                 FILE_NAME=$(grep "$job_id" "$ACTIVE_JOBS_FILE" | awk '{print $2}')
-                if [[ -n "$FILE_NAME" ]]; then
-                    echo "$(date '+%Y-%m-%d %H:%M:%S') Appending logs for job $job_id (file $FILE_NAME) to $JOB_LOG" >> "$JOB_LOG"
-                    cat "logs/${FILE_NAME}_kmer.out" >> "$JOB_LOG"
-                    cat "logs/${FILE_NAME}_kmer.err" >> "$JOB_LOG"
-                    rm -f "logs/${FILE_NAME}_kmer.out" "logs/${FILE_NAME}_kmer.err"
-                    echo "$(date '+%Y-%m-%d %H:%M:%S') Deleted individual logs for job $job_id (file $FILE_NAME)" >> "$JOB_LOG"
+                KMER_SIZE=$(grep "$job_id" "$ACTIVE_JOBS_FILE" | awk '{print $3}')
+                if [[ -n "$FILE_NAME" && -n "$KMER_SIZE" ]]; then
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') Appending logs for job $job_id (file $FILE_NAME, k-mer $KMER_SIZE) to $JOB_LOG" >> "$JOB_LOG"
+                    cat "logs/${FILE_NAME}_${KMER_SIZE}_kmer.out" >> "$JOB_LOG"
+                    cat "logs/${FILE_NAME}_${KMER_SIZE}_kmer.err" >> "$JOB_LOG"
+                    rm -f "logs/${FILE_NAME}_${KMER_SIZE}_kmer.out" "logs/${FILE_NAME}_${KMER_SIZE}_kmer.err"
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') Deleted individual logs for job $job_id (file $FILE_NAME, k-mer $KMER_SIZE)" >> "$JOB_LOG"
                 fi
 
                 # Delete the job script
-                JOB_SCRIPT="logs/job_kmer_${FILE_NAME}.sh"
+                JOB_SCRIPT="logs/job_kmer_${FILE_NAME}_${KMER_SIZE}.sh"
                 if [[ -f "$JOB_SCRIPT" ]]; then
                     rm -f "$JOB_SCRIPT"
                     echo "$(date '+%Y-%m-%d %H:%M:%S') Deleted job script: $JOB_SCRIPT" >> "$JOB_LOG"
@@ -100,42 +101,53 @@ while [[ $INDEX -lt $TOTAL_FILES ]]; do
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') Starting processing for file $FILE_NAME with k-mer size $KMER_SIZE" >> "$JOB_LOG"
 
+# Ensure the output directory exists
+mkdir -p "$OUTPUT_DIR"
+
+# Define output files
 JF_OUTPUT="$OUTPUT_DIR/${FILE_NAME}_kmer_${KMER_SIZE}.jf"
 TXT_OUTPUT="$OUTPUT_DIR/${FILE_NAME}_kmer_counts_${KMER_SIZE}.txt"
+
+# Debug: Print output file paths
+echo "Output file (Jellyfish): $JF_OUTPUT" >> "$JOB_LOG"
+echo "Output file (Text): $TXT_OUTPUT" >> "$JOB_LOG"
 
 # Retry loop for Jellyfish
 retry_count=0
 while [[ \$retry_count -lt $MAX_RETRIES ]]; do
     if [[ -f "$INPUT_DIR/$FILE_NAME" ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') Running Jellyfish for $FILE_NAME with k-mer size $KMER_SIZE (attempt \$((retry_count + 1))/$MAX_RETRIES)" >> "$JOB_LOG"
         jellyfish count -m "$KMER_SIZE" -s "$HASH_SIZE" -t "$THREADS" -C -o "$JF_OUTPUT" \\
             <(zcat "$INPUT_DIR/$FILE_NAME")
+        
+        # Check if Jellyfish succeeded
+        if [[ \$? -eq 0 ]]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') Jellyfish completed successfully for $FILE_NAME with k-mer size $KMER_SIZE" >> "$JOB_LOG"
+            
+            # Dump the k-mer counts into a human-readable format
+            jellyfish dump -c -t -o "$TXT_OUTPUT" "$JF_OUTPUT"
+            if [[ \$? -eq 0 ]]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') K-mer counts dumped to $TXT_OUTPUT" >> "$JOB_LOG"
+                
+                # Append to checkpoint file only for this k-mer size
+                echo "$FILE_NAME:$KMER_SIZE" >> "$CHECKPOINT_FILE"
+                echo "$(date '+%Y-%m-%d %H:%M:%S') Added $FILE_NAME:$KMER_SIZE to checkpoint file." >> "$JOB_LOG"
+                
+                # Remove the temporary Jellyfish binary file to save space
+                rm -f "$JF_OUTPUT"
+                echo "$(date '+%Y-%m-%d %H:%M:%S') Removed temporary file: $JF_OUTPUT" >> "$JOB_LOG"
+                break
+            else
+                echo "$(date '+%Y-%m-%d %H:%M:%S') Failed to dump k-mer counts for $FILE_NAME at k-mer $KMER_SIZE. Skipping." >> "$JOB_LOG"
+                retry_count=\$((retry_count + 1))
+            fi
+        else
+            retry_count=\$((retry_count + 1))
+            echo "$(date '+%Y-%m-%d %H:%M:%S') Jellyfish failed for $FILE_NAME at k-mer $KMER_SIZE (attempt \$retry_count/$MAX_RETRIES). Retrying..." >> "$JOB_LOG"
+        fi
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') No valid FASTQ file found for $FILE_NAME at k-mer $KMER_SIZE. Skipping." >> "$JOB_LOG"
         break
-    fi
-
-    # Check if Jellyfish succeeded
-    if [[ \$? -eq 0 ]]; then
-        # Dump the k-mer counts into a human-readable format
-        jellyfish dump -c -t -o "$TXT_OUTPUT" "$JF_OUTPUT"
-        if [[ \$? -eq 0 ]]; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') Finished processing $FILE_NAME with k-mer size $KMER_SIZE" >> "$JOB_LOG"
-
-            # Append to checkpoint file only for this k-mer size
-            echo "$FILE_NAME:$KMER_SIZE" >> "$CHECKPOINT_FILE"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') Added $FILE_NAME:$KMER_SIZE to checkpoint file." >> "$JOB_LOG"
-
-            # Remove the temporary Jellyfish binary file to save space
-            rm -f "$JF_OUTPUT"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') Removed temporary file: $JF_OUTPUT" >> "$JOB_LOG"
-            break
-        else
-            echo "$(date '+%Y-%m-%d %H:%M:%S') Failed to dump k-mer counts for $FILE_NAME at k-mer $KMER_SIZE. Skipping." >> "$JOB_LOG"
-            retry_count=\$((retry_count + 1))
-        fi
-    else
-        retry_count=\$((retry_count + 1))
-        echo "$(date '+%Y-%m-%d %H:%M:%S') Jellyfish failed for $FILE_NAME at k-mer $KMER_SIZE (attempt \$retry_count/$MAX_RETRIES). Retrying..." >> "$JOB_LOG"
     fi
 done
 
@@ -147,7 +159,7 @@ EOT
 
         # Submit the job and store the job ID
         JOB_ID=$(sbatch "$JOB_SCRIPT" | awk '{print $4}')
-        echo "$JOB_ID $FILE_NAME" >> "$ACTIVE_JOBS_FILE"
+        echo "$JOB_ID $FILE_NAME $KMER_SIZE" >> "$ACTIVE_JOBS_FILE"
 
         INDEX=$((INDEX + 1))
         echo "$(date '+%Y-%m-%d %H:%M:%S') Submitted job $JOB_ID for file $FILE_NAME with k-mer size $KMER_SIZE. Running jobs: $RUNNING_JOBS" >> "$JOB_LOG"
