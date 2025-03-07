@@ -32,6 +32,19 @@ submit_job() {
     local ACCESSION=$1
     local JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
 
+    # Debug: Log the accession and its prefix
+    ACCESSION_PREFIX=${ACCESSION:0:3}
+    echo "DEBUG: Accession = $ACCESSION, Prefix = $ACCESSION_PREFIX" >> "${WORKDIR}/logs/${ACCESSION}.out"
+
+    if [[ "$ACCESSION_PREFIX" =~ ^(SRR|SRX|SRS|SRP)$ ]]; then
+        PROVIDER="sra"
+    elif [[ "$ACCESSION_PREFIX" =~ ^(ERR|ERX|ERS|ERP|DRR|DRX|DRS|DRP)$ ]]; then
+        PROVIDER="ena"
+    else
+        echo "❌ ERROR: Unknown accession type: $ACCESSION" >> "${WORKDIR}/logs/${ACCESSION}.err"
+        exit 1
+    fi
+
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
@@ -175,7 +188,10 @@ TOTAL_JOBS=0
 
 while read -r ACCESSION; do
     # Skip empty lines
-    [[ -z "$ACCESSION" ]] && continue
+    [[ -z "$ACCESSION" ]] && { echo "⚠️ WARNING: Skipping empty accession."; continue; }
+
+    # Log the accession being processed
+    echo "Processing accession: $ACCESSION" >> "${WORKDIR}/logs/debug.log"
 
     # Check if ACCESSION is already done
     if grep -Fxq "${ACCESSION}" "${CHECKPOINT_FILE}"; then
