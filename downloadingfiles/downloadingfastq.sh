@@ -43,46 +43,20 @@ submit_job() {
 #SBATCH --ntasks=1
 
 # Configuration
+ACCESSION="${ACCESSION}"
 WORKDIR="$WORKDIR"
 CHECKPOINT_FILE="$CHECKPOINT_FILE"
 LOCK_FILE="$LOCK_FILE"
-SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}*.sra" 
+SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}*.sra"
 
-# Function to Determine the Correct Provider
-get_provider() {
-    local ACCESSION=\$1
-    local PREFIX=\${ACCESSION:0:3}
-
-    case "\$PREFIX" in
-        SRR) echo "sra" ;;  # NCBI SRA Run
-        ERR|DRR) echo "ena" ;;  # ENA/DRR Run (European/Japanese)
-        SRX) echo "sra" ;;  # SRA Experiment
-        ERX|DRX) echo "ena" ;;  # ENA/DRX Experiment
-        SRS) echo "sra" ;;  # SRA Sample
-        ERS|DRS) echo "ena" ;;  # ENA Sample
-        SRP) echo "sra" ;;  # SRA Study
-        ERP|DRP) echo "ena" ;;  # ENA/DRP Study
-        PRJ)
-            echo "❌ ERROR: BioProject accessions (PRJ...) must be resolved to Studies (SRP/ERP/DRP) first." >> "\${WORKDIR}/logs/\${ACCESSION}.err"
-            exit 1
-            ;;
-        SAM)
-            echo "❌ ERROR: BioSample accessions (SAM...) must be resolved to Samples (SRS/ERS/DRS) first." >> "\${WORKDIR}/logs/\${ACCESSION}.err"
-            exit 1
-            ;;
-        *)
-            echo "❌ ERROR: Unknown accession type: \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
-            exit 1
-            ;;
-    esac
-}
-
-# Process the accession
-ACCESSION="$ACCESSION"
-PROVIDER=\$(get_provider "\$ACCESSION")
-
-if [[ -z "\$PROVIDER" ]]; then
-    echo "❌ ERROR: Invalid provider for accession \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+# Determine the provider based on the accession prefix
+ACCESSION_PREFIX=\${ACCESSION:0:3}
+if [[ "\$ACCESSION_PREFIX" == "SRR" || "\$ACCESSION_PREFIX" == "SRX" || "\$ACCESSION_PREFIX" == "SRS" || "\$ACCESSION_PREFIX" == "SRP" ]]; then
+    PROVIDER="sra"
+elif [[ "\$ACCESSION_PREFIX" == "ERR" || "\$ACCESSION_PREFIX" == "ERX" || "\$ACCESSION_PREFIX" == "ERS" || "\$ACCESSION_PREFIX" == "ERP" || "\$ACCESSION_PREFIX" == "DRR" || "\$ACCESSION_PREFIX" == "DRX" || "\$ACCESSION_PREFIX" == "DRS" || "\$ACCESSION_PREFIX" == "DRP" ]]; then
+    PROVIDER="ena"
+else
+    echo "❌ ERROR: Unknown accession type: \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
     exit 1
 fi
 
@@ -114,7 +88,10 @@ fi
 for FILE in "\${WORKDIR}/fastq_data"/*.fastq; do
     if [[ -f "\$FILE" && "\$FILE" != *.gz ]]; then
         echo "🔹 Gzipping: \$FILE"
-        gzip "\$FILE"
+        if ! gzip "\$FILE"; then
+            echo "❌ ERROR: Failed to gzip \$FILE" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+            exit 1
+        fi
     fi
 done
 
@@ -133,16 +110,26 @@ ALL_METADATA_FILE="\${WORKDIR}/metadata/all_fastq_run_info.tsv"
 
 if [[ -f "\$ORIG_METADATA_FILE" ]]; then
     echo "🔹 Moving metadata file to metadata/ folder."
-    mv "\$ORIG_METADATA_FILE" "\${WORKDIR}/metadata/"
+    if ! mv "\$ORIG_METADATA_FILE" "\${WORKDIR}/metadata/"; then
+        echo "❌ ERROR: Failed to move metadata file for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+        exit 1
+    fi
     
     echo "🔹 Appending metadata to all_fastq_run_info.tsv with locking."
     (
-        flock -x 200  # Acquire exclusive lock
-        cat "\${WORKDIR}/metadata/\${METADATA_FILENAME}" >> "\$ALL_METADATA_FILE"
+        flock -x 200
+        if ! cat "\${WORKDIR}/metadata/\${METADATA_FILENAME}" >> "\$ALL_METADATA_FILE"; then
+            echo "❌ ERROR: Failed to append metadata for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+            exit 1
+        fi
+        rm -f "\${LOCK_FILE}"  # Clean up the lock file
     ) 200>"\${LOCK_FILE}"
     
     echo "🔹 Removing individual metadata file."
-    rm -f "\${WORKDIR}/metadata/\${METADATA_FILENAME}"
+    if ! rm -f "\${WORKDIR}/metadata/\${METADATA_FILENAME}"; then
+        echo "❌ ERROR: Failed to remove metadata file for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+        exit 1
+    fi
 else
     echo "⚠️ WARNING: No metadata file found for \$ACCESSION."
 fi
@@ -151,12 +138,16 @@ fi
 (
     flock -x 200
     echo "\$ACCESSION" >> "\$CHECKPOINT_FILE"
+    rm -f "\${LOCK_FILE}"  # Clean up the lock file
 ) 200>"\${LOCK_FILE}"
 
 # Delete all .sra files associated with the accession after FASTQ files are successfully downloaded
-if ls $SRA_FILES 1> /dev/null 2>&1; then
-    echo "🔹 Removing leftover .sra files: $SRA_FILES"
-    rm -f $SRA_FILES
+if ls \$SRA_FILES 1> /dev/null 2>&1; then
+    echo "🔹 Removing leftover .sra files: \$SRA_FILES"
+    if ! rm -f \$SRA_FILES; then
+        echo "❌ ERROR: Failed to delete .sra files for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+        exit 1
+    fi
 else
     echo "🔹 No .sra files found to delete."
 fi
@@ -169,7 +160,10 @@ rm -f "${WORKDIR}/logs/${ACCESSION}.out" "${WORKDIR}/logs/${ACCESSION}.err"
 EOF
 
     chmod +x "$JOB_SCRIPT"
-    sbatch "$JOB_SCRIPT"
+    if ! sbatch "$JOB_SCRIPT"; then
+        echo "❌ ERROR: Failed to submit job for ${ACCESSION}" >> "${WORKDIR}/logs/${ACCESSION}.err"
+        exit 1
+    fi
     echo "✅ Submitted job for ${ACCESSION}"
 }
 
