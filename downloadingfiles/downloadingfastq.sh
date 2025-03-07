@@ -43,7 +43,6 @@ submit_job() {
 #SBATCH --ntasks=1
 
 # Configuration
-ACCESSION="${ACCESSION}"
 WORKDIR="$WORKDIR"
 CHECKPOINT_FILE="$CHECKPOINT_FILE"
 LOCK_FILE="$LOCK_FILE"
@@ -51,9 +50,11 @@ SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}*.sra"
 
 # Determine the provider based on the accession prefix
 ACCESSION_PREFIX=\${ACCESSION:0:3}
-if [[ "\$ACCESSION_PREFIX" == "SRR" || "\$ACCESSION_PREFIX" == "SRX" || "\$ACCESSION_PREFIX" == "SRS" || "\$ACCESSION_PREFIX" == "SRP" ]]; then
+echo "DEBUG: Accession = \$ACCESSION, Prefix = \$ACCESSION_PREFIX" >> "\${WORKDIR}/logs/\${ACCESSION}.out"
+
+if [[ "\$ACCESSION_PREFIX" =~ ^(SRR|SRX|SRS|SRP)$ ]]; then
     PROVIDER="sra"
-elif [[ "\$ACCESSION_PREFIX" == "ERR" || "\$ACCESSION_PREFIX" == "ERX" || "\$ACCESSION_PREFIX" == "ERS" || "\$ACCESSION_PREFIX" == "ERP" || "\$ACCESSION_PREFIX" == "DRR" || "\$ACCESSION_PREFIX" == "DRX" || "\$ACCESSION_PREFIX" == "DRS" || "\$ACCESSION_PREFIX" == "DRP" ]]; then
+elif [[ "\$ACCESSION_PREFIX" =~ ^(ERR|ERX|ERS|ERP|DRR|DRX|DRS|DRP)$ ]]; then
     PROVIDER="ena"
 else
     echo "❌ ERROR: Unknown accession type: \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
