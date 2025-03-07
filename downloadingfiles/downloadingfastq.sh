@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=fastq_download
+#SBATCH --job-name=main_DL
 #SBATCH --output=%x_logs/slurm_%A.out
 #SBATCH --error=%x_logs/slurm_%A.err
 #SBATCH --time=48:00:00
@@ -58,8 +58,6 @@ SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}.sra"
 FASTQ_DIR="${WORKDIR}/fastq_data"
 METADATA_DIR="${WORKDIR}/metadata"
 COMBINED_METADATA="$COMBINED_METADATA"
-
-# Pass the accession as a variable
 ACCESSION="$ACCESSION"
 
 # Determine the provider based on the accession prefix
@@ -81,11 +79,7 @@ echo "DEBUG: Using provider: \$PROVIDER for accession: \$ACCESSION" >> "\${WORKD
 if [[ "\$PROVIDER" == "sra" ]]; then
     # Step 1: Prefetch the SRA file
     echo "🔹 Prefetching SRA file for \$ACCESSION"
-    prefetch "\$ACCESSION" --output-file "\$SRA_FILES" || { echo "❌ ERROR: prefetch failed"; exit 1; }
-
-    # Step 2: Convert SRA to FASTQ using fasterq-dump
-    echo "🔹 Converting SRA to FASTQ for \$ACCESSION"
-    fasterq-dump "\$ACCESSION" \
+    prefetch "\$ACCESSION" --output-file "\$SRA_FILES" || { echo "❌ ERROR: prefetch failed"; exit 1; } && fasterq-dump "\$ACCESSION" \
                  --outdir "\$FASTQ_DIR" \
                  --threads 4 \
                  --mem 8G \
@@ -93,7 +87,7 @@ if [[ "\$PROVIDER" == "sra" ]]; then
 
     # Step 3: Fetch metadata using efetch from Entrez Direct
     echo "🔹 Fetching metadata for \$ACCESSION using efetch"
-    esearch -db sra -query "\$ACCESSION" | efetch -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" || { echo "⚠️ WARNING: Metadata fetch failed"; exit 1; }
+    esearch -db sra -query "\$ACCESSION" | efetch -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" || { echo "⚠️ WARNING: Metadata fetch failed"; }
 
     # Convert CSV to TSV and append to combined metadata
     if [[ -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
@@ -133,20 +127,19 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
     fi
 else
     echo "❌ ERROR: Unsupported provider: \$PROVIDER" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
-    exit 1
 fi
 
 # Verify FASTQ files and compress
 shopt -s nullglob
-for FILE in "\${FASTQ_DIR}"/*.fastq; do
+for FILE in "\${FASTQ_DIR}"/"\${ACCESSION}"*.fastq; do
     if [[ -f "\$FILE" && "\$FILE" != *.gz ]]; then
         echo "🔹 Gzipping: \$FILE"
-        gzip "\$FILE" || { echo "❌ ERROR: Gzip failed"; exit 1; }
+        gzip "\$FILE" || { echo "❌ ERROR: Gzip failed"; }
     fi
 done
 
 # Check for gzipped FASTQs
-ALL_GZ_FASTQS=("\${FASTQ_DIR}"/*.fastq.gz)
+ALL_GZ_FASTQS=("\${FASTQ_DIR}"/"\${ACCESSION}"*.fastq.gz)
 [[ \${#ALL_GZ_FASTQS[@]} -eq 0 ]] && { echo "❌ ERROR: No FASTQ files"; exit 1; }
 
 # Record success in checkpoint
