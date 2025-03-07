@@ -75,31 +75,40 @@ fi
 
 echo "DEBUG: Using provider: \$PROVIDER for accession: \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.out"
 
-# Download and process based on provider
 if [[ "\$PROVIDER" == "sra" ]]; then
-    # Step 1: Prefetch the SRA file
+    # Step 1: Prefetch
     echo "🔹 Prefetching SRA file for \$ACCESSION"
-    prefetch "\$ACCESSION" --output-file "\$SRA_FILES" || { echo "❌ ERROR: prefetch failed"; exit 1; } && fasterq-dump "\$ACCESSION" \
-                 --outdir "\$FASTQ_DIR" \
-                 --threads 4 \
-                 --mem 8G \
-                 --split-3 || { echo "❌ ERROR: fasterq-dump failed"; exit 1; }
+    prefetch "\$ACCESSION" --output-file "\$SRA_FILES" || { echo "❌ ERROR: prefetch failed"; exit 1; }
+    sleep 3  # Throttle after prefetch
 
-    # Step 3: Fetch metadata using efetch from Entrez Direct
-    echo "🔹 Fetching metadata for \$ACCESSION using efetch"
-    esearch -db sra -query "\$ACCESSION" | efetch -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" || { echo "⚠️ WARNING: Metadata fetch failed"; }
+    # Step 2: Convert to FASTQ
+    echo "🔹 Converting SRA to FASTQ"
+    fasterq-dump "\$ACCESSION" \
+        --outdir "\$FASTQ_DIR" \
+        --threads 4 \
+        --mem 8G \
+        --split-3 || { echo "❌ ERROR: fasterq-dump failed"; exit 1; }
+    sleep 3  # Throttle after fasterq-dump
 
-    # Convert CSV to TSV and append to combined metadata
-    if [[ -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
-        tr ',' '\t' < "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" > "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
-        # Append to combined metadata
-        if [[ ! -f "\$COMBINED_METADATA" ]]; then
-            head -n 1 "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv" > "\$COMBINED_METADATA"
+    # Step 3: Fetch Metadata with retries
+    MAX_RETRIES=3
+    RETRY_DELAY=5
+    echo "🔹 Fetching metadata (max \$MAX_RETRIES attempts)"
+    for ((i=1; i<=\$MAX_RETRIES; i++)); do
+        echo "Attempt \$i/3..."
+        esearch -db sra -query "\$ACCESSION" | sleep 3 | efetch -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
+        if [[ \$? -eq 0 && -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
+            echo "Metadata fetched successfully"
+            break
+        else
+            echo "⚠️ WARNING: Metadata attempt \$i failed"
+            sleep \$((RETRY_DELAY * i))
         fi
-        tail -n +2 "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv" >> "\$COMBINED_METADATA"
-        echo "🔹 Metadata appended to combined file"
-    else
-        echo "⚠️ WARNING: Metadata file is empty"
+    done
+
+    # Final check for metadata
+    if [[ ! -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
+        echo "❌ ERROR: All metadata attempts failed"
     fi
 
 elif [[ "\$PROVIDER" == "ena" ]]; then
@@ -125,8 +134,10 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
     else
         echo "⚠️ WARNING: ENA metadata file not found"
     fi
+
 else
     echo "❌ ERROR: Unsupported provider: \$PROVIDER" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+    exit 1  # Important: Exit on unknown provider
 fi
 
 # Verify FASTQ files and compress
