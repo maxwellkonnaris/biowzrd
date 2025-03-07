@@ -32,19 +32,13 @@ submit_job() {
     local ACCESSION=$1
     local JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
 
-    # Debug: Log the accession and its prefix
-    ACCESSION_PREFIX=${ACCESSION:0:3}
-    echo "DEBUG: Accession = $ACCESSION, Prefix = $ACCESSION_PREFIX" >> "${WORKDIR}/logs/${ACCESSION}.out"
+    # Trim leading/trailing whitespace from the accession
+    ACCESSION=$(echo "$ACCESSION" | xargs)
 
-    if [[ "$ACCESSION_PREFIX" =~ ^(SRR|SRX|SRS|SRP)$ ]]; then
-        PROVIDER="sra"
-    elif [[ "$ACCESSION_PREFIX" =~ ^(ERR|ERX|ERS|ERP|DRR|DRX|DRS|DRP)$ ]]; then
-        PROVIDER="ena"
-    else
-        echo "❌ ERROR: Unknown accession type: $ACCESSION" >> "${WORKDIR}/logs/${ACCESSION}.err"
-        exit 1
-    fi
+    # Debug: Log the accession being processed
+    echo "DEBUG: Submitting job for accession: $ACCESSION" >> "${WORKDIR}/logs/debug.log"
 
+    # Create the job script
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
@@ -52,14 +46,19 @@ submit_job() {
 #SBATCH --error=${WORKDIR}/logs/${ACCESSION}.err
 #SBATCH --time=02:00:00
 #SBATCH --mem=8G
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=4  # Increase threads for fasterq-dump
 #SBATCH --ntasks=1
 
 # Configuration
 WORKDIR="$WORKDIR"
 CHECKPOINT_FILE="$CHECKPOINT_FILE"
 LOCK_FILE="$LOCK_FILE"
-SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}*.sra"
+SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}.sra"
+FASTQ_DIR="${WORKDIR}/fastq_data"
+METADATA_DIR="${WORKDIR}/metadata"
+
+# Pass the accession as a variable
+ACCESSION="$ACCESSION"
 
 # Determine the provider based on the accession prefix
 ACCESSION_PREFIX=\${ACCESSION:0:3}
@@ -74,24 +73,68 @@ else
     exit 1
 fi
 
-echo "🔹 Downloading FASTQ files for \$ACCESSION using provider: \$PROVIDER"
+echo "DEBUG: Using provider: \$PROVIDER for accession: \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.out"
 
-# Download FASTQ files
-fastq-dl --accession "\$ACCESSION" \
-         --provider "\$PROVIDER" \
-         --cpus 4 \
-         --prefix "\$ACCESSION" \
-         --outdir "\${WORKDIR}/fastq_data"
+# Download and process based on provider
+if [[ "\$PROVIDER" == "sra" ]]; then
+    # Step 1: Prefetch the SRA file
+    echo "🔹 Prefetching SRA file for \$ACCESSION"
+    prefetch "\$ACCESSION" --output-file "\$SRA_FILES"
 
-# Check if download was successful
-if [[ \$? -ne 0 ]]; then
-    echo "❌ ERROR: Failed to download FASTQ files for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+    if [[ \$? -ne 0 ]]; then
+        echo "❌ ERROR: prefetch failed for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+        exit 1
+    fi
+
+    # Step 2: Convert SRA to FASTQ using fasterq-dump
+    echo "🔹 Converting SRA to FASTQ for \$ACCESSION"
+    fasterq-dump "\$ACCESSION" \
+                 --outdir "\$FASTQ_DIR" \
+                 --threads 4 \
+                 --mem 8G \
+                 --split-3
+
+    if [[ \$? -ne 0 ]]; then
+        echo "❌ ERROR: fasterq-dump failed for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+        exit 1
+    fi
+
+    # Step 3: Fetch metadata using fastq-dl (metadata only)
+    echo "🔹 Fetching metadata for \$ACCESSION using fastq-dl"
+    fastq-dl --accession "\$ACCESSION" \
+             --provider "\$PROVIDER" \
+             --cpus 4 \
+             --prefix "\$ACCESSION" \
+             --outdir "\$METADATA_DIR" \
+             --metadata-only
+
+    if [[ \$? -ne 0 ]]; then
+        echo "⚠️ WARNING: Failed to fetch metadata for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+    else
+        echo "🔹 Metadata saved to \${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
+    fi
+
+elif [[ "\$PROVIDER" == "ena" ]]; then
+    # Use fastq-dl for ENA accessions (includes metadata by default)
+    echo "🔹 Downloading FASTQ files for \$ACCESSION using provider: \$PROVIDER"
+    fastq-dl --accession "\$ACCESSION" \
+             --provider "\$PROVIDER" \
+             --cpus 4 \
+             --prefix "\$ACCESSION" \
+             --outdir "\$FASTQ_DIR"
+
+    if [[ \$? -ne 0 ]]; then
+        echo "❌ ERROR: fastq-dl failed for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
+        exit 1
+    fi
+else
+    echo "❌ ERROR: Unsupported provider: \$PROVIDER" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
     exit 1
 fi
 
 # Verify that at least one FASTQ exists
 shopt -s nullglob
-ALL_FASTQS=("\${WORKDIR}/fastq_data"/*.fastq "\${WORKDIR}/fastq_data"/*.fastq.gz)
+ALL_FASTQS=("\${FASTQ_DIR}"/*.fastq "\${FASTQ_DIR}"/*.fastq.gz)
 
 if [ "\${#ALL_FASTQS[@]}" -eq 0 ]; then
     echo "❌ ERROR: No FASTQ files found for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
@@ -99,7 +142,7 @@ if [ "\${#ALL_FASTQS[@]}" -eq 0 ]; then
 fi
 
 # Ensure all FASTQs are gzipped
-for FILE in "\${WORKDIR}/fastq_data"/*.fastq; do
+for FILE in "\${FASTQ_DIR}"/*.fastq; do
     if [[ -f "\$FILE" && "\$FILE" != *.gz ]]; then
         echo "🔹 Gzipping: \$FILE"
         if ! gzip "\$FILE"; then
@@ -110,42 +153,11 @@ for FILE in "\${WORKDIR}/fastq_data"/*.fastq; do
 done
 
 shopt -s nullglob
-ALL_GZ_FASTQS=("\${WORKDIR}/fastq_data"/*.fastq.gz)
+ALL_GZ_FASTQS=("\${FASTQ_DIR}"/*.fastq.gz)
 
 if [ "\${#ALL_GZ_FASTQS[@]}" -eq 0 ]; then
     echo "❌ ERROR: No gzipped FASTQ files found for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
     exit 1
-fi
-
-# Move metadata file and append to all_fastq_run_info.tsv
-METADATA_FILENAME="\${ACCESSION}-run-info.tsv"
-ORIG_METADATA_FILE="\${WORKDIR}/fastq_data/\${METADATA_FILENAME}"
-ALL_METADATA_FILE="\${WORKDIR}/metadata/all_fastq_run_info.tsv"
-
-if [[ -f "\$ORIG_METADATA_FILE" ]]; then
-    echo "🔹 Moving metadata file to metadata/ folder."
-    if ! mv "\$ORIG_METADATA_FILE" "\${WORKDIR}/metadata/"; then
-        echo "❌ ERROR: Failed to move metadata file for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
-        exit 1
-    fi
-    
-    echo "🔹 Appending metadata to all_fastq_run_info.tsv with locking."
-    (
-        flock -x 200
-        if ! cat "\${WORKDIR}/metadata/\${METADATA_FILENAME}" >> "\$ALL_METADATA_FILE"; then
-            echo "❌ ERROR: Failed to append metadata for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
-            exit 1
-        fi
-        rm -f "\${LOCK_FILE}"  # Clean up the lock file
-    ) 200>"\${LOCK_FILE}"
-    
-    echo "🔹 Removing individual metadata file."
-    if ! rm -f "\${WORKDIR}/metadata/\${METADATA_FILENAME}"; then
-        echo "❌ ERROR: Failed to remove metadata file for \$ACCESSION" >> "\${WORKDIR}/logs/\${ACCESSION}.err"
-        exit 1
-    fi
-else
-    echo "⚠️ WARNING: No metadata file found for \$ACCESSION."
 fi
 
 # Record success in checkpoint
@@ -166,14 +178,17 @@ else
     echo "🔹 No .sra files found to delete."
 fi
 
-echo "✅ Successfully downloaded and gzipped FASTQ files for \$ACCESSION."
+echo "✅ Successfully downloaded and processed FASTQ files for \$ACCESSION."
 
 # Clean up logs if everything is fine
 rm -f "$JOB_SCRIPT"
 rm -f "${WORKDIR}/logs/${ACCESSION}.out" "${WORKDIR}/logs/${ACCESSION}.err"
 EOF
 
+    # Make the job script executable
     chmod +x "$JOB_SCRIPT"
+
+    # Submit the job
     if ! sbatch "$JOB_SCRIPT"; then
         echo "❌ ERROR: Failed to submit job for ${ACCESSION}" >> "${WORKDIR}/logs/${ACCESSION}.err"
         exit 1
@@ -189,6 +204,9 @@ TOTAL_JOBS=0
 while read -r ACCESSION; do
     # Skip empty lines
     [[ -z "$ACCESSION" ]] && { echo "⚠️ WARNING: Skipping empty accession."; continue; }
+
+    # Trim leading/trailing whitespace from the accession
+    ACCESSION=$(echo "$ACCESSION" | xargs)
 
     # Log the accession being processed
     echo "Processing accession: $ACCESSION" >> "${WORKDIR}/logs/debug.log"
