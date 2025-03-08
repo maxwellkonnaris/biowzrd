@@ -83,17 +83,15 @@ submit_job() {
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-# Trap to release token on any exit
 cleanup() {
-    # Release token even if job is terminated by SLURM
+    # Isolate locking in a subshell with fresh file descriptor
     (
         flock -x 200 || exit 1
-        tokens=$(< "\$TOKEN_FILE")
-        echo $((tokens + 1)) > "\$TOKEN_FILE"
-    ) 200>"\${TOKEN_FILE}.lock"
+        tokens=$(< "$TOKEN_FILE")
+        echo $((tokens + 1)) > "$TOKEN_FILE"
+    ) 200>"${TOKEN_FILE}.lock"
 }
 
-# Trap ALL exits and SLURM signals
 trap cleanup EXIT TERM INT
 
 # Main processing logic (keep your existing workflow here)
@@ -270,29 +268,37 @@ EOF
 #######################################
 # Main Submission Loop with Token Control
 #######################################
+CLEANUP_COUNTER=0
 while read -r ACCESSION; do
     # Skip processed accessions
     grep -Fxq "$ACCESSION" "$CHECKPOINT_FILE" && continue
 
-    # Acquire token with non-blocking flock
+    # Atomic token acquisition
     while :; do
-        flock -x "${TOKEN_FILE}.lock" -c "
-            tokens=\$(< "$TOKEN_FILE")
+        ACQUIRED=0
+        (
+            flock -x 9 || exit 99
+            tokens=$(< "$TOKEN_FILE")
             if (( tokens > 0 )); then
-                echo \$((tokens - 1)) > "$TOKEN_FILE"
-                exit 0
+                echo $((tokens - 1)) > "$TOKEN_FILE"
+                ACQUIRED=1
             fi
-            exit 1
-        " && break
-        sleep $(( RANDOM % 5 + 1 ))
+        ) 9>"${TOKEN_FILE}.lock"
+        
+        if (( ACQUIRED == 1 )); then
+            break
+        else
+            sleep $(( RANDOM % 5 + 1 ))
+        fi
     done
 
     submit_job "$ACCESSION"
-    sleep 0.5  # Throttle job submissions
+    sleep 0.5
 
-    # Periodically cleanup successful jobs
-    if (( RANDOM % 10 == 0 )); then  # Cleanup ~10% of the time
+    # Regular cleanup every 10 submissions
+    if (( (++CLEANUP_COUNTER % 10) == 0 )); then
         cleanup_successful_jobs
+        CLEANUP_COUNTER=0
     fi
 done < "$ACCESSIONS_FILE"
 
