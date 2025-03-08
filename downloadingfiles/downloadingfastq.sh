@@ -100,7 +100,7 @@ if [[ "\$PROVIDER" == "sra" ]]; then
     echo "🔹 Fetching metadata (max \$MAX_RETRIES attempts)"
     for ((i=1; i<=\$MAX_RETRIES; i++)); do
         echo "Attempt \$i/3..."
-        esearch -db sra -query "\$ACCESSION" | sleep 3 | efetch -db sra -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
+        esearch -db sra -query "\"$ACCESSION\"" | efetch -db sra -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
         if [[ \$? -eq 0 && -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
             echo "Metadata fetched successfully"
             break
