@@ -95,18 +95,39 @@ if [[ "\$PROVIDER" == "sra" ]]; then
         --split-3 || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} fasterq-dump failed' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
     sleep 3  # Throttle after fasterq-dump
 
-    # Step 3: Fetch Metadata with retries
+    # Step 3: Fetch Metadata with retries and append to combined
     MAX_RETRIES=3
     RETRY_DELAY=3
     echo "🔹 Fetching metadata (max \$MAX_RETRIES attempts)"
     for ((i=1; i<=\$MAX_RETRIES; i++)); do
         echo "Attempt \$i/3..."
-        esearch -db sra -query "\"$ACCESSION\"" | efetch -db sra -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
+        esearch -db sra -query "\$ACCESSION" | efetch -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
+        
         if [[ \$? -eq 0 && -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
             echo "Metadata fetched successfully"
+            
+            # Convert CSV to TSV and merge with combined metadata
+            (
+                flock -x 200  # Use file lock for combined metadata
+                TSV_FILE="\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
+                
+                # Convert CSV to TSV
+                tr ',' '\t' < "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" > "\$TSV_FILE"
+                
+                # Append to combined metadata
+                if [[ ! -f "\$COMBINED_METADATA" ]]; then
+                    head -n 1 "\$TSV_FILE" > "\$COMBINED_METADATA"
+                fi
+                tail -n +2 "\$TSV_FILE" >> "\$COMBINED_METADATA"
+                
+                # Cleanup
+                rm "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
+                echo "🔹 Metadata appended to combined file"
+            ) 200>"\$LOCK_FILE"
+            
             break
         else
-            flock -x "\$DEBUG_LOCK" bash -c "echo '⚠️ WARNING: \${ACCESSION} Metadata attempt \$i failed' >> '\${WORKDIR}/logs/debug.log'";
+            flock -x "\$DEBUG_LOCK" bash -c "echo '⚠️ WARNING: \${ACCESSION} Metadata attempt \$i failed' >> '\${WORKDIR}/logs/debug.log'"
             sleep \$((RETRY_DELAY * i))
         fi
     done
@@ -125,19 +146,44 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
              --prefix "\$ACCESSION" \
              --outdir "\$FASTQ_DIR" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} fastq-dl failed' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
 
-    # Process ENA metadata
     ENA_METADATA="\${FASTQ_DIR}/\${ACCESSION}-run-info.tsv"
     if [[ -f "\$ENA_METADATA" ]]; then
-        # Append to combined metadata
-        if [[ ! -f "\$COMBINED_METADATA" ]]; then
-            head -n 1 "\$ENA_METADATA" > "\$COMBINED_METADATA"
-        fi
-        tail -n +2 "\$ENA_METADATA" >> "\$COMBINED_METADATA"
-        # Move metadata file to metadata directory
-        mv "\$ENA_METADATA" "\${METADATA_DIR}/"
-        echo "🔹 Metadata processed and moved"
+        # Use file locking for atomic operations
+        (
+            flock -x 200
+            # Create combined file with header if missing
+            if [[ ! -f "\$COMBINED_METADATA" ]]; then
+                if ! head -n 1 "\$ENA_METADATA" > "\$COMBINED_METADATA"; then
+                    echo "❌ ERROR: Failed to create combined metadata header" >&2
+                fi
+            fi
+            
+            # Append data rows
+            if ! tail -n +2 "\$ENA_METADATA" >> "\$COMBINED_METADATA"; then
+                echo "❌ ERROR: Failed to append metadata for \$ACCESSION" >&2
+            fi
+            
+            # Move metadata file with cleanup
+            if ! mv "\$ENA_METADATA" "\${METADATA_DIR}/"; then
+                echo "❌ ERROR: Failed to move metadata file for \$ACCESSION" >&2
+                # Cleanup partial data from combined file
+                if [[ -f "\$COMBINED_METADATA" ]]; then
+                    grep -v "^\${ACCESSION}" "\$COMBINED_METADATA" > "\$COMBINED_METADATA.tmp" && \
+                    mv "\$COMBINED_METADATA.tmp" "\$COMBINED_METADATA"
+                fi
+            fi
+            
+            echo "🔹 Metadata processed and moved"
+            
+        ) 200>"\$LOCK_FILE"
     else
-        flock -x "\$DEBUG_LOCK" bash -c "echo '⚠️ WARNING: \${ACCESSION} ENA metadata file not found' >> '\${WORKDIR}/logs/debug.log'";
+        # Log warning with timestamp and clean up any potential partial files
+        (
+            flock -x "\$DEBUG_LOCK"
+            echo "\$(date '+%F %T') ⚠️ WARNING: \${ACCESSION} ENA metadata file not found" >> "\${WORKDIR}/logs/debug.log"
+            # Remove potential empty file artifacts
+            rm -f "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
+        )
     fi
 
 else
@@ -180,6 +226,7 @@ EOF
 #######################################
 # Main Script Logic
 #######################################
+MAX_JOBS=5 
 TOTAL_JOBS=0
 
 while read -r ACCESSION; do
@@ -191,9 +238,9 @@ while read -r ACCESSION; do
         continue
     fi
 
-    # Control job concurrency
-    while [[ $(squeue -u $USER -h -j -n "fastq_$ACCESSION" | wc -l) -ge $MAX_JOBS ]]; do
-        sleep 60
+    # Control concurrency using COMMON JOB NAME PREFIX
+    while [[ $(squeue -u $USER -h --name="fastq_*" | wc -l) -ge $MAX_JOBS ]]; do
+        sleep $(( (RANDOM % 15) + 5 ))
     done
 
     submit_job "$ACCESSION"
