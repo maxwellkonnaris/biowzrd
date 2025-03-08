@@ -164,7 +164,7 @@ if [[ "\$PROVIDER" == "sra" ]]; then
                 tail -n +2 "\$TSV_FILE" >> "\$COMBINED_METADATA"
                 
                 # Cleanup
-                rm "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
+                rm "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
                 echo "🔹 Metadata appended to combined file"
             ) 200>"\$LOCK_FILE"
             
@@ -216,6 +216,8 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
                     mv "\$COMBINED_METADATA.tmp" "\$COMBINED_METADATA"
                 fi
             fi
+
+            rm "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
             
             echo "🔹 Metadata processed and moved"
             
