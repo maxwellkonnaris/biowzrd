@@ -17,12 +17,16 @@ ACCESSIONS_FILE="${WORKDIR}/run_accessions.txt"
 COMBINED_METADATA="${WORKDIR}/metadata/combined_metadata.tsv"
 DEBUG_LOG="${WORKDIR}/logs/debug.log"
 TOKEN_FILE="${WORKDIR}/.job_tokens"  # Semaphore for job control
+LOCK_FILE="${WORKDIR}/checkpoint.lock"
+DEBUG_LOCK="${WORKDIR}/logs/debug.lock"
 
 # Create necessary directories
 mkdir -p "${WORKDIR}/jobs" "${WORKDIR}/logs" "${WORKDIR}/fastq_data" "${WORKDIR}/metadata"
 
 # Initialize semaphore system
-echo $MAX_JOBS > "$TOKEN_FILE"
+if [[ ! -f "$TOKEN_FILE" ]]; then
+    echo $MAX_JOBS > "$TOKEN_FILE"
+fi
 
 # Ensure checkpoint file exists
 touch "${CHECKPOINT_FILE}"
@@ -56,101 +60,6 @@ cleanup_successful_jobs() {
     done < "$CHECKPOINT_FILE"
     flock -u "$LOCK_FILE"
 }
-
-#######################################
-# Function to Submit a Job for an Accession
-#######################################
-submit_job() {
-    local ACCESSION=$1
-    local JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
-
-    # Trim whitespace and validate accession
-    ACCESSION=$(echo "$ACCESSION" | xargs)
-    [[ -z "$ACCESSION" ]] && return
-
-    # Create the job script with token management
-    cat <<EOF > "$JOB_SCRIPT"
-#!/bin/bash
-#SBATCH --job-name=fastq_${ACCESSION}
-#SBATCH --output=${WORKDIR}/logs/${ACCESSION}.out
-#SBATCH --error=${WORKDIR}/logs/${ACCESSION}.err
-#SBATCH --time=02:00:00
-#SBATCH --mem=8G
-#SBATCH --cpus-per-task=4
-#SBATCH --ntasks=1
-
-# Trap to release token on any exit
-cleanup() {
-    flock -x 200
-    tokens=\$(< "$TOKEN_FILE")
-    echo \$((tokens + 1)) > "$TOKEN_FILE"
-    flock -u 200
-}
-exec 200>"${TOKEN_FILE}.lock"
-trap cleanup EXIT
-
-# Main processing logic (keep your existing workflow here)
-export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
-WORKDIR="$WORKDIR"
-CHECKPOINT_FILE="$CHECKPOINT_FILE"
-LOCK_FILE="$LOCK_FILE"
-SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}.sra"
-FASTQ_DIR="${WORKDIR}/fastq_data"
-METADATA_DIR="${WORKDIR}/metadata"
-COMBINED_METADATA="$COMBINED_METADATA"
-ACCESSION="$ACCESSION"
-DEBUG_LOCK="$DEBUG_LOCK"
-
-# Record success in checkpoint
-flock -x "\$LOCK_FILE" bash -c "echo \$ACCESSION >> \$CHECKPOINT_FILE"
-
-# Cleanup SRA files
-if ls "\$SRA_FILES" 1>/dev/null 2>&1; then
-    rm -f "\$SRA_FILES" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} Failed to delete SRA files' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
-fi
-
-# Cleanup job script and logs on success
-rm -f "$JOB_SCRIPT" "\${WORKDIR}/logs/\${ACCESSION}.out" "\${WORKDIR}/logs/\${ACCESSION}.err"
-
-echo "✅ Successfully processed \$ACCESSION"
-
-EOF
-
-
-
-
-#!/bin/bash
-#SBATCH --job-name=main_DL
-#SBATCH --output=slurm_%A.out
-#SBATCH --error=slurm_%A.err
-#SBATCH --time=48:00:00
-#SBATCH --mem=4G
-#SBATCH --cpus-per-task=1
-#SBATCH --ntasks=1
-
-#######################################
-# Configuration
-#######################################
-MAX_JOBS=20  # Adjusted based on cluster capacity
-WORKDIR="$(pwd)"
-CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
-ACCESSIONS_FILE="${WORKDIR}/run_accessions.txt"
-COMBINED_METADATA="${WORKDIR}/metadata/combined_metadata.tsv"
-DEBUG_LOG="${WORKDIR}/logs/debug.log"
-TOKEN_FILE="${WORKDIR}/.job_tokens"  # Semaphore for job control
-LOCK_FILE="${WORKDIR}/checkpoint.lock"
-DEBUG_LOCK="${WORKDIR}/logs/debug.lock"
-
-# Create necessary directories
-mkdir -p "${WORKDIR}/jobs" "${WORKDIR}/logs" "${WORKDIR}/fastq_data" "${WORKDIR}/metadata"
-
-# Initialize semaphore system
-if [[ ! -f "$TOKEN_FILE" ]]; then
-    echo $MAX_JOBS > "$TOKEN_FILE"
-fi
-
-# Ensure checkpoint file exists
-touch "${CHECKPOINT_FILE}"
 
 #######################################
 # Function to Submit a Job for an Accession
