@@ -83,7 +83,7 @@ if [[ "\$PROVIDER" == "sra" ]]; then
 
     # Step 2: Convert to FASTQ
     echo "🔹 Converting SRA to FASTQ"
-    fasterq-dump "\$ACCESSION" \
+    fasterq-dump "\$SRA_FILES" \
         --outdir "\$FASTQ_DIR" \
         --threads 4 \
         --mem 8G \
