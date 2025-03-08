@@ -40,7 +40,7 @@ submit_job() {
     ACCESSION=$(echo "$ACCESSION" | xargs)
 
     # Debug: Log the accession being processed
-    flock -x "$DEBUG_LOCK" -c echo "DEBUG: Submitting job for accession: $ACCESSION" >> "${WORKDIR}/logs/debug.log"
+    flock -x "$DEBUG_LOCK" bash -c "echo 'DEBUG: Submitting job for accession: $ACCESSION' >> '${WORKDIR}/logs/debug.log'";
 
     # Create the job script
     cat <<EOF > "$JOB_SCRIPT"
@@ -73,7 +73,7 @@ if [[ "\$ACCESSION_PREFIX" =~ ^(SRR|SRX|SRS|SRP)$ ]]; then
 elif [[ "\$ACCESSION_PREFIX" =~ ^(ERR|ERX|ERS|ERP|DRR|DRX|DRS|DRP)$ ]]; then
     PROVIDER="ena"
 else
-    flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: Unknown accession type: \$ACCESSION" >> "\${WORKDIR}/logs/debug.log"
+    flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: Unknown accession type: \$ACCESSION' >> '\${WORKDIR}/logs/debug.log'";
     exit 1
 fi
 
@@ -82,7 +82,7 @@ echo "DEBUG: Using provider: \$PROVIDER for accession: \$ACCESSION" >> "\${WORKD
 if [[ "\$PROVIDER" == "sra" ]]; then
     # Step 1: Prefetch
     echo "🔹 Prefetching SRA file for \$ACCESSION"
-    prefetch "\$ACCESSION" --output-file "\$SRA_FILES" || { flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} prefetch failed" >> "\${WORKDIR}/logs/debug.log"; exit 1; }
+    prefetch "\$ACCESSION" --output-file "\$SRA_FILES" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} prefetch failed' >> '\${WORKDIR}/logs/debug.log'"; exit 1;}
     sleep 3  # Throttle after prefetch
 
     # Step 2: Convert to FASTQ
@@ -91,28 +91,28 @@ if [[ "\$PROVIDER" == "sra" ]]; then
         --outdir "\$FASTQ_DIR" \
         --threads 4 \
         --mem 8G \
-        --split-3 || { flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} fasterq-dump failed" >> "\${WORKDIR}/logs/debug.log"; exit 1; }
+        --split-3 || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} fasterq-dump failed' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
     sleep 3  # Throttle after fasterq-dump
 
     # Step 3: Fetch Metadata with retries
     MAX_RETRIES=3
-    RETRY_DELAY=5
+    RETRY_DELAY=3
     echo "🔹 Fetching metadata (max \$MAX_RETRIES attempts)"
     for ((i=1; i<=\$MAX_RETRIES; i++)); do
         echo "Attempt \$i/3..."
-        esearch -db sra -query "\$ACCESSION" | sleep 3 | efetch -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
+        esearch -db sra -query "\$ACCESSION" | sleep 3 | efetch -db sra -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
         if [[ \$? -eq 0 && -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
             echo "Metadata fetched successfully"
             break
         else
-            flock -x "\$DEBUG_LOCK" -c echo "⚠️ WARNING: \${ACCESSION} Metadata attempt \$i failed" >> "\${WORKDIR}/logs/debug.log"
+            flock -x "\$DEBUG_LOCK" bash -c "echo '⚠️ WARNING: \${ACCESSION} Metadata attempt \$i failed' >> '\${WORKDIR}/logs/debug.log'";
             sleep \$((RETRY_DELAY * i))
         fi
     done
 
     # Final check for metadata
     if [[ ! -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
-        flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} All metadata attempts failed" >> "\${WORKDIR}/logs/debug.log"
+        flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} All metadata attempts failed' >> '\${WORKDIR}/logs/debug.log'"
     fi
 
 elif [[ "\$PROVIDER" == "ena" ]]; then
@@ -122,7 +122,7 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
              --provider "\$PROVIDER" \
              --cpus 4 \
              --prefix "\$ACCESSION" \
-             --outdir "\$FASTQ_DIR" || { flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} fastq-dl failed" >> "\${WORKDIR}/logs/debug.log"; exit 1; }
+             --outdir "\$FASTQ_DIR" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} fastq-dl failed' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
 
     # Process ENA metadata
     ENA_METADATA="\${FASTQ_DIR}/\${ACCESSION}-run-info.tsv"
@@ -136,11 +136,11 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
         mv "\$ENA_METADATA" "\${METADATA_DIR}/"
         echo "🔹 Metadata processed and moved"
     else
-        flock -x "\$DEBUG_LOCK" -c echo "⚠️ WARNING: \${ACCESSION} ENA metadata file not found" >> "\${WORKDIR}/logs/debug.log"
+        flock -x "\$DEBUG_LOCK" bash -c "echo '⚠️ WARNING: \${ACCESSION} ENA metadata file not found' >> '\${WORKDIR}/logs/debug.log'";
     fi
 
 else
-    flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} Unsupported provider: \$PROVIDER" >> "\${WORKDIR}/logs/debug.log"
+    flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} Unsupported provider: \$PROVIDER' >> '\${WORKDIR}/logs/debug.log'";
     exit 1  # Important: Exit on unknown provider
 fi
 
@@ -149,20 +149,20 @@ shopt -s nullglob
 for FILE in "\${FASTQ_DIR}"/"\${ACCESSION}"*.fastq; do
     if [[ -f "\$FILE" && "\$FILE" != *.gz ]]; then
         echo "🔹 Gzipping: \$FILE"
-        gzip "\$FILE" || { flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} Gzip failed" >> "\${WORKDIR}/logs/debug.log"; }
+        gzip "\$FILE" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} Gzip failed' >> '\${WORKDIR}/logs/debug.log'"; }
     fi
 done
 
 # Check for gzipped FASTQs
 ALL_GZ_FASTQS=("\${FASTQ_DIR}"/"\${ACCESSION}"*.fastq.gz)
-[[ \${#ALL_GZ_FASTQS[@]} -eq 0 ]] && { flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} No FASTQ files" >> "\${WORKDIR}/logs/debug.log"; exit 1; }
+[[ \${#ALL_GZ_FASTQS[@]} -eq 0 ]] && { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} No FASTQ files' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
 
 # Record success in checkpoint
 flock -x "\$LOCK_FILE" -c "echo \$ACCESSION >> \$CHECKPOINT_FILE"
 
 # Cleanup SRA files
 if ls "\$SRA_FILES" 1>/dev/null 2>&1; then
-    rm -f "\$SRA_FILES" || { flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} Failed to delete SRA files" >> "\${WORKDIR}/logs/debug.log"; exit 1; }
+    rm -f "\$SRA_FILES" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} Failed to delete SRA files' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
 fi
 
 # Cleanup job script and logs on success
@@ -172,7 +172,7 @@ echo "✅ Successfully processed \$ACCESSION"
 EOF
 
     chmod +x "$JOB_SCRIPT"
-    sbatch "$JOB_SCRIPT" || { flock -x "\$DEBUG_LOCK" -c echo "❌ ERROR: \${ACCESSION} Failed to submit job" >> "\${WORKDIR}/logs/debug.log"; exit 1; }
+    sbatch "$JOB_SCRIPT" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} Failed to submit job' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
     echo "✅ Submitted job for ${ACCESSION}"
 }
 
