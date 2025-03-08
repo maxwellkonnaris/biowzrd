@@ -226,25 +226,43 @@ EOF
 #######################################
 # Main Script Logic
 #######################################
-MAX_JOBS=5 
+MAX_JOBS=5
 TOTAL_JOBS=0
+JOB_PREFIX="fastq"  # Consistent prefix for all jobs
 
 while read -r ACCESSION; do
     [[ -z "$ACCESSION" ]] && continue
     ACCESSION=$(echo "$ACCESSION" | xargs)
 
+    # Skip completed accessions
     if grep -Fxq "$ACCESSION" "$CHECKPOINT_FILE"; then
         echo "⏩ Skipping $ACCESSION"
         continue
     fi
 
-    # Control concurrency using COMMON JOB NAME PREFIX
-    while [[ $(squeue -u $USER -h --name="fastq_*" | wc -l) -ge $MAX_JOBS ]]; do
-        sleep $(( (RANDOM % 15) + 5 ))
+    # Job control with proper locking
+    while true; do
+        # Get count of running/pending jobs with this prefix
+        RUNNING_JOBS=$(squeue -u "$USER" -h --name="${JOB_PREFIX}_*" --states=RUNNING,PENDING | wc -l)
+        
+        # Use file locking for atomic check
+        (
+            flock -x 200
+            if [[ "$RUNNING_JOBS" -lt "$MAX_JOBS" ]]; then
+                submit_job "$ACCESSION"
+                TOTAL_JOBS=$((TOTAL_JOBS + 1))
+                break
+            fi
+        ) 200>"$LOCK_FILE"
+        
+        sleep $(( (RANDOM % 10) + 5 ))  # Random backoff 5-15 seconds
     done
-
-    submit_job "$ACCESSION"
-    TOTAL_JOBS=$((TOTAL_JOBS + 1))
 done < "$ACCESSIONS_FILE"
+
+# Wait for remaining jobs to complete
+while [[ $(squeue -u "$USER" -h --name="${JOB_PREFIX}_*" | wc -l) -gt 0 ]]; do
+    echo "⏳ Waiting for remaining jobs to finish..."
+    sleep 30
+done
 
 echo "🎉 All $TOTAL_JOBS jobs submitted!"
