@@ -83,18 +83,28 @@ submit_job() {
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-# Add this at the START of job scripts
-export TOKEN_FILE="\${WORKDIR}/.job_tokens"
-export LOCK_FILE="\${TOKEN_FILE}.lock"
+# Add this to EVERY job script before any commands
+export TOKEN_FILE="${WORKDIR}/.job_tokens"
+export LOCK_FILE="${TOKEN_FILE}.lock"
 
-cleanup() {
+# Revised cleanup function
+release_token() {
     (
-        flock -x 9 || { echo "Cleanup lock failed"; exit 1; }
-        tokens=$(< "\$TOKEN_FILE")
-        echo $((tokens + 1)) > "\$TOKEN_FILE"
-    ) 9>"\$LOCK_FILE"
+        if ! flock -x 9; then
+            echo "[$(date)] FAILED LOCK FOR $ACCESSION" >> "${WORKDIR}/lock_errors.log"
+            exit 1
+        fi
+        
+        current_tokens=$(< "$TOKEN_FILE")
+        new_tokens=$((current_tokens + 1))
+        echo "$new_tokens" > "$TOKEN_FILE"
+        echo "[$(date)] RELEASED TOKEN FOR $ACCESSION (NOW $new_tokens)" >> "${WORKDIR}/token_audit.log"
+        
+    ) 9>"$LOCK_FILE"
 }
-trap cleanup EXIT TERM INT
+
+# Trap MUST be first command after function definition
+trap 'release_token; rm -f "${WORKDIR}/jobs/download_${ACCESSION}.sh"' EXIT
 
 # Main processing logic (keep your existing workflow here)
 export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
@@ -108,8 +118,6 @@ COMBINED_METADATA="$COMBINED_METADATA"
 ACCESSION="$ACCESSION"
 DEBUG_LOCK="$DEBUG_LOCK"
 TOKEN_FILE="$TOKEN_FILE"
-
-
 
 # Determine the provider based on the accession prefix
 ACCESSION_PREFIX=\${ACCESSION:0:3}
@@ -270,35 +278,37 @@ EOF
 #######################################
 # Main Submission Loop with Token Control
 #######################################
+# Replace your token acquisition loop with:
 CLEANUP_COUNTER=0
 while read -r ACCESSION; do
-    # Skip processed accessions
+    # Skip completed jobs
     grep -Fxq "$ACCESSION" "$CHECKPOINT_FILE" && continue
 
     # Atomic token acquisition
     while :; do
-        ACQUIRED=0
         (
-            flock -x 9 || exit 99
-            tokens=$(< "$TOKEN_FILE")
-            if (( tokens > 0 )); then
-                echo $((tokens - 1)) > "$TOKEN_FILE"
-                ACQUIRED=1
+            flock -x 9 || exit 99  # Wait indefinitely for lock
+            current_tokens=$(< "$TOKEN_FILE")
+            if (( current_tokens > 0 )); then
+                echo $((current_tokens - 1)) > "$TOKEN_FILE"
+                echo "[$(date)] ACQUIRED TOKEN FOR $ACCESSION (NOW $((current_tokens - 1)))" >> "${WORKDIR}/token_audit.log"
+                exit 0
             fi
+            exit 1
         ) 9>"${TOKEN_FILE}.lock"
         
-        if (( ACQUIRED == 1 )); then
-            break
-        else
-            sleep $(( RANDOM % 5 + 1 ))
-        fi
+        case $? in
+            0)  break;;  # Token acquired
+            1)  sleep 5;;  # No tokens available
+            99) echo "Lock starvation detected" >> "${WORKDIR}/lock_errors.log"
+                sleep 10;;
+        esac
     done
 
     submit_job "$ACCESSION"
-    sleep 0.5
-
-    # Regular cleanup every 10 submissions
-    if (( (++CLEANUP_COUNTER % 10) == 0 )); then
+    
+    # Controlled cleanup every 5 jobs
+    if (( ++CLEANUP_COUNTER >= 5 )); then
         cleanup_successful_jobs
         CLEANUP_COUNTER=0
     fi
