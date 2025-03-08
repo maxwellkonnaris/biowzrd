@@ -10,7 +10,7 @@
 #######################################
 # Configuration
 #######################################
-MAX_JOBS=10  # Maximum number of concurrent jobs
+MAX_JOBS=5  # Maximum number of concurrent jobs
 WORKDIR="$(pwd)"
 CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
 LOCK_FILE="${WORKDIR}/checkpoint.lock"
