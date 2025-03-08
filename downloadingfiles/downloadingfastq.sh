@@ -54,6 +54,7 @@ submit_job() {
 #SBATCH --ntasks=1
 
 # Configuration
+export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
 WORKDIR="$WORKDIR"
 CHECKPOINT_FILE="$CHECKPOINT_FILE"
 LOCK_FILE="$LOCK_FILE"
