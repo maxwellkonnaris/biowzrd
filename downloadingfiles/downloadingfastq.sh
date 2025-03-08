@@ -88,9 +88,9 @@ cleanup() {
     # Release token even if job is terminated by SLURM
     (
         flock -x 200 || exit 1
-        tokens=$(< "$TOKEN_FILE")
-        echo $((tokens + 1)) > "$TOKEN_FILE"
-    ) 200>"${TOKEN_FILE}.lock"
+        tokens=$(< "\$TOKEN_FILE")
+        echo $((tokens + 1)) > "\$TOKEN_FILE"
+    ) 200>"\${TOKEN_FILE}.lock"
 }
 
 # Trap ALL exits and SLURM signals
@@ -107,6 +107,7 @@ METADATA_DIR="${WORKDIR}/metadata"
 COMBINED_METADATA="$COMBINED_METADATA"
 ACCESSION="$ACCESSION"
 DEBUG_LOCK="$DEBUG_LOCK"
+TOKEN_FILE="$TOKEN_FILE"
 
 
 
