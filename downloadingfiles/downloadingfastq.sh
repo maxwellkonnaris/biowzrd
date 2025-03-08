@@ -83,15 +83,17 @@ submit_job() {
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-cleanup() {
-    # Isolate locking in a subshell with fresh file descriptor
-    (
-        flock -x 200 || exit 1
-        tokens=$(< "$TOKEN_FILE")
-        echo $((tokens + 1)) > "$TOKEN_FILE"
-    ) 200>"${TOKEN_FILE}.lock"
-}
+# Add this at the START of job scripts
+export TOKEN_FILE="\${WORKDIR}/.job_tokens"
+export LOCK_FILE="\${TOKEN_FILE}.lock"
 
+cleanup() {
+    (
+        flock -x 9 || { echo "Cleanup lock failed"; exit 1; }
+        tokens=$(< "\$TOKEN_FILE")
+        echo $((tokens + 1)) > "\$TOKEN_FILE"
+    ) 9>"\$LOCK_FILE"
+}
 trap cleanup EXIT TERM INT
 
 # Main processing logic (keep your existing workflow here)
