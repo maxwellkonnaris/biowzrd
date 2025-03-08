@@ -10,21 +10,144 @@
 #######################################
 # Configuration
 #######################################
-MAX_JOBS=5  # Maximum number of concurrent jobs
+MAX_JOBS=20  # Adjusted based on cluster capacity
 WORKDIR="$(pwd)"
 CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
-LOCK_FILE="${WORKDIR}/checkpoint.lock"
 ACCESSIONS_FILE="${WORKDIR}/run_accessions.txt"
 COMBINED_METADATA="${WORKDIR}/metadata/combined_metadata.tsv"
 DEBUG_LOG="${WORKDIR}/logs/debug.log"
-DEBUG_LOCK="${WORKDIR}/logs/debug.lock"
-
-
-# Ensure we are working in the right directory
-cd "$WORKDIR" || { echo "❌ ERROR: Unable to change to working directory $WORKDIR"; exit 1; }
+TOKEN_FILE="${WORKDIR}/.job_tokens"  # Semaphore for job control
 
 # Create necessary directories
 mkdir -p "${WORKDIR}/jobs" "${WORKDIR}/logs" "${WORKDIR}/fastq_data" "${WORKDIR}/metadata"
+
+# Initialize semaphore system
+echo $MAX_JOBS > "$TOKEN_FILE"
+
+# Ensure checkpoint file exists
+touch "${CHECKPOINT_FILE}"
+
+#######################################
+# Function to Cleanup Successful Jobs
+#######################################
+cleanup_successful_jobs() {
+    flock -x "$LOCK_FILE"  # Ensure atomic access to CHECKPOINT_FILE
+    while read -r ACCESSION; do
+        ACCESSION=$(echo "$ACCESSION" | xargs)  # Trim whitespace
+        if [[ -z "$ACCESSION" ]]; then
+            continue
+        fi
+
+        # Delete job script
+        JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
+        if [[ -f "$JOB_SCRIPT" ]]; then
+            rm -f "$JOB_SCRIPT" && echo "✅ Deleted job script for $ACCESSION"
+        fi
+
+        # Delete logs
+        LOG_OUT="${WORKDIR}/logs/${ACCESSION}.out"
+        LOG_ERR="${WORKDIR}/logs/${ACCESSION}.err"
+        if [[ -f "$LOG_OUT" ]]; then
+            rm -f "$LOG_OUT" && echo "✅ Deleted log file: $LOG_OUT"
+        fi
+        if [[ -f "$LOG_ERR" ]]; then
+            rm -f "$LOG_ERR" && echo "✅ Deleted log file: $LOG_ERR"
+        fi
+    done < "$CHECKPOINT_FILE"
+    flock -u "$LOCK_FILE"
+}
+
+#######################################
+# Function to Submit a Job for an Accession
+#######################################
+submit_job() {
+    local ACCESSION=$1
+    local JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
+
+    # Trim whitespace and validate accession
+    ACCESSION=$(echo "$ACCESSION" | xargs)
+    [[ -z "$ACCESSION" ]] && return
+
+    # Create the job script with token management
+    cat <<EOF > "$JOB_SCRIPT"
+#!/bin/bash
+#SBATCH --job-name=fastq_${ACCESSION}
+#SBATCH --output=${WORKDIR}/logs/${ACCESSION}.out
+#SBATCH --error=${WORKDIR}/logs/${ACCESSION}.err
+#SBATCH --time=02:00:00
+#SBATCH --mem=8G
+#SBATCH --cpus-per-task=4
+#SBATCH --ntasks=1
+
+# Trap to release token on any exit
+cleanup() {
+    flock -x 200
+    tokens=\$(< "$TOKEN_FILE")
+    echo \$((tokens + 1)) > "$TOKEN_FILE"
+    flock -u 200
+}
+exec 200>"${TOKEN_FILE}.lock"
+trap cleanup EXIT
+
+# Main processing logic (keep your existing workflow here)
+export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
+WORKDIR="$WORKDIR"
+CHECKPOINT_FILE="$CHECKPOINT_FILE"
+LOCK_FILE="$LOCK_FILE"
+SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}.sra"
+FASTQ_DIR="${WORKDIR}/fastq_data"
+METADATA_DIR="${WORKDIR}/metadata"
+COMBINED_METADATA="$COMBINED_METADATA"
+ACCESSION="$ACCESSION"
+DEBUG_LOCK="$DEBUG_LOCK"
+
+# Record success in checkpoint
+flock -x "\$LOCK_FILE" bash -c "echo \$ACCESSION >> \$CHECKPOINT_FILE"
+
+# Cleanup SRA files
+if ls "\$SRA_FILES" 1>/dev/null 2>&1; then
+    rm -f "\$SRA_FILES" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} Failed to delete SRA files' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
+fi
+
+# Cleanup job script and logs on success
+rm -f "$JOB_SCRIPT" "\${WORKDIR}/logs/\${ACCESSION}.out" "\${WORKDIR}/logs/\${ACCESSION}.err"
+
+echo "✅ Successfully processed \$ACCESSION"
+
+EOF
+
+
+
+
+#!/bin/bash
+#SBATCH --job-name=main_DL
+#SBATCH --output=slurm_%A.out
+#SBATCH --error=slurm_%A.err
+#SBATCH --time=48:00:00
+#SBATCH --mem=4G
+#SBATCH --cpus-per-task=1
+#SBATCH --ntasks=1
+
+#######################################
+# Configuration
+#######################################
+MAX_JOBS=20  # Adjusted based on cluster capacity
+WORKDIR="$(pwd)"
+CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"
+ACCESSIONS_FILE="${WORKDIR}/run_accessions.txt"
+COMBINED_METADATA="${WORKDIR}/metadata/combined_metadata.tsv"
+DEBUG_LOG="${WORKDIR}/logs/debug.log"
+TOKEN_FILE="${WORKDIR}/.job_tokens"  # Semaphore for job control
+LOCK_FILE="${WORKDIR}/checkpoint.lock"
+DEBUG_LOCK="${WORKDIR}/logs/debug.lock"
+
+# Create necessary directories
+mkdir -p "${WORKDIR}/jobs" "${WORKDIR}/logs" "${WORKDIR}/fastq_data" "${WORKDIR}/metadata"
+
+# Initialize semaphore system
+if [[ ! -f "$TOKEN_FILE" ]]; then
+    echo $MAX_JOBS > "$TOKEN_FILE"
+fi
 
 # Ensure checkpoint file exists
 touch "${CHECKPOINT_FILE}"
@@ -36,13 +159,11 @@ submit_job() {
     local ACCESSION=$1
     local JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
 
-    # Trim leading/trailing whitespace from the accession
+    # Trim whitespace and validate accession
     ACCESSION=$(echo "$ACCESSION" | xargs)
+    [[ -z "$ACCESSION" ]] && return
 
-    # Debug: Log the accession being processed
-    flock -x "$DEBUG_LOCK" bash -c "echo 'DEBUG: Submitting job for accession: $ACCESSION' >> '${WORKDIR}/logs/debug.log'";
-
-    # Create the job script
+    # Create the job script with token management
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --job-name=fastq_${ACCESSION}
@@ -53,7 +174,17 @@ submit_job() {
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-# Configuration
+# Trap to release token on any exit
+cleanup() {
+    flock -x 200
+    tokens=\$(< "$TOKEN_FILE")
+    echo \$((tokens + 1)) > "$TOKEN_FILE"
+    flock -u 200
+}
+exec 200>"${TOKEN_FILE}.lock"
+trap cleanup EXIT
+
+# Main processing logic (keep your existing workflow here)
 export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
 WORKDIR="$WORKDIR"
 CHECKPOINT_FILE="$CHECKPOINT_FILE"
@@ -64,6 +195,8 @@ METADATA_DIR="${WORKDIR}/metadata"
 COMBINED_METADATA="$COMBINED_METADATA"
 ACCESSION="$ACCESSION"
 DEBUG_LOCK="$DEBUG_LOCK"
+
+
 
 # Determine the provider based on the accession prefix
 ACCESSION_PREFIX=\${ACCESSION:0:3}
@@ -203,65 +336,57 @@ done
 ALL_GZ_FASTQS=("\${FASTQ_DIR}"/"\${ACCESSION}"*.fastq.gz)
 [[ \${#ALL_GZ_FASTQS[@]} -eq 0 ]] && { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} No FASTQ files' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
 
+
 # Record success in checkpoint
-flock -x "\$LOCK_FILE" -c "echo \$ACCESSION >> \$CHECKPOINT_FILE"
+flock -x "$LOCK_FILE" bash -c "echo \$ACCESSION >> \$CHECKPOINT_FILE"
 
 # Cleanup SRA files
 if ls "\$SRA_FILES" 1>/dev/null 2>&1; then
     rm -f "\$SRA_FILES" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} Failed to delete SRA files' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
 fi
 
-# Cleanup job script and logs on success
-rm -f "$JOB_SCRIPT" "\${WORKDIR}/logs/\${ACCESSION}.out" "\${WORKDIR}/logs/\${ACCESSION}.err"
-
 echo "✅ Successfully processed \$ACCESSION"
 EOF
 
     chmod +x "$JOB_SCRIPT"
-    sbatch "$JOB_SCRIPT" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} Failed to submit job' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
-    echo "✅ Submitted job for ${ACCESSION}"
+    sbatch "$JOB_SCRIPT" && echo "✅ Submitted $ACCESSION"
 }
 
 #######################################
-# Main Script Logic
+# Main Submission Loop with Token Control
 #######################################
-MAX_JOBS=5
-TOTAL_JOBS=0
-JOB_PREFIX="fastq"  # Consistent prefix for all jobs
-
 while read -r ACCESSION; do
-    [[ -z "$ACCESSION" ]] && continue
-    ACCESSION=$(echo "$ACCESSION" | xargs)
+    # Skip processed accessions
+    grep -Fxq "$ACCESSION" "$CHECKPOINT_FILE" && continue
 
-    # Skip completed accessions
-    if grep -Fxq "$ACCESSION" "$CHECKPOINT_FILE"; then
-        echo "⏩ Skipping $ACCESSION"
-        continue
-    fi
-
-    # Job control with proper locking
-    while true; do
-        # Get count of running/pending jobs with this prefix
-        RUNNING_JOBS=$(squeue -u "$USER" -h --name="${JOB_PREFIX}_*" --states=RUNNING,PENDING | wc -l)
-        
-        # Use file locking for atomic check
-        (
-            flock -x 200
-            if [[ "$RUNNING_JOBS" -lt "$MAX_JOBS" ]]; then
-                submit_job "$ACCESSION"
-                TOTAL_JOBS=$((TOTAL_JOBS + 1))
-                break
+    # Acquire token with non-blocking flock
+    while :; do
+        flock -x "${TOKEN_FILE}.lock" -c "
+            tokens=\$(< "$TOKEN_FILE")
+            if (( tokens > 0 )); then
+                echo \$((tokens - 1)) > "$TOKEN_FILE"
+                exit 0
             fi
-        ) 200>"$LOCK_FILE"
-        
-        sleep $(( (RANDOM % 10) + 5 ))  # Random backoff 5-15 seconds
+            exit 1
+        " && break
+        sleep $(( RANDOM % 5 + 1 ))
     done
+
+    submit_job "$ACCESSION"
+    sleep 0.5  # Throttle job submissions
+
+    # Periodically cleanup successful jobs
+    if (( RANDOM % 10 == 0 )); then  # Cleanup ~10% of the time
+        cleanup_successful_jobs
+    fi
 done < "$ACCESSIONS_FILE"
 
-# Wait for remaining jobs to complete
-while [[ $(squeue -u "$USER" -h --name="${JOB_PREFIX}_*" | wc -l) -gt 0 ]]; do
-    echo "⏳ Waiting for remaining jobs to finish..."
-    sleep 30
+# Final cleanup after all jobs are submitted
+cleanup_successful_jobs
+
+# Wait for final jobs to complete
+while [[ $(flock -x "${TOKEN_FILE}.lock" -c "cat $TOKEN_FILE") -lt $MAX_JOBS ]]; do
+    sleep 10
 done
 
-echo "🎉 All $TOTAL_JOBS jobs submitted!"
+echo "🎉 All jobs completed!"
