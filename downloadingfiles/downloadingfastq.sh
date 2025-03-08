@@ -85,7 +85,7 @@ submit_job() {
 
 # Add this to EVERY job script before any commands
 export TOKEN_FILE="${WORKDIR}/.job_tokens"
-export LOCK_FILE="${TOKEN_FILE}.lock"
+export TOKENLOCK_FILE="${TOKEN_FILE}.lock"
 
 # Revised cleanup function
 release_token() {
@@ -100,7 +100,7 @@ release_token() {
         echo "$new_tokens" > "$TOKEN_FILE"
         echo "[$(date)] RELEASED TOKEN FOR $ACCESSION (NOW $new_tokens)" >> "${WORKDIR}/token_audit.log"
         
-    ) 9>"$LOCK_FILE"
+    ) 9>"$TOKENLOCK_FILE"
 }
 
 # Trap MUST be first command after function definition
