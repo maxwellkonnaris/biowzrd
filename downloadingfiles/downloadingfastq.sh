@@ -85,13 +85,16 @@ submit_job() {
 
 # Trap to release token on any exit
 cleanup() {
+    # Release token even if job is terminated by SLURM
     flock -x 200
-    tokens=\$(< "$TOKEN_FILE")
-    echo \$((tokens + 1)) > "$TOKEN_FILE"
+    tokens=$(< "$TOKEN_FILE")
+    echo $((tokens + 1)) > "$TOKEN_FILE"
     flock -u 200
 }
+
+# Trap ALL exits and SLURM signals
 exec 200>"${TOKEN_FILE}.lock"
-trap cleanup EXIT
+trap cleanup EXIT TERM INT
 
 # Main processing logic (keep your existing workflow here)
 export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
