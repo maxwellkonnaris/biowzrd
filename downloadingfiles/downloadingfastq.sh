@@ -95,18 +95,16 @@ if [[ "\$PROVIDER" == "sra" ]]; then
         --split-3 || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} fasterq-dump failed' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
     sleep 3  # Throttle after fasterq-dump
 
-    # Step 3: Fetch Metadata with retries and append to combined
+    # Step 3: Fetch Metadata with retries
     MAX_RETRIES=3
     RETRY_DELAY=3
     echo "🔹 Fetching metadata (max \$MAX_RETRIES attempts)"
     for ((i=1; i<=\$MAX_RETRIES; i++)); do
         echo "Attempt \$i/3..."
-        esearch -db sra -query "\$ACCESSION" | efetch -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
-        
+        esearch -db sra -query "\"$ACCESSION\"" | efetch -db sra -format runinfo > "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
         if [[ \$? -eq 0 && -s "\${METADATA_DIR}/\${ACCESSION}-run-info.csv" ]]; then
-            echo "Metadata fetched successfully"
-            
-            # Convert CSV to TSV and merge with combined metadata
+        echo "Metadata fetched successfully"
+        # Convert CSV to TSV and merge with combined metadata
             (
                 flock -x 200  # Use file lock for combined metadata
                 TSV_FILE="\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
@@ -146,6 +144,7 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
              --prefix "\$ACCESSION" \
              --outdir "\$FASTQ_DIR" || { flock -x "\$DEBUG_LOCK" bash -c "echo '❌ ERROR: \${ACCESSION} fastq-dl failed' >> '\${WORKDIR}/logs/debug.log'"; exit 1; }
 
+    # Process ENA metadata
     ENA_METADATA="\${FASTQ_DIR}/\${ACCESSION}-run-info.tsv"
     if [[ -f "\$ENA_METADATA" ]]; then
         # Use file locking for atomic operations
