@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --export=ALL
 #SBATCH --job-name=main_DL
 #SBATCH --output=slurm_%A.out
 #SBATCH --error=slurm_%A.err
@@ -83,9 +84,19 @@ submit_job() {
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
-# Add this to EVERY job script before any commands
-export TOKEN_FILE="${WORKDIR}/.job_tokens"
-export TOKENLOCK_FILE="${TOKEN_FILE}.lock"
+# Main processing logic (keep your existing workflow here)
+export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
+WORKDIR="$WORKDIR"
+CHECKPOINT_FILE="$CHECKPOINT_FILE"
+CHECKPOINT_LOCK_FILE="$CHECKPOINT_LOCK_FILE"
+SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}.sra"
+FASTQ_DIR="${WORKDIR}/fastq_data"
+METADATA_DIR="${WORKDIR}/metadata"
+COMBINED_METADATA="$COMBINED_METADATA"
+ACCESSION="$ACCESSION"
+DEBUG_LOCK="$DEBUG_LOCK"
+TOKEN_FILE="$TOKEN_FILE"
+TOKENLOCK_FILE="${WORKDIR}/.job_tokens.lock"
 
 # Revised cleanup function
 release_token() {
@@ -105,19 +116,6 @@ release_token() {
 
 # Trap MUST be first command after function definition
 trap 'release_token; rm -f "${WORKDIR}/jobs/download_${ACCESSION}.sh"' EXIT
-
-# Main processing logic (keep your existing workflow here)
-export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
-WORKDIR="$WORKDIR"
-CHECKPOINT_FILE="$CHECKPOINT_FILE"
-CHECKPOINT_LOCK_FILE="$CHECKPOINT_LOCK_FILE"
-SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}.sra"
-FASTQ_DIR="${WORKDIR}/fastq_data"
-METADATA_DIR="${WORKDIR}/metadata"
-COMBINED_METADATA="$COMBINED_METADATA"
-ACCESSION="$ACCESSION"
-DEBUG_LOCK="$DEBUG_LOCK"
-TOKEN_FILE="$TOKEN_FILE"
 
 # Determine the provider based on the accession prefix
 ACCESSION_PREFIX=\${ACCESSION:0:3}
