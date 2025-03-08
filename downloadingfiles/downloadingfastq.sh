@@ -17,7 +17,7 @@ ACCESSIONS_FILE="${WORKDIR}/run_accessions.txt"
 COMBINED_METADATA="${WORKDIR}/metadata/combined_metadata.tsv"
 DEBUG_LOG="${WORKDIR}/logs/debug.log"
 TOKEN_FILE="${WORKDIR}/.job_tokens"  # Semaphore for job control
-LOCK_FILE="${WORKDIR}/checkpoint.lock"
+CHECKPOINT_LOCK_FILE="${WORKDIR}/checkpoint.lock"
 DEBUG_LOCK="${WORKDIR}/logs/debug.lock"
 
 # Create necessary directories
@@ -35,7 +35,7 @@ touch "${CHECKPOINT_FILE}"
 # Function to Cleanup Successful Jobs
 #######################################
 cleanup_successful_jobs() {
-    flock -x "$LOCK_FILE"  # Ensure atomic access to CHECKPOINT_FILE
+    flock -x "$CHECKPOINT_LOCK_FILE"  # Ensure atomic access to CHECKPOINT_FILE
     while read -r ACCESSION; do
         ACCESSION=$(echo "$ACCESSION" | xargs)  # Trim whitespace
         if [[ -z "$ACCESSION" ]]; then
@@ -58,7 +58,7 @@ cleanup_successful_jobs() {
             rm -f "$LOG_ERR" && echo "✅ Deleted log file: $LOG_ERR"
         fi
     done < "$CHECKPOINT_FILE"
-    flock -u "$LOCK_FILE"
+    flock -u "$CHECKPOINT_LOCK_FILE"
 }
 
 #######################################
@@ -95,12 +95,12 @@ release_token() {
             exit 1
         fi
         
-        current_tokens=$(< "$TOKEN_FILE")
+        current_tokens=$(< "\$TOKEN_FILE")
         new_tokens=$((current_tokens + 1))
-        echo "$new_tokens" > "$TOKEN_FILE"
+        echo "$new_tokens" > "\$TOKEN_FILE"
         echo "[$(date)] RELEASED TOKEN FOR $ACCESSION (NOW $new_tokens)" >> "${WORKDIR}/token_audit.log"
         
-    ) 9>"$TOKENLOCK_FILE"
+    ) 9>"\$TOKENLOCK_FILE"
 }
 
 # Trap MUST be first command after function definition
@@ -110,7 +110,7 @@ trap 'release_token; rm -f "${WORKDIR}/jobs/download_${ACCESSION}.sh"' EXIT
 export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
 WORKDIR="$WORKDIR"
 CHECKPOINT_FILE="$CHECKPOINT_FILE"
-LOCK_FILE="$LOCK_FILE"
+CHECKPOINT_LOCK_FILE="$CHECKPOINT_LOCK_FILE"
 SRA_FILES="${WORKDIR}/fastq_data/${ACCESSION}.sra"
 FASTQ_DIR="${WORKDIR}/fastq_data"
 METADATA_DIR="${WORKDIR}/metadata"
@@ -175,7 +175,7 @@ if [[ "\$PROVIDER" == "sra" ]]; then
                 # Cleanup
                 rm "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
                 echo "🔹 Metadata appended to combined file"
-            ) 200>"\$LOCK_FILE"
+            ) 200>"\$CHECKPOINT_LOCK_FILE"
             
             break
         else
@@ -230,7 +230,7 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
             
             echo "🔹 Metadata processed and moved"
             
-        ) 200>"\$LOCK_FILE"
+        ) 200>"\$CHECKPOINT_LOCK_FILE"
     else
         # Log warning with timestamp and clean up any potential partial files
         (
@@ -261,7 +261,7 @@ ALL_GZ_FASTQS=("\${FASTQ_DIR}"/"\${ACCESSION}"*.fastq.gz)
 
 
 # Record success in checkpoint
-flock -x "$LOCK_FILE" bash -c "echo \$ACCESSION >> \$CHECKPOINT_FILE"
+flock -x "$CHECKPOINT_LOCK_FILE" bash -c "echo \$ACCESSION >> \$CHECKPOINT_FILE"
 
 # Cleanup SRA files
 if ls "\$SRA_FILES" 1>/dev/null 2>&1; then
