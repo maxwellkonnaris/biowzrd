@@ -86,14 +86,14 @@ submit_job() {
 # Trap to release token on any exit
 cleanup() {
     # Release token even if job is terminated by SLURM
-    flock -x 200
-    tokens=$(< "$TOKEN_FILE")
-    echo $((tokens + 1)) > "$TOKEN_FILE"
-    flock -u 200
+    (
+        flock -x 200 || exit 1
+        tokens=$(< "$TOKEN_FILE")
+        echo $((tokens + 1)) > "$TOKEN_FILE"
+    ) 200>"${TOKEN_FILE}.lock"
 }
 
 # Trap ALL exits and SLURM signals
-exec 200>"${TOKEN_FILE}.lock"
 trap cleanup EXIT TERM INT
 
 # Main processing logic (keep your existing workflow here)
