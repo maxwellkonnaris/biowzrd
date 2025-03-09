@@ -32,6 +32,9 @@ fi
 # Ensure checkpoint file exists
 touch "${CHECKPOINT_FILE}"
 
+export TOKEN_FILE="${WORKDIR}/.job_tokens"
+export CHECKPOINT_LOCK_FILE="${WORKDIR}/checkpoint.lock"
+
 #######################################
 # Function to Cleanup Successful Jobs
 #######################################
@@ -76,6 +79,7 @@ submit_job() {
     # Create the job script with token management
     cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
+#SBATCH --export=ALL
 #SBATCH --job-name=fastq_${ACCESSION}
 #SBATCH --output=${WORKDIR}/logs/${ACCESSION}.out
 #SBATCH --error=${WORKDIR}/logs/${ACCESSION}.err
@@ -83,6 +87,9 @@ submit_job() {
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
+
+set -euo pipefail
+set -x
 
 # Main processing logic (keep your existing workflow here)
 export NCBI_API_KEY="9c9e61f98934800c1aab47c4066f394cde08"
@@ -98,19 +105,21 @@ DEBUG_LOCK="$DEBUG_LOCK"
 TOKEN_FILE="$TOKEN_FILE"
 TOKENLOCK_FILE="${WORKDIR}/.job_tokens.lock"
 
+echo "[\$(date)] DEBUG: TOKEN_FILE is set to '\$TOKEN_FILE'." >&2
+echo "[\$(date)] CHECKPOINT_LOCK_FILE=\$CHECKPOINT_LOCK_FILE" >&2
+
 # Revised cleanup function
 release_token() {
     (
         if ! flock -x 9; then
-            echo "[$(date)] FAILED LOCK FOR $ACCESSION" >> "${WORKDIR}/lock_errors.log"
+            echo "[\$(date)] FAILED LOCK FOR \$ACCESSION" >> "\$WORKDIR/lock_errors.log"
             exit 1
         fi
-        
-        current_tokens=$(< "\$TOKEN_FILE")
+
+        current_tokens=\$(< "\$TOKEN_FILE")
         new_tokens=\$((current_tokens + 1))
         echo "\$new_tokens" > "\$TOKEN_FILE"
-        echo "[\$(date)] RELEASED TOKEN FOR $ACCESSION (NOW \$new_tokens)" >> "\${WORKDIR}/token_audit.log"
-        
+        echo "[\$(date)] RELEASED TOKEN FOR \$ACCESSION (NOW \$new_tokens)" >> "\$WORKDIR/token_audit.log"
     ) 9>"\$TOKENLOCK_FILE"
 }
 
