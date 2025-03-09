@@ -180,7 +180,14 @@ if [[ "\$PROVIDER" == "sra" ]]; then
                 tail -n +2 "\$TSV_FILE" >> "\$COMBINED_METADATA"
                 
                 # Cleanup
-                rm "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
+                for file in "${METADATA_DIR}/${ACCESSION}-run-info.tsv" \
+                            "${METADATA_DIR}/${ACCESSION}-run-info.csv"
+                do
+                    if [[ -f "$file" ]]; then
+                        rm -f "$file"
+                        echo "Removed $file"
+                    fi
+                done
                 echo "🔹 Metadata appended to combined file"
             ) 200>"\$CHECKPOINT_LOCK_FILE"
             
@@ -233,7 +240,15 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
                 fi
             fi
 
-            rm "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv"
+            for file in "${METADATA_DIR}/${ACCESSION}-run-info.tsv" \
+                        "${METADATA_DIR}/${ACCESSION}-run-info.csv"
+            do
+                if [[ -f "$file" ]]; then
+                    rm -f "$file"
+                    echo "Removed $file"
+                fi
+            done
+
             
             echo "🔹 Metadata processed and moved"
             
