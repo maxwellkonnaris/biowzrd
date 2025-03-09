@@ -107,9 +107,9 @@ release_token() {
         fi
         
         current_tokens=$(< "\$TOKEN_FILE")
-        new_tokens=$((current_tokens + 1))
+        new_tokens=\$((current_tokens + 1))
         echo "\$new_tokens" > "\$TOKEN_FILE"
-        echo "[\$(date)] RELEASED TOKEN FOR $ACCESSION (NOW $new_tokens)" >> "\${WORKDIR}/token_audit.log"
+        echo "[\$(date)] RELEASED TOKEN FOR $ACCESSION (NOW \$new_tokens)" >> "\${WORKDIR}/token_audit.log"
         
     ) 9>"\$TOKENLOCK_FILE"
 }
