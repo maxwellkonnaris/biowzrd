@@ -108,14 +108,14 @@ release_token() {
         
         current_tokens=$(< "\$TOKEN_FILE")
         new_tokens=$((current_tokens + 1))
-        echo "$new_tokens" > "\$TOKEN_FILE"
-        echo "[$(date)] RELEASED TOKEN FOR $ACCESSION (NOW $new_tokens)" >> "${WORKDIR}/token_audit.log"
+        echo "\$new_tokens" > "\$TOKEN_FILE"
+        echo "[\$(date)] RELEASED TOKEN FOR $ACCESSION (NOW $new_tokens)" >> "\${WORKDIR}/token_audit.log"
         
     ) 9>"\$TOKENLOCK_FILE"
 }
 
 # Trap MUST be first command after function definition
-trap 'release_token; rm -f "${WORKDIR}/jobs/download_${ACCESSION}.sh"' EXIT
+trap '( release_token )' EXIT TERM INT
 
 # Determine the provider based on the accession prefix
 ACCESSION_PREFIX=\${ACCESSION:0:3}
