@@ -180,12 +180,12 @@ if [[ "\$PROVIDER" == "sra" ]]; then
                 tail -n +2 "\$TSV_FILE" >> "\$COMBINED_METADATA"
                 
                 # Cleanup
-                for file in "${METADATA_DIR}/${ACCESSION}-run-info.tsv" \
-                            "${METADATA_DIR}/${ACCESSION}-run-info.csv"
+                for file in "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv" \
+                            "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
                 do
-                    if [[ -f "$file" ]]; then
-                        rm -f "$file"
-                        echo "Removed $file"
+                    if [[ -f "\$file" ]]; then
+                        rm -f "\$file"
+                        echo "Removed \$file"
                     fi
                 done
                 echo "🔹 Metadata appended to combined file"
@@ -240,12 +240,12 @@ elif [[ "\$PROVIDER" == "ena" ]]; then
                 fi
             fi
 
-            for file in "${METADATA_DIR}/${ACCESSION}-run-info.tsv" \
-                        "${METADATA_DIR}/${ACCESSION}-run-info.csv"
+            for file in "\${METADATA_DIR}/\${ACCESSION}-run-info.tsv" \
+                        "\${METADATA_DIR}/\${ACCESSION}-run-info.csv"
             do
-                if [[ -f "$file" ]]; then
-                    rm -f "$file"
-                    echo "Removed $file"
+                if [[ -f "\$file" ]]; then
+                    rm -f "\$file"
+                    echo "Removed \$file"
                 fi
             done
 
