@@ -20,6 +20,9 @@ DEBUG_LOG="${WORKDIR}/logs/debug.log"
 TOKEN_FILE="${WORKDIR}/.job_tokens"  # Semaphore for job control
 CHECKPOINT_LOCK_FILE="${WORKDIR}/checkpoint.lock"
 DEBUG_LOCK="${WORKDIR}/logs/debug.lock"
+JOB_NAME_PREFIX="fastq_"      
+PERIODIC_RESET_LOG="${WORKDIR}/logs/periodic_reset.log"
+TOKEN_LOCK_FILE="${WORKDIR}/.job_tokens.lock" 
 
 # Create necessary directories
 mkdir -p "${WORKDIR}/jobs" "${WORKDIR}/logs" "${WORKDIR}/fastq_data" "${WORKDIR}/metadata"
@@ -159,7 +162,7 @@ COMBINED_METADATA="$COMBINED_METADATA"
 ACCESSION="$ACCESSION"
 DEBUG_LOCK="$DEBUG_LOCK"
 TOKEN_FILE="$TOKEN_FILE"
-TOKENLOCK_FILE="${WORKDIR}/.job_tokens.lock"
+TOKENLOCK_FILE="${TOKEN_LOCK_FILE}"
 
 echo "[\$(date)] DEBUG: TOKEN_FILE is set to '\$TOKEN_FILE'." >&2
 echo "[\$(date)] CHECKPOINT_LOCK_FILE='\$CHECKPOINT_LOCK_FILE'." >&2
