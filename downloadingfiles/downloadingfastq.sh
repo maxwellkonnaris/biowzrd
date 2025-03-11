@@ -99,28 +99,23 @@ periodic_reset() {
 #######################################
 cleanup_successful_jobs() {
     flock -x "$CHECKPOINT_LOCK_FILE"  # Ensure atomic access to CHECKPOINT_FILE
-    while read -r ACCESSION; do
+
+    # Process only the last 100 lines to speed things up
+    tail -n 100 "$CHECKPOINT_FILE" | while read -r ACCESSION; do
         ACCESSION=$(echo "$ACCESSION" | xargs)  # Trim whitespace
-        if [[ -z "$ACCESSION" ]]; then
-            continue
-        fi
+        [[ -z "$ACCESSION" ]] && continue  # Skip empty lines
 
         # Delete job script
         JOB_SCRIPT="${WORKDIR}/jobs/download_${ACCESSION}.sh"
-        if [[ -f "$JOB_SCRIPT" ]]; then
-            rm -f "$JOB_SCRIPT" && echo "✅ Deleted job script for $ACCESSION"
-        fi
+        [[ -f "$JOB_SCRIPT" ]] && rm -f "$JOB_SCRIPT" && echo "✅ Deleted job script for $ACCESSION"
 
         # Delete logs
         LOG_OUT="${WORKDIR}/logs/${ACCESSION}.out"
         LOG_ERR="${WORKDIR}/logs/${ACCESSION}.err"
-        if [[ -f "$LOG_OUT" ]]; then
-            rm -f "$LOG_OUT" && echo "✅ Deleted log file: $LOG_OUT"
-        fi
-        if [[ -f "$LOG_ERR" ]]; then
-            rm -f "$LOG_ERR" && echo "✅ Deleted log file: $LOG_ERR"
-        fi
-    done < "$CHECKPOINT_FILE"
+        [[ -f "$LOG_OUT" ]] && rm -f "$LOG_OUT" && echo "✅ Deleted log file: $LOG_OUT"
+        [[ -f "$LOG_ERR" ]] && rm -f "$LOG_ERR" && echo "✅ Deleted log file: $LOG_ERR"
+    done
+
     flock -u "$CHECKPOINT_LOCK_FILE"
 }
 
@@ -394,9 +389,8 @@ while read -r ACCESSION; do
     # Now submit the job
     submit_job "$ACCESSION"
     
-    # Controlled cleanup every 5 jobs
     if (( ++CLEANUP_COUNTER >= 20 )); then
-        cleanup_successful_jobs
+        cleanup_successful_jobs &  # Run in background
         CLEANUP_COUNTER=0
     fi
 done < "$ACCESSIONS_FILE"
