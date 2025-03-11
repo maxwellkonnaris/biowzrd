@@ -36,6 +36,62 @@ export TOKEN_FILE="${WORKDIR}/.job_tokens"
 export CHECKPOINT_LOCK_FILE="${WORKDIR}/checkpoint.lock"
 
 #######################################
+# Function: Periodic Reset (from script 2)
+# Checks if the number of "tokens out" (i.e. jobs in flight) matches
+# the actual number of running/pending Slurm jobs. If mismatch, fix it.
+#######################################
+periodic_reset() {
+  # 1) Read current token count under lock
+  {
+    flock -x 9 || return 1  # If we can’t acquire the lock, silently skip
+    if [[ -s "$TOKEN_FILE" ]]; then
+      current_tokens=$(cat "$TOKEN_FILE" 2>/dev/null)
+    else
+      current_tokens="0"
+    fi
+
+    # Sanity-check the content
+    if ! [[ "$current_tokens" =~ ^[0-9]+$ ]]; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $TOKEN_FILE content invalid: '$current_tokens'. Resetting to $MAX_JOBS." | tee -a "$PERIODIC_RESET_LOG"
+      echo "$MAX_JOBS" > "$TOKEN_FILE"
+      return 0
+    fi
+  } 9<>"$TOKEN_LOCK_FILE"
+
+  # 2) Count how many jobs are actually running/pending in Slurm
+  local RUNNING_JOBS
+  RUNNING_JOBS=$(squeue --noheader --format '%j' | grep -c "^${JOB_NAME_PREFIX}")
+
+  # 3) Compare tokens-out vs. actual running
+  local tokens_out=$((MAX_JOBS - current_tokens))  # how many tokens are currently in use
+
+  if (( tokens_out < 0 )); then
+    # Possibly corrupted token file => forcibly reset
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: current_tokens=$current_tokens > MAX_JOBS=$MAX_JOBS. Resetting to $MAX_JOBS." | tee -a "$PERIODIC_RESET_LOG"
+    {
+      flock -x 9 || return 1
+      echo "$MAX_JOBS" > "$TOKEN_FILE"
+    } 9<>"$TOKEN_LOCK_FILE"
+    return 0
+  fi
+
+  if (( tokens_out > RUNNING_JOBS )); then
+    # More tokens “out” than actual Slurm jobs => we lost tokens somewhere
+    local mismatch=$(( tokens_out - RUNNING_JOBS ))
+    local new_tokens=$(( current_tokens + mismatch ))
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] MISMATCH DETECTED: tokens_out=$tokens_out, running=$RUNNING_JOBS. Restoring $mismatch tokens ($current_tokens -> $new_tokens)." | tee -a "$PERIODIC_RESET_LOG"
+
+    {
+      flock -x 9 || return 1
+      echo "$new_tokens" > "$TOKEN_FILE"
+    } 9<>"$TOKEN_LOCK_FILE"
+  else
+    # No mismatch or tokens_out <= running_jobs
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] OK: tokens_out=$tokens_out, running=$RUNNING_JOBS, current_tokens=$current_tokens" >> "$PERIODIC_RESET_LOG"
+  fi
+}
+
+#######################################
 # Function to Cleanup Successful Jobs
 #######################################
 cleanup_successful_jobs() {
@@ -300,13 +356,12 @@ EOF
 #######################################
 # Main Submission Loop with Token Control
 #######################################
-# Replace your token acquisition loop with:
 CLEANUP_COUNTER=0
 while read -r ACCESSION; do
     # Skip completed jobs
     grep -Fxq "$ACCESSION" "$CHECKPOINT_FILE" && continue
 
-    # Atomic token acquisition
+    # Acquire a token
     while :; do
         (
             flock -x 9 || exit 99  # Wait indefinitely for lock
@@ -317,16 +372,23 @@ while read -r ACCESSION; do
                 exit 0
             fi
             exit 1
-        ) 9>"${TOKEN_FILE}.lock"
-        
+        ) 9>"${TOKEN_LOCK_FILE}"
+
         case $? in
-            0)  break;;  # Token acquired
-            1)  sleep 5;;  # No tokens available
-            99) echo "Lock starvation detected" >> "${WORKDIR}/lock_errors.log"
-                sleep 10;;
+            0)  break;;   # Token acquired
+            1)  
+                # No tokens => sleep briefly, do mismatch check
+                sleep 1
+                periodic_reset
+                ;;
+            99)
+                echo "Lock starvation detected" >> "${WORKDIR}/lock_errors.log"
+                sleep 2
+                ;;
         esac
     done
 
+    # Now submit the job
     submit_job "$ACCESSION"
     
     # Controlled cleanup every 5 jobs
@@ -336,12 +398,14 @@ while read -r ACCESSION; do
     fi
 done < "$ACCESSIONS_FILE"
 
-# Final cleanup after all jobs are submitted
+# Final cleanup after all submissions
 cleanup_successful_jobs
 
-# Wait for final jobs to complete
-while [[ $(flock -x "${TOKEN_FILE}.lock" -c "cat $TOKEN_FILE") -lt $MAX_JOBS ]]; do
-    sleep 10
+# Wait for final jobs to complete (i.e. tokens to return)
+while [[ $(flock -x "${TOKEN_LOCK_FILE}" -c "cat $TOKEN_FILE") -lt $MAX_JOBS ]]; do
+    # We can do a final mismatch check here too
+    periodic_reset
+    sleep 5
 done
 
 echo "🎉 All jobs completed!"
