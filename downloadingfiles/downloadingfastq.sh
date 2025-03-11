@@ -395,7 +395,7 @@ while read -r ACCESSION; do
     submit_job "$ACCESSION"
     
     # Controlled cleanup every 5 jobs
-    if (( ++CLEANUP_COUNTER >= 5 )); then
+    if (( ++CLEANUP_COUNTER >= 20 )); then
         cleanup_successful_jobs
         CLEANUP_COUNTER=0
     fi
