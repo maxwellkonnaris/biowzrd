@@ -2,7 +2,6 @@ import pandas as pd
 import argparse
 import os
 import requests
-import json
 import time
 from tqdm import tqdm
 
@@ -34,6 +33,9 @@ except ImportError:
 #                                                                                        #
 # ▶ Adjust Batch Size for API (Default: 16)                                              #
 #   python embed_csv_huggingface.py your_data.csv your_embeddings.csv --batch_size 32    #
+#                                                                                        #
+# ▶ Show Help Menu                                                                       #
+#   python embed_csv_huggingface.py --help                                               #
 #                                                                                        #
 # ================================ REQUIREMENTS & SETUP ================================ #
 #                                                                                        #
@@ -164,13 +166,19 @@ def process_file(input_file, output_file, model_name, use_local, api_key, batch_
         print(f"❌ Error: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Embed tabular CSV/TSV data using Hugging Face API or a local model.")
-    parser.add_argument("input_file", help="Path to the input CSV/TSV file")
-    parser.add_argument("output_file", nargs="?", default="embedded_data.csv", help="Path to save the embeddings (default: embedded_data.csv)")
-    parser.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2", help="Hugging Face model or local model to use for embeddings")
-    parser.add_argument("--use_local", action="store_true", help="Use a local model instead of the Hugging Face API")
-    parser.add_argument("--api_key", default=os.getenv("HUGGINGFACE_API_KEY"), help="Hugging Face API Key (or set as env variable)")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for API requests (default: 16)")
+    parser = argparse.ArgumentParser(
+        description="Embed tabular CSV/TSV data using Hugging Face API or a local model."
+    )
+    parser.add_argument("input_file", help="Path to the input CSV/TSV file.")
+    parser.add_argument("output_file", nargs="?", default="embedded_data.csv", help="Path to save the embeddings (default: embedded_data.csv).")
+    parser.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2",
+                        help="Hugging Face model or local model to use for embeddings (default: sentence-transformers/all-MiniLM-L6-v2).")
+    parser.add_argument("--use_local", action="store_true",
+                        help="Use a local model instead of the Hugging Face API. Requires `sentence-transformers` installed.")
+    parser.add_argument("--api_key", default=os.getenv("HUGGINGFACE_API_KEY"),
+                        help="Hugging Face API Key (or set as env variable).")
+    parser.add_argument("--batch_size", type=int, default=16,
+                        help="Batch size for API requests (default: 16). Reduce if hitting rate limits.")
 
     args = parser.parse_args()
 
