@@ -4,12 +4,10 @@ import os
 import requests
 import time
 from tqdm import tqdm
-
-# Import local model only if needed (avoids unnecessary dependencies)
 try:
     from sentence_transformers import SentenceTransformer
 except ImportError:
-    SentenceTransformer = None  # Avoids errors if not using local mode
+    SentenceTransformer = None 
 
 """
 ##########################################################################################
