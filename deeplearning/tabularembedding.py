@@ -12,6 +12,32 @@ try:
 except ImportError:
     SentenceTransformer = None  # Avoids errors if not using local mode
 
+"""
+##########################################################################################
+#                                      EMBEDDING SCRIPT                                  #
+##########################################################################################
+# This script allows users to embed tabular data (CSV/TSV) using either:                 #
+#   1. The Hugging Face API (default)                                                    #
+#   2. A local model (via `sentence-transformers`)                                       #
+#                                                                                        #
+# ================================ HOW TO USE THE SCRIPT =============================== #
+#                                                                                        #
+# ▶ Run with Hugging Face API (Default)                                                  #
+#   python embed_csv_huggingface.py your_data.csv your_embeddings.csv                    #
+#                                                                                        #
+# ▶ Use a Local Model Instead                                                            #
+#   python embed_csv_huggingface.py your_data.csv your_embeddings.csv --use_local        #
+#   (Requires `sentence-transformers`: Install with `pip install sentence-transformers`) #
+#                                                                                        #
+# ▶ Change the Model                                                                     #
+#   python embed_csv_huggingface.py your_data.csv your_embeddings.csv --model sentence-transformers/all-mpnet-base-v2 #
+#                                                                                        #
+# ▶ Adjust Batch Size for API (Default: 16)                                              #
+#   python embed_csv_huggingface.py your_data.csv your_embeddings.csv --batch_size 32    #
+#                                                                                        #
+##########################################################################################
+"""
+
 def detect_file_format(input_file):
     """
     Detect whether the input file is a CSV or TSV based on its extension.
