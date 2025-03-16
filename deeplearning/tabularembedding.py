@@ -35,6 +35,26 @@ except ImportError:
 # ▶ Adjust Batch Size for API (Default: 16)                                              #
 #   python embed_csv_huggingface.py your_data.csv your_embeddings.csv --batch_size 32    #
 #                                                                                        #
+# ================================ REQUIREMENTS & SETUP ================================ #
+#                                                                                        #
+# ▶ Installing Required Packages                                                         #
+#   - For local model usage, install the `sentence-transformers` library:                #
+#     pip install -U sentence-transformers                                               #
+#                                                                                        #
+#   - Ensure other dependencies are installed:                                           #
+#     pip install pandas requests tqdm                                                   #
+#                                                                                        #
+# ▶ Obtaining a Hugging Face API Key                                                     #
+#   1. Create a Hugging Face account at https://huggingface.co/join                      #
+#   2. After logging in, navigate to your profile settings.                              #
+#   3. Go to the "Access Tokens" section.                                                #
+#   4. Click on "New token" to generate a new API key.                                   #
+#   5. Name your token, set the role (e.g., "read"), and click "Generate".               #
+#   6. Copy the generated token and keep it secure.                                      #
+#                                                                                        #
+#   For detailed instructions, refer to:                                                 #
+#   https://huggingface.co/docs/huggingface_hub/v0.13.2/en/guides/inference              #
+#                                                                                        #
 ##########################################################################################
 """
 
