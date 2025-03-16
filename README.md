@@ -60,7 +60,12 @@ Packages required: fastp
 ## Kmer based analysis (kmermining/)
 Packages required: Jellyfish
 1. Perform QC from nonassemblyQC/minimalqualitycontrol.sh. This is done with intention for non assembly based downstream tasks.
-2. Specify a range of Kmer lengths to count and mine from each read in each trimmed fastq file after running minimalqualitycontrol.sh 
+2. Specify a range of Kmer lengths to count and mine from each read in each trimmed fastq file after running minimalqualitycontrol.sh
+
+## Metadata
+```bash
+./merge_fastq_metadata.py -r output.tsv -s combined_metadata.tsv -o merged_output.tsv
+```
 
 ## Human Microbiome Project (HMP/)
 Packages required: aws (see download script for linux)
