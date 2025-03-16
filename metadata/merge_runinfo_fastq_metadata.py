@@ -15,7 +15,7 @@ def detect_delimiter(file_path):
 
 def merge_files(read_level_file, sample_level_file, output_file, chunksize=100000):
     """
-    Efficiently merges read-level FASTQ metadata with sample-level metadata.
+    Merges read-level FASTQ metadata with sample-level metadata from runinfo in SRA.
     
     Args:
         read_level_file (str): Path to the read-level metadata file (.tsv or .csv).
