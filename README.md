@@ -69,31 +69,20 @@ Packages required: Jellyfish
 
 ## Microbiome Count Tables (microbiomecounts/)
 ```bash
-# Create the microbiome environment
-micromamba create -n microbiome -y -c conda-forge -c bioconda -c defaults python=3.9 fastp r-base metaphlan motus bowtie2
+# For QC with Fastp and DADA2 classifier (RDP classifier or SILVA classifier):
+conda create -dada2 -c bioconda -c conda-forge fastp
+conda activate dada2
+Rscript -e 'if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager"); BiocManager::install("dada2", ask = FALSE)'
 
-# Activate the environment -- I switch to conda because I alias micromamba..
-conda activate microbiome
+# For MetaPhlAn4 classifier:
+conda create -n metaphlan -c bioconda -c conda-forge metaphlan bowtie2
+conda activate metaphlan
+metaphlan --install --index mpa_vJan21_CHOCOPhlAnSGB_202103  
 
-# Install required bioinformatics tools
-conda install -y -c bioconda prodigal hmmer diamond
-
-# Install Python dependencies
-pip install numpy matplotlib scipy biom-format hclust2
-
-# Update all packages
-conda update --all -y
-
-# Download the latest MetaPhlAn database
-metaphlan --install
-
-# Download the latest mOTU database
-motus downloadDB
-
-# Install Bioconductor packages inside R using BiocManager
-Rscript -e 'install.packages("BiocManager", repos="http://cran.r-project.org"); BiocManager::install(c("Biostrings", "DECIPHER", "phyloseq", "dada2"))'
-
-
+# For mOTU classifier:
+conda create -n motus -c bioconda motus
+conda activate motus
+motus downloadDB  
 ```
 
 ## Human Microbiome Project (HMP/)
