@@ -74,13 +74,13 @@ conda create -dada2 -c bioconda -c conda-forge fastp
 conda activate dada2
 Rscript -e 'if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager"); BiocManager::install("dada2", ask = FALSE)'
 
-# For MetaPhlAn4 classifier:
-conda create -n metaphlan -c bioconda -c conda-forge metaphlan bowtie2
+# For QC with Fastp and MetaPhlAn4 classifier:
+conda create -n metaphlan -c bioconda -c conda-forge metaphlan bowtie2 fastp
 conda activate metaphlan
 metaphlan --install --index mpa_vJan21_CHOCOPhlAnSGB_202103  
 
-# For mOTU classifier:
-conda create -n motus -c bioconda motus
+# For QC with Fastp and mOTU classifier:
+conda create -n motus -c bioconda motus fastp
 conda activate motus
 motus downloadDB  
 ```
