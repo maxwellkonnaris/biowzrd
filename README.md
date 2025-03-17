@@ -70,17 +70,17 @@ Packages required: Jellyfish
 ## Microbiome Count Tables (microbiomecounts/)
 ```bash
 # For QC with Fastp and DADA2 classifier (RDP classifier or SILVA classifier):
-conda create -dada2 -c bioconda -c conda-forge fastp
+conda create -dada2 -y -c bioconda -c conda-forge fastp
 conda activate dada2
 Rscript -e 'if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager"); BiocManager::install("dada2", ask = FALSE)'
 
 # For QC with Fastp and MetaPhlAn4 classifier:
-conda create -n metaphlan -c bioconda -c conda-forge metaphlan bowtie2 fastp
+conda create -n metaphlan -y -c bioconda -c conda-forge metaphlan bowtie2 fastp
 conda activate metaphlan
 metaphlan --install --index mpa_vJan21_CHOCOPhlAnSGB_202103  
 
 # For QC with Fastp and mOTU classifier:
-conda create -n motus -c bioconda motus fastp
+conda create -n motus -y -c bioconda motus fastp
 conda activate motus
 motus downloadDB  
 ```
