@@ -69,19 +69,16 @@ Packages required: Jellyfish
 
 ## Microbiome Count Tables (microbiomecounts/)
 ```bash
-conda create -n microbiome -y python=3.9 fastp r-base r-dada2 metaphlan motus bowtie2
+conda create -n microbiome -y python=3.9
 conda activate microbiome
-
-# Required for DADA2 (if not included in the base R install)
+conda config --add channels defaults
+conda config --add channels bioconda
+conda config --add channels conda-forge
+conda config --set channel_priority strict
 conda install -y -c bioconda bioconductor-biostrings bioconductor-phyloseq bioconductor-DECIPHER
-
-# Required for MetaPhlAn4
-pip install numpy matplotlib scipy biom-format hclust2 
-
-# Required for mOTU v2.5
+conda install -y fastp r-base r-dada2 metaphlan motus bowtie2
+pip install numpy matplotlib scipy biom-format hclust2
 conda install -y -c bioconda prodigal hmmer diamond
-
-# Ensure all installations are up to date
 conda update --all -y
 
 # Download the latest MetaPhlAn database
