@@ -69,10 +69,14 @@ Packages required: Jellyfish
 
 ## Microbiome Count Tables (microbiomecounts/)
 ```bash
+## For Amplicon:
+
 # For QC with Fastp and DADA2 classifier (RDP classifier or SILVA classifier):
 conda create -dada2 -y -c bioconda -c conda-forge fastp
 conda activate dada2
 Rscript -e 'if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager"); BiocManager::install("dada2", ask = FALSE)'
+
+## For Metagenomics:
 
 # For QC with Fastp and MetaPhlAn4 classifier:
 conda create -n metaphlan -y -c bioconda -c conda-forge metaphlan bowtie2 fastp
