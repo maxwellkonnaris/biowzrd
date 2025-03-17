@@ -62,9 +62,33 @@ Packages required: Jellyfish
 1. Perform QC from nonassemblyQC/minimalqualitycontrol.sh. This is done with intention for non assembly based downstream tasks.
 2. Specify a range of Kmer lengths to count and mine from each read in each trimmed fastq file after running minimalqualitycontrol.sh
 
-## Metadata
+## Metadata (metadata/)
 ```bash
 ./merge_fastq_metadata.py -r output.tsv -s combined_metadata.tsv -o merged_output.tsv
+```
+
+## Microbiome Count Tables (microbiomecounts/)
+```bash
+conda create -n microbiome -y python=3.9 fastp r-base r-dada2 metaphlan motus bowtie2
+conda activate microbiome
+
+# Required for DADA2 (if not included in the base R install)
+conda install -y -c bioconda bioconductor-biostrings bioconductor-phyloseq bioconductor-DECIPHER
+
+# Required for MetaPhlAn4
+pip install numpy matplotlib scipy biom-format hclust2 
+
+# Required for mOTU v2.5
+conda install -y -c bioconda prodigal hmmer diamond
+
+# Ensure all installations are up to date
+conda update --all -y
+
+# Download the latest MetaPhlAn database
+metaphlan --install
+
+# Download the latest mOTU database
+motus downloadDB
 ```
 
 ## Human Microbiome Project (HMP/)
