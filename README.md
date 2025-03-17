@@ -91,7 +91,8 @@ metaphlan --install
 motus downloadDB
 
 # Install Bioconductor packages inside R using BiocManager
-Rscript -e 'install.packages("BiocManager"); BiocManager::install(c("Biostrings", "DECIPHER", "phyloseq", "dada2"))'
+Rscript -e 'install.packages("BiocManager", repos="http://cran.r-project.org"); BiocManager::install(c("Biostrings", "DECIPHER", "phyloseq", "dada2"))'
+
 
 ```
 
