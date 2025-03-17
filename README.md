@@ -69,14 +69,10 @@ Packages required: Jellyfish
 
 ## Microbiome Count Tables (microbiomecounts/)
 ```bash
-conda create -n microbiome -y python=3.9
-conda activate microbiome
-conda config --add channels defaults
-conda config --add channels bioconda
-conda config --add channels conda-forge
-conda config --set channel_priority strict
+micromamba create -n microbiome -y -c conda-forge -c bioconda -c defaults python=3.9 fastp r-base r-dada2 metaphlan motus bowtie2
+
+# I have an alias for micromamba as conda since I use it universally, therefore I replace the below:
 conda install -y -c bioconda bioconductor-biostrings bioconductor-phyloseq bioconductor-DECIPHER
-conda install -y fastp r-base r-dada2 metaphlan motus bowtie2
 pip install numpy matplotlib scipy biom-format hclust2
 conda install -y -c bioconda prodigal hmmer diamond
 conda update --all -y
