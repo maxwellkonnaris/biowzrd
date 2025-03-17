@@ -69,12 +69,19 @@ Packages required: Jellyfish
 
 ## Microbiome Count Tables (microbiomecounts/)
 ```bash
-micromamba create -n microbiome -y -c conda-forge -c bioconda -c defaults python=3.9 fastp r-base r-dada2 metaphlan motus bowtie2
+# Create the microbiome environment
+micromamba create -n microbiome -y -c conda-forge -c bioconda -c defaults python=3.9 fastp r-base metaphlan motus bowtie2
 
-# I have an alias for micromamba as conda since I use it universally, therefore I replace the below:
-conda install -y -c bioconda bioconductor-biostrings bioconductor-phyloseq bioconductor-DECIPHER
-pip install numpy matplotlib scipy biom-format hclust2
+# Activate the environment -- I switch to conda because I alias micromamba..
+conda activate microbiome
+
+# Install required bioinformatics tools
 conda install -y -c bioconda prodigal hmmer diamond
+
+# Install Python dependencies
+pip install numpy matplotlib scipy biom-format hclust2
+
+# Update all packages
 conda update --all -y
 
 # Download the latest MetaPhlAn database
@@ -82,6 +89,10 @@ metaphlan --install
 
 # Download the latest mOTU database
 motus downloadDB
+
+# Install Bioconductor packages inside R using BiocManager
+Rscript -e 'install.packages("BiocManager"); BiocManager::install(c("Biostrings", "DECIPHER", "phyloseq", "dada2"))'
+
 ```
 
 ## Human Microbiome Project (HMP/)
