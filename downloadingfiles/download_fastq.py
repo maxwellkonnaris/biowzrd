@@ -1,149 +1,164 @@
 #!/usr/bin/env python3
 """
-download_fastq.py - Download raw FASTQ files from ENA or SRA.
+download_fastq.py
+
+Download raw FASTQ files in parallel from paths specified in a tab-separated file.
+Each line must contain two columns: 'accession' and 'download_path'.
+
+Example input (download_links.txt):
+
+    accession       download_path
+    SRR32578126     s3://sra-pub-src-14/SRR32578126/file_R1.fastq.gz
+    SRR32578126     s3://sra-pub-src-14/SRR32578126/file_R2.fastq.gz
+    SRR99999999     ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR999/...
+    ...
 
 Usage:
-    ./download_fastq.py --accession SRR12345678
+    python download_fastq.py --input download_links.txt [--output raw_fastq_files] [--verbose]
 
 Options:
-    --accession <str>   Required. SRA or ENA run accession to download.
+    --input <str>       Path to the tab-separated input file (required).
+    --output <str>      Directory to store downloaded FASTQ files (default: ./raw_fastq_files).
+    --verbose           Print log messages to console in addition to writing them to download.log.
     --help              Show this help message and exit.
 
-This script:
-- First checks ENA for FASTQ files (preferred due to direct FTP access).
-- If unavailable, falls back to SRA AWS (using `aws s3 cp`).
-- Logs success/failure to a log file (`download.log`).
-- Retries up to 3 times on failure.
-- Ensures dependencies (`wget`, `aws s3`) are installed.
-
-Example:
-    ./download_fastq.py --accession ERR9876543
+Details:
+- Script attempts to detect s3:// vs. any other protocol (ftp/http/https).
+- Retries up to MAX_RETRIES times on failure.
+- Uses 90% of detected CPU cores for parallel downloads.
+- Writes SUCCESS/FAILURE to download.log, and to console if --verbose is used.
 """
 
 import os
 import sys
-import subprocess
-import argparse
-import requests
 import time
+import argparse
+import subprocess
 from shutil import which
+from multiprocessing import Pool, cpu_count
 
-# Directories
-WORKDIR = os.getcwd()
-FASTQ_DIR = os.path.join(WORKDIR, "raw_fastq_files")
-LOG_FILE = os.path.join(WORKDIR, "download.log")
-os.makedirs(FASTQ_DIR, exist_ok=True)
-
-# Maximum retries for downloads
+# Globals
 MAX_RETRIES = 3
+LOG_FILE = "download.log"
 
-# Check if required dependencies are installed
+def log_message(msg, log_file=LOG_FILE, verbose=False):
+    """
+    Log a message to file and also to console if verbose is True.
+    """
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    full_msg = f"{timestamp} - {msg}"
+    # Always log to file
+    with open(log_file, "a") as lf:
+        lf.write(full_msg + "\n")
+    # Print to console if verbose
+    if verbose:
+        print(full_msg)
+
 def check_dependency(command):
-    """Check if a system command is available."""
+    """
+    Check if a system command is available. Return True if found, otherwise False.
+    """
     return which(command) is not None
 
-# Function to log success/failure
-def log_message(accession, message):
-    """Log success or failure messages."""
-    with open(LOG_FILE, "a") as log:
-        log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {accession} - {message}\n")
-    print(message)
+def download_single(accession, download_path, output_dir, verbose=False):
+    """
+    Download a single file (accession + download_path).
+    - If download_path starts with 's3://', use `aws s3 cp`.
+    - Otherwise, use `wget`.
+    Logs SUCCESS or FAILURE for each line (accession).
+    Retries up to MAX_RETRIES times.
+    """
+    # Ensure output_dir exists
+    os.makedirs(output_dir, exist_ok=True)
 
-# Function to download from ENA
-def download_from_ena(accession):
-    """Try downloading FASTQ files from ENA."""
-    ena_api_url = f"https://www.ebi.ac.uk/ena/portal/api/filereport?accession={accession}&result=read_run&fields=fastq_ftp"
-    
-    try:
-        response = requests.get(ena_api_url, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        log_message(accession, f"❌ ENA request failed: {e}")
-        return False
+    # Decide how to download based on prefix
+    if download_path.startswith("s3://"):
+        # Make sure 'aws' is installed
+        if not check_dependency("aws"):
+            log_message(f"{accession} - FAILURE: 'aws' CLI not found.", verbose=verbose)
+            return
+        command = ["aws", "s3", "cp", download_path, output_dir]
+    else:
+        # Make sure 'wget' is installed
+        if not check_dependency("wget"):
+            log_message(f"{accession} - FAILURE: 'wget' not found.", verbose=verbose)
+            return
+        command = ["wget", "-P", output_dir, download_path]
 
-    if "fastq_ftp" in response.text:
-        fastq_urls = response.text.strip().split("\n")[1].split(";")
-        if not fastq_urls or fastq_urls[0] == "":
-            log_message(accession, "⚠️ No FASTQ URLs found in ENA.")
-            return False
+    success = False
+    for attempt in range(1, MAX_RETRIES + 1):
+        log_message(f"{accession} - Attempt {attempt}/{MAX_RETRIES} - Downloading {download_path}", verbose=verbose)
+        result = subprocess.run(command, capture_output=True)
+        if result.returncode == 0:
+            # Download succeeded
+            log_message(f"{accession} - SUCCESS: Downloaded {download_path}", verbose=verbose)
+            success = True
+            break
+        else:
+            # Download failed
+            log_message(
+                f"{accession} - WARNING: Failed to download {download_path}\n"
+                f"stderr: {result.stderr.decode('utf-8', errors='replace')}",
+                verbose=verbose
+            )
+            time.sleep(2)  # short cooldown before next retry
 
-        for url in fastq_urls:
-            if url.strip():
-                ftp_url = f"ftp://{url}"
-                for attempt in range(1, MAX_RETRIES + 1):
-                    log_message(accession, f"📥 Downloading from ENA: {ftp_url} (Attempt {attempt}/{MAX_RETRIES})")
-                    result = subprocess.run(["wget", "-P", FASTQ_DIR, ftp_url], capture_output=True)
-                    if result.returncode == 0:
-                        log_message(accession, f"✅ Successfully downloaded from ENA: {ftp_url}")
-                        return True
-                    time.sleep(2)  # Cooldown between retries
+    if not success:
+        log_message(f"{accession} - FAILURE: Could not download {download_path} after {MAX_RETRIES} attempts", 
+                    verbose=verbose)
 
-    log_message(accession, "❌ ENA FASTQ download failed.")
-    return False
-
-# Function to download from SRA AWS
-def download_from_sra(accession):
-    """Try downloading FASTQ files from SRA AWS."""
-    sra_api_url = f"https://trace.ncbi.nlm.nih.gov/Traces/sra/sra.cgi?run={accession}"
-
-    try:
-        sra_response = requests.get(sra_api_url, timeout=10)
-        sra_response.raise_for_status()
-    except requests.RequestException as e:
-        log_message(accession, f"❌ SRA AWS request failed: {e}")
-        return False
-
-    s3_urls = [line for line in sra_response.text.split() if line.startswith("s3://sra-pub-src")]
-    if not s3_urls:
-        log_message(accession, "⚠️ No SRA AWS links found.")
-        return False
-
-    for s3_url in s3_urls:
-        for attempt in range(1, MAX_RETRIES + 1):
-            log_message(accession, f"📥 Downloading from SRA AWS: {s3_url} (Attempt {attempt}/{MAX_RETRIES})")
-            result = subprocess.run(["aws", "s3", "cp", s3_url, FASTQ_DIR], capture_output=True)
-            if result.returncode == 0:
-                log_message(accession, f"✅ Successfully downloaded from SRA AWS: {s3_url}")
-                return True
-            time.sleep(2)  # Cooldown between retries
-
-    log_message(accession, "❌ SRA AWS FASTQ download failed.")
-    return False
-
-# Main function
 def main():
-    """Main execution function."""
-    # Argument parser
-    parser = argparse.ArgumentParser(description="Download raw FASTQ files from ENA or SRA.")
-    parser.add_argument("--accession", type=str, required=True, help="SRA or ENA run accession to download.")
+    parser = argparse.ArgumentParser(
+        description="Download FASTQ files from a tab-separated file of 'accession' and 'download_path'."
+    )
+    parser.add_argument("--input", required=True, help="Path to the tab-separated input file.")
+    parser.add_argument("--output", default="raw_fastq_files", help="Output directory for downloaded files.")
+    parser.add_argument("--verbose", action="store_true", help="Print log messages to console as well.")
     args = parser.parse_args()
 
-    accession = args.accession.strip()
-    
-    # Input validation
-    if not accession:
-        print("❌ ERROR: Accession is required. Use --help for usage.")
+    input_file = args.input
+    output_dir = args.output
+    verbose = args.verbose
+
+    # Determine how many processes to run
+    num_cores = cpu_count()
+    num_processes = max(1, int(num_cores * 0.9))
+
+    # Read the input file lines
+    tasks = []
+    with open(input_file, "r") as f:
+        # Skip header if present, or handle it safely
+        header = f.readline().strip().split()
+        # A naive check if it's the right header; you can adapt as needed.
+        if "accession" in header and "download_path" in header:
+            # We already consumed the header line; move on
+            pass
+        else:
+            # If no header recognized, then treat that line as data
+            # Rewind or parse differently
+            f.seek(0)
+
+        for line in f:
+            if not line.strip():
+                continue
+            parts = line.strip().split()
+            if len(parts) < 2:
+                # Not a well‐formed line
+                continue
+            accession, download_path = parts[0], parts[1]
+            tasks.append((accession, download_path, output_dir, verbose))
+
+    if not tasks:
+        print("No valid lines found in input file. Exiting.")
         sys.exit(1)
 
-    if not check_dependency("wget"):
-        print("❌ ERROR: wget is required but not found. Install it first.")
-        sys.exit(1)
+    log_message(f"Starting downloads using {num_processes} parallel processes.", verbose=verbose)
 
-    if not check_dependency("aws"):
-        print("❌ ERROR: aws CLI is required but not found. Install it first.")
-        sys.exit(1)
+    # Use a multiprocessing Pool to parallelize
+    with Pool(processes=num_processes) as pool:
+        pool.starmap(download_single, tasks)
 
-    log_message(accession, f"🚀 Starting download for {accession}")
-
-    # Try downloading from ENA first
-    if not download_from_ena(accession):
-        log_message(accession, f"🔄 Falling back to SRA AWS for {accession}")
-        if not download_from_sra(accession):
-            log_message(accession, f"❌ All download attempts failed for {accession}.")
-            sys.exit(1)
-
-    log_message(accession, f"🎉 Download completed for {accession}")
-    sys.exit(0)
+    log_message("All download tasks completed (SUCCESS or FAILURE logged).", verbose=verbose)
 
 if __name__ == "__main__":
     main()
