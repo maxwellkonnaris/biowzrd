@@ -26,7 +26,13 @@ Packages required: NCBI toolkit, fastq-dl
 1. create txt file of NCBI or ENA study BioProject accessions called studies.txt
 2. run binary file obtainstudyaccessions.sh
    - this will give you a list of all of the run accessions in the bioproject
-3. run binary file downloadingfastq.sh
+3. run binary file downloadingfastqcleaned.sh
+4. Alternatively, if you want the raw fastq files. I've created a web scraper that works with the same output from obtainstudyaccessions.sh. First create a conda environment:
+```bash
+conda create -n sra_downloader -y
+conda activate sra_downloader
+conda install -y selenium requests beautifulsoup4 tqdm firefox geckodriver
+```
 
 If you wanted to obtain the full SRA metadata with only runinfo for 16s amplicon sequences from Illumina sequencers:
 ```bash
