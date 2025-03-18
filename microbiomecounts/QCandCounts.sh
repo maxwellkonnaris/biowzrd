@@ -78,6 +78,9 @@ export PAIRED_FASTQ="$PAIRED_FASTQ"
 export BASENAME="$BASENAME"
 export JOB_SCRIPT="$JOB_SCRIPT"
 export FILE_SIZE_GB="$FILE_SIZE_GB"
+export CPUS="$CPUS"
+export MEM="$MEM"
+export TIME="$TIME"
 
 cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
@@ -100,6 +103,9 @@ export PAIRED_FASTQ="$PAIRED_FASTQ"
 export BASENAME="$BASENAME"
 export JOB_SCRIPT="$JOB_SCRIPT"
 export FILE_SIZE_GB="$FILE_SIZE_GB"
+export CPUS="$CPUS"
+export MEM="$MEM"
+export TIME="$TIME"
 
 EOF
 
