@@ -30,7 +30,7 @@ from shutil import which
 
 # Directories
 WORKDIR = os.getcwd()
-FASTQ_DIR = os.path.join(WORKDIR, "fastq_files")
+FASTQ_DIR = os.path.join(WORKDIR, "raw_fastq_files")
 LOG_FILE = os.path.join(WORKDIR, "download.log")
 os.makedirs(FASTQ_DIR, exist_ok=True)
 
