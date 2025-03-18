@@ -81,6 +81,15 @@ Packages required: Jellyfish
 
 ## Microbiome Count Tables (microbiomecounts/)
 ```bash
+# Download the rdp classifier, check updates here: https://sourceforge.net/projects/rdp-classifier/files/rdp-classifier/
+
+wget https://sourceforge.net/projects/rdp-classifier/files/rdp-classifier/rdp_classifier_2.14.zip/download -O rdp_classifier_2.14.zip
+wget https://sourceforge.net/projects/rdp-classifier/files/rdp-classifier/releaseNotes/release_2.14_note.txt/download -O release_2.14_note.txt
+unzip rdp_classifier_2.14.zip
+cd rdp_classifier_2.14
+```
+
+```bash
 ## For Amplicon:
 
 # For QC with Fastp and DADA2 classifier (RDP classifier or SILVA classifier):
