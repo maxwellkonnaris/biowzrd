@@ -27,7 +27,7 @@ Packages required: NCBI toolkit, fastq-dl
 2. run binary file obtainstudyaccessions.sh
    - this will give you a list of all of the run accessions in the bioproject
 3. run binary file downloadingfastqcleaned.sh
-4. Alternatively, if you want the raw fastq files. I've created a web scraper that works with the same output from obtainstudyaccessions.sh. First create a conda environment:
+4. Alternatively, if you want/have access to the raw fastq files. I've created a web scraper that works with the same output from obtainstudyaccessions.sh. First create a conda environment:
 ```bash
 conda create -n sra_downloader -y
 conda activate sra_downloader
@@ -37,6 +37,7 @@ conda install -y -c conda-forge awscli wget
 5. run python obtainrawfastqdownloadlinks.py
    - this will give you the accession downloadlink in a tab separated txt file format. 
 7. run python download_fastq.py
+   - you wont be able to successfully download the raw fastq files unless you have access. some are publicly available, but most are not and require a aws key which can be added to aws configure.
    - this will download the raw fastq files from the links scraped with obtainrawfastqdownloadlinks.py
 
 If you wanted to obtain the full SRA metadata with only runinfo for 16s amplicon sequences from Illumina sequencers:
