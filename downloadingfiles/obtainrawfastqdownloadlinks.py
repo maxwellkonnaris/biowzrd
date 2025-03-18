@@ -6,130 +6,161 @@ Usage:
     ./obtainrawfastqdownloadlinks.py --accession SRR28962973
     ./obtainrawfastqdownloadlinks.py --list accessions.txt
 
-Options:
-    --accession <str>   Extract links for a single SRA/ENA accession.
-    --list <file>       Provide a file with a list of accessions.
-
 Requirements:
     - Python 3
-    - Conda environment with `selenium requests beautifulsoup4 firefox geckodriver`
+    - Selenium, Firefox, geckodriver, and the necessary Conda environment packages.
 """
 
 import os
 import sys
-import argparse
 import time
+import argparse
+import logging
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from tqdm import tqdm
 
-# Directories
-WORKDIR = os.getcwd()
-DOWNLOAD_LINKS_FILE = os.path.join(WORKDIR, "download_links.txt")
-LOG_FILE = os.path.join(WORKDIR, "scraper.log")
+# Configure logging to both file and console
+def setup_logging(log_file="scraper.log"):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
-# Set up Firefox options
+# Set up Firefox options (headless mode)
 firefox_options = Options()
-firefox_options.add_argument("--headless")  # Run in headless mode (no UI)
+firefox_options.add_argument("--headless")
 
-# Function to log messages
-def log_message(accession, message):
-    """Log success or failure messages."""
-    with open(LOG_FILE, "a") as log:
-        log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {accession} - {message}\n")
-    print(message)
-
-# Function to scrape all possible download links
 def get_sra_links(accession):
-    """Scrape NCBI Run Browser for AWS, FTP, and HTTP links using Selenium."""
+    """
+    Scrape NCBI Run Browser for AWS, FTP, and HTTP links using Selenium.
+    
+    Returns a list of valid download links for the given accession or None if none found.
+    """
     ncbi_url = f"https://trace.ncbi.nlm.nih.gov/Traces/?view=run_browser&acc={accession}&display=data-access"
-
-    # Initialize WebDriver (Firefox via Conda)
-    service = Service()
-    driver = webdriver.Firefox(service=service, options=firefox_options)
-    driver.get(ncbi_url)
-
-    # Wait for the data access table to load
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, '//*[@id="ph-run-browser-data-access"]/div[2]/table'))
-        )
-    except Exception as e:
-        log_message(accession, f"⚠️ Page did not load properly: {e}")
-        driver.quit()
-        return None
-
-    # Extract links (AWS S3, EBI FTP, HTTP)
+    driver = None
     sra_links = []
-    for row in driver.find_elements(By.XPATH, '//*[@id="ph-run-browser-data-access"]/div[2]/table/tbody/tr'):
+    
+    try:
+        # Initialize WebDriver
+        service = Service()
+        driver = webdriver.Firefox(service=service, options=firefox_options)
+        driver.get(ncbi_url)
+        logging.info(f"Accessing URL: {ncbi_url}")
+
+        # Wait for the table element to load
         try:
-            # Extract download links (last column in the table)
-            link_element = row.find_elements(By.TAG_NAME, "td")[-1]
-            link_text = link_element.text.strip()
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, '/html/body/div[1]/div[4]/div/div[3]/div[4]/div[2]/table')
+                )
+            )
+        except Exception as e:
+            logging.warning(f"Page did not load properly for accession {accession}: {e}")
+            logging.debug(driver.page_source)
+            return None
 
-            # Ensure it's a valid link
-            if link_text.startswith(("s3://", "ftp://", "http://", "https://")):
-                sra_links.append(link_text)
-        except Exception:
-            pass  # Ignore if extraction fails
+        # Extra wait for JavaScript rendering (adjust if necessary)
+        time.sleep(5)
 
-    driver.quit()
+        # Find table rows using full XPath
+        rows = driver.find_elements(By.XPATH, '/html/body/div[1]/div[4]/div/div[3]/div[4]/div[2]/table/tbody/tr')
+        if not rows:
+            logging.warning(f"No rows found in table for accession {accession}.")
+            logging.debug(driver.page_source)
+            return None
 
-    if not sra_links:
-        log_message(accession, "⚠️ No download links found.")
+        # Iterate over rows and extract the link from the 6th column
+        for row in rows:
+            try:
+                # First, attempt to get direct text from the 6th column
+                link_element = row.find_element(By.XPATH, "./td[6]")
+                link_text = link_element.text.strip()
+
+                # If the column contains a clickable link (<a> tag), extract the href attribute
+                try:
+                    a_tag = row.find_element(By.XPATH, "./td[6]/a")
+                    link_text = a_tag.get_attribute("href")
+                except Exception:
+                    pass  # If no <a> tag, continue with text content
+
+                # Validate the link format
+                if link_text.startswith(("s3://", "ftp://", "http://", "https://")):
+                    sra_links.append(link_text)
+            except Exception as e:
+                logging.error(f"Error extracting link from a row for accession {accession}: {e}")
+                continue
+
+        if not sra_links:
+            logging.warning(f"No valid download links found for accession {accession}.")
+            return None
+
+        return sra_links
+
+    except Exception as e:
+        logging.error(f"An error occurred for accession {accession}: {e}")
         return None
+    finally:
+        if driver is not None:
+            driver.quit()
 
-    return sra_links
+def save_links(accession, links, output_file="download_links.txt"):
+    """
+    Save the extracted download links to a file.
+    
+    Each line is written in the format: accession<TAB>link
+    """
+    try:
+        with open(output_file, "a") as f:
+            for link in links:
+                f.write(f"{accession}\t{link}\n")
+        logging.info(f"Download links saved for accession {accession}.")
+    except Exception as e:
+        logging.error(f"Error saving links for accession {accession}: {e}")
 
-# Function to save links
-def save_sra_links(accession, links):
-    """Save SRA links to file."""
-    with open(DOWNLOAD_LINKS_FILE, "a") as file:
-        for url in links:
-            file.write(f"{accession}\t{url}\n")
-
-    log_message(accession, f"✅ Download links saved.")
-
-# Main function
 def main():
-    """Main execution function."""
-    parser = argparse.ArgumentParser(description="Fetch AWS S3, EBI FTP, and HTTP links for SRA/ENA accessions.")
-    parser.add_argument("--accession", type=str, help="SRA/ENA run accession.")
-    parser.add_argument("--list", type=str, help="File with a list of accessions.")
+    setup_logging()
+    
+    parser = argparse.ArgumentParser(
+        description="Extract download links (AWS S3, EBI FTP, HTTP) for SRA/ENA accessions."
+    )
+    parser.add_argument("--accession", type=str, help="Single SRA/ENA accession.")
+    parser.add_argument("--list", type=str, help="File containing a list of accessions.")
     args = parser.parse_args()
 
     accessions = []
-
     if args.accession:
         accessions.append(args.accession.strip())
-
     if args.list:
         if not os.path.exists(args.list):
-            print(f"❌ ERROR: File {args.list} not found.")
+            logging.error(f"List file {args.list} not found.")
             sys.exit(1)
-
-        with open(args.list, "r") as file:
-            accessions.extend([line.strip() for line in file])
+        with open(args.list, "r") as f:
+            for line in f:
+                accession = line.strip()
+                if accession:
+                    accessions.append(accession)
 
     if not accessions:
-        print("❌ ERROR: Provide either --accession or --list. Use --help for usage.")
+        logging.error("No accession provided. Use --accession or --list.")
         sys.exit(1)
 
-    for accession in tqdm(accessions, desc="Processing accessions"):
-        log_message(accession, f"🚀 Fetching download links for {accession}")
-
+    for accession in accessions:
+        logging.info(f"Processing accession: {accession}")
         links = get_sra_links(accession)
-        if not links:
-            log_message(accession, f"❌ No FASTQ files found for {accession}.")
-            continue
+        if links:
+            save_links(accession, links)
+        else:
+            logging.warning(f"Failed to retrieve links for accession {accession}")
 
-        save_sra_links(accession, links)
-
-    log_message("ALL", "🎉 Download link extraction completed.")
+    logging.info("Processing complete.")
 
 if __name__ == "__main__":
     main()
