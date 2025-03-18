@@ -33,6 +33,10 @@ conda create -n sra_downloader -y
 conda activate sra_downloader
 conda install -y selenium requests beautifulsoup4 tqdm firefox geckodriver
 ```
+5. run python obtainrawfastqdownloadlinks.py
+   - this will give you the accession downloadlink in a txt file format. 
+7. run binary file downloadingfastqraw.sh
+   - this will download the raw fastq files from the links scraped with obtainrawfastqdownloadlinks.py
 
 If you wanted to obtain the full SRA metadata with only runinfo for 16s amplicon sequences from Illumina sequencers:
 ```bash
