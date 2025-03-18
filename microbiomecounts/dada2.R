@@ -74,7 +74,7 @@ saveRDS(seqtab.nochim, file=output_asv)
 # ----------------
 
 # Provide path to reference database
-rdp_trainset <- "rdp_train_set.fa.gz" 
+rdp_trainset <- "rdp_train_set_19.fa.gz"
 
 if (file.exists(rdp_trainset)) {
   tax_table <- assignTaxonomy(seqtab.nochim, rdp_trainset, multithread=TRUE)
