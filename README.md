@@ -87,6 +87,11 @@ wget https://sourceforge.net/projects/rdp-classifier/files/rdp-classifier/rdp_cl
 wget https://sourceforge.net/projects/rdp-classifier/files/rdp-classifier/releaseNotes/release_2.14_note.txt/download -O release_2.14_note.txt
 unzip rdp_classifier_2.14.zip
 cd rdp_classifier_2.14
+
+# OR to use the training data in dada2:
+
+wget https://rdp.cme.msu.edu/download/RDPClassifier_16S_trainsetNo19_QiimeFormat.zip -O rdp_trainset.zip
+unzip rdp_trainset.zip
 ```
 
 ```bash
