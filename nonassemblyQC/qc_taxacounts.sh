@@ -40,14 +40,31 @@ while IFS=$'\t' read -r sample type; do
 done < "$METADATA_FILE"
 
 #######################################
-# Periodic Token Reset (From Reference)
+# Memory Allocation Function (Added Back)
+#######################################
+get_memory_allocation() {
+    local file="$1"
+    local file_size=$(du -m "$file" | cut -f1)  # Size in MB
+
+    if ((file_size < 100)); then
+        echo "2G"
+    elif ((file_size < 500)); then
+        echo "4G"
+    elif ((file_size < 1000)); then
+        echo "8G"
+    else
+        echo "16G"
+    fi
+}
+
+#######################################
+# Periodic Token Reset
 #######################################
 periodic_reset() {
   {
     flock -x 9 || return 1
     current_tokens=$(cat "$TOKEN_FILE" 2>/dev/null || echo "$MAX_JOBS")
     
-    # Count actual running jobs
     RUNNING_JOBS=$(squeue --noheader --format '%j' | grep -c "^${JOB_NAME_PREFIX}")
     tokens_out=$((MAX_JOBS - current_tokens))
 
@@ -60,16 +77,13 @@ periodic_reset() {
 }
 
 #######################################
-# Cleanup Successful Jobs (From Reference)
+# Cleanup Successful Jobs
 #######################################
 cleanup_successful_jobs() {
   flock -x "$CHECKPOINT_LOCK_FILE" || return 1
   
   tail -n 100 "$CHECKPOINT_FILE" | while read -r SAMPLE; do
-    # Delete job scripts
     find "${WORKDIR}/jobs" -name "job_${SAMPLE}.sh" -delete
-    
-    # Delete logs older than 7 days
     find "${WORKDIR}/logs" -name "${SAMPLE}.*" -mtime +7 -delete
   done
 
@@ -77,15 +91,36 @@ cleanup_successful_jobs() {
 }
 
 #######################################
-# Main Submission Loop with Token Control
+# Main Submission Loop
 #######################################
 CLEANUP_COUNTER=0
 while read -r SAMPLE; do
-    # Skip completed or invalid samples
+    # Skip completed/invalid samples
     grep -Fxq "$SAMPLE" "$CHECKPOINT_FILE" && continue
     [[ -z "${SAMPLE_TYPES[$SAMPLE]}" ]] && continue
 
-    # Token acquisition loop
+    #####################################
+    # Determine Input File and Memory
+    #####################################
+    R1="${INPUT_DIR}/${SAMPLE}_1.fastq.gz"
+    R2="${INPUT_DIR}/${SAMPLE}_2.fastq.gz"
+    SE="${INPUT_DIR}/${SAMPLE}.fastq.gz"
+
+    if [[ -f "$R1" && -f "$R2" ]]; then
+        INPUT_FILE="$R1"  # Use R1 for size estimation
+    elif [[ -f "$SE" ]]; then
+        INPUT_FILE="$SE"
+    else
+        echo "Missing files for $SAMPLE" >> "$DEBUG_LOG"
+        continue
+    fi
+
+    # Get memory allocation based on input file size
+    MEM_REQUIRED=$(get_memory_allocation "$INPUT_FILE")
+
+    #####################################
+    # Token Acquisition
+    #####################################
     while :; do
         (
             flock -x 9 || exit 99
@@ -100,13 +135,13 @@ while read -r SAMPLE; do
         case $? in
             0) break;;
             1) sleep 5; periodic_reset;;
-            99) sleep 10;;  # Lock contention
+            99) sleep 10;;
         esac
     done
 
-    #######################################
-    # Create Job Script with Token Release
-    #######################################
+    #####################################
+    # Create Job Script with Dynamic Memory
+    #####################################
     JOB_SCRIPT="${WORKDIR}/jobs/job_${SAMPLE}.sh"
     SAMPLE_TYPE="${SAMPLE_TYPES[$SAMPLE]}"
     
@@ -117,13 +152,14 @@ while read -r SAMPLE; do
 #SBATCH --output=logs/${SAMPLE}.out
 #SBATCH --error=logs/${SAMPLE}.err
 #SBATCH --time=02:00:00
-#SBATCH --mem=8G
+#SBATCH --mem=${MEM_REQUIRED}
 #SBATCH --cpus-per-task=8
 #SBATCH --ntasks=1
+#SBATCH --account=one
 
 set -eo pipefail
 
-# Token release mechanism
+# Token release
 release_token() {
     (
         flock -x 9 || exit 1
@@ -134,12 +170,9 @@ release_token() {
 trap 'release_token' EXIT TERM INT
 
 # Main processing
-R1="${INPUT_DIR}/${SAMPLE}_1.fastq.gz"
-R2="${INPUT_DIR}/${SAMPLE}_2.fastq.gz"
-
-if [[ -f "\$R1" && -f "\$R2" ]]; then
+if [[ -f "$R1" && -f "$R2" ]]; then
     fastp \\
-        -i "\$R1" -I "\$R2" \\
+        -i "$R1" -I "$R2" \\
         -o "${OUTPUT_DIR}/${SAMPLE}_trimmed_1.fastq.gz" \\
         -O "${OUTPUT_DIR}/${SAMPLE}_trimmed_2.fastq.gz" \\
         $(if [[ "$SAMPLE_TYPE" == "16S" ]]; then
@@ -155,9 +188,9 @@ if [[ -f "\$R1" && -f "\$R2" ]]; then
         --detect_adapter_for_pe \\
         --json "${OUTPUT_DIR}/${SAMPLE}_report.json" \\
         --html "${OUTPUT_DIR}/${SAMPLE}_report.html"
-elif [[ -f "${INPUT_DIR}/${SAMPLE}.fastq.gz" ]]; then
+elif [[ -f "$SE" ]]; then
     fastp \\
-        -i "${INPUT_DIR}/${SAMPLE}.fastq.gz" \\
+        -i "$SE" \\
         -o "${OUTPUT_DIR}/${SAMPLE}_trimmed.fastq.gz" \\
         $(if [[ "$SAMPLE_TYPE" == "16S" ]]; then
             echo "--trim_poly_g --trim_poly_x --cut_front --cut_tail"
@@ -171,9 +204,6 @@ elif [[ -f "${INPUT_DIR}/${SAMPLE}.fastq.gz" ]]; then
         --thread 8 \\
         --json "${OUTPUT_DIR}/${SAMPLE}_report.json" \\
         --html "${OUTPUT_DIR}/${SAMPLE}_report.html"
-else
-    echo "Missing files for ${SAMPLE}" >&2
-    exit 1
 fi
 
 # Record completion
@@ -181,7 +211,7 @@ flock -x "$CHECKPOINT_LOCK_FILE" -c "echo '$SAMPLE' >> '$CHECKPOINT_FILE'"
 EOT
 
     sbatch "$JOB_SCRIPT"
-    echo "Submitted $SAMPLE (${SAMPLE_TYPE})"
+    echo "Submitted $SAMPLE (${SAMPLE_TYPE}) with ${MEM_REQUIRED}"
 
     # Periodic cleanup
     ((CLEANUP_COUNTER++))
