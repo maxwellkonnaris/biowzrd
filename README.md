@@ -73,9 +73,13 @@ Packages required: GNU parallel
 # If you would like to track the live progress
 watch tail -n 20 transfer_*.log  
 ```
+
 ## Quality control (nonassemblyQC/ or assemblyQC/)
-Packages required: fastp
-1. Perform absolute minimal quality control from publicly available sequences. This is with the assumption that host reads and adapters, if not paired-end sequences, are removed. In NCBI SRA see this statement: https://www.ncbi.nlm.nih.gov/sra/docs/submit/ for Metagenomic data. 
+Packages required: fastp, BBMap suite
+nonassemblyQC/
+1. Perform absolute minimal quality control from publicly available sequences. This is with the assumption that host reads and adapters, if not paired-end sequences, are removed. This script uses the BBMap adapter reference for commonly used Illumina adapters on the 3' end of a sequence and removes them. Uses BBDuk to mask bp with PHRED < 20 and minimal length of read = 50. - qc_minimal.sh. In NCBI SRA see this statement: https://www.ncbi.nlm.nih.gov/sra/docs/submit/ for Metagenomic data.
+2. If using downstream sequence count taxonomic classification like DADA2 or mOTUs or MetaPhlAn. -qc_taxacounts.sh
+assemblyQC/
 
 ## Kmer based analysis (kmermining/)
 Packages required: Jellyfish
