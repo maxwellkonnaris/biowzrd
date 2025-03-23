@@ -65,6 +65,14 @@ The -format runinfo command should return a table with columns like:
 - Study (Study accession ID)
 - CenterName (Name of the sequencing center)
 
+## File manangement (filemanagement/)
+Packages required: GNU parallel
+1. Transfer an entire large directory in chunks with paralellel processing - transferdirectory.sh
+
+```bash
+# If you would like to track the live progress
+watch tail -n 20 transfer_*.log  
+```
 ## Quality control (nonassemblyQC/ or assemblyQC/)
 Packages required: fastp
 1. Perform absolute minimal quality control from publicly available sequences. This is with the assumption that host reads and adapters, if not paired-end sequences, are removed. In NCBI SRA see this statement: https://www.ncbi.nlm.nih.gov/sra/docs/submit/ for Metagenomic data. 
