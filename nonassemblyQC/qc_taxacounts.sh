@@ -12,11 +12,12 @@
 ###############################
 
 # Max concurrency (simultaneous jobs)
-MAX_JOBS=10
+MAX_JOBS=20
 
 CHECKPOINT_FILE="completed_qc.txt"
 INPUT_DIR="/storage/home/mak6930/scratch/all/fastq_data"
 OUTPUT_DIR="/storage/home/mak6930/scratch/all/qc"
+METADATA_FILE="sample_types.txt"  # File mapping samples to "16S" or "metagenomics"
 
 # Create necessary directories
 mkdir -p "$OUTPUT_DIR"
@@ -24,6 +25,14 @@ mkdir -p logs
 
 # Create checkpoint file if it doesn't exist
 touch "$CHECKPOINT_FILE"
+
+###############################
+#  LOAD SAMPLE TYPE METADATA  #
+###############################
+declare -A SAMPLE_TYPES
+while IFS=$'\t' read -r sample type; do
+    SAMPLE_TYPES["$sample"]="$type"
+done < "$METADATA_FILE"
 
 ###############################
 #  COLLECT UNPROCESSED SAMPLES
@@ -43,6 +52,12 @@ for FILE in "$INPUT_DIR"/*.fastq.gz; do
 
     # Skip if already processed
     if grep -q "^$SAMPLE_NAME$" "$CHECKPOINT_FILE"; then
+        continue
+    fi
+
+    # Skip if sample type is unknown
+    if [[ -z "${SAMPLE_TYPES[$SAMPLE_NAME]}" ]]; then
+        echo "WARNING: Sample $SAMPLE_NAME not found in metadata. Skipping."
         continue
     fi
 
@@ -87,6 +102,7 @@ get_memory_allocation() {
 INDEX=0
 while [[ $INDEX -lt $TOTAL_FILES ]]; do
     SAMPLE="${FILES_TO_PROCESS[$INDEX]}"
+    TYPE="${SAMPLE_TYPES[$SAMPLE]}"
 
     # Determine memory requirement based on input file size
     MEM_REQUIRED=$(get_memory_allocation "$INPUT_DIR/${SAMPLE}_1.fastq.gz")
@@ -127,44 +143,94 @@ CHECKPOINT_FILE="$CHECKPOINT_FILE"
 # Threads for fastp
 THREADS=8
 SAMPLE_NAME="$SAMPLE"
+SAMPLE_TYPE="$TYPE"
 
 # Potential paired-end files
 R1="\$INPUT_DIR/\${SAMPLE_NAME}_1.fastq.gz"
 R2="\$INPUT_DIR/\${SAMPLE_NAME}_2.fastq.gz"
 
 if [[ -f "\$R1" && -f "\$R2" ]]; then
-    echo "Processing PAIRED-END sample: \$SAMPLE_NAME"
+    echo "Processing PAIRED-END sample: \$SAMPLE_NAME (Type: \$SAMPLE_TYPE)"
 
-    fastp \\
-        -i "\$R1" \\
-        -I "\$R2" \\
-        -o "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed_1.fastq.gz" \\
-        -O "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed_2.fastq.gz" \\
-        --merged_out "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed.fastq.gz" \\
-        --html "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.html" \\
-        --json "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.json" \\
-        --thread "\$THREADS" \\
-        --detect_adapter_for_pe \\
-        --length_required 50 \\
-        --average_qual 20 \\
-        --cut_tail \\
-        --cut_tail_mean_quality 20 \\
-        --cut_tail_window_size 4 \\
-        --merge
+    if [[ "\$SAMPLE_TYPE" == "16S" ]]; then
+        # 16S-specific parameters (strict)
+        fastp \\
+            -i "\$R1" \\
+            -I "\$R2" \\
+            -o "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed_1.fastq.gz" \\
+            -O "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed_2.fastq.gz" \\
+            --html "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.html" \\
+            --json "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.json" \\
+            --thread "\$THREADS" \\
+            --detect_adapter_for_pe \\
+            --trim_poly_g \\
+            --trim_poly_x \\
+            --cut_front \\
+            --cut_tail \\
+            --cut_window_size 4 \\
+            --cut_mean_quality 20 \\
+            --qualified_quality_phred 20 \\
+            --length_required 100 \\
+            --n_base_limit 0
+    else
+        # Metagenomics parameters (lenient)
+        fastp \\
+            -i "\$R1" \\
+            -I "\$R2" \\
+            -o "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed_1.fastq.gz" \\
+            -O "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed_2.fastq.gz" \\
+            --html "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.html" \\
+            --json "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.json" \\
+            --thread "\$THREADS" \\
+            --detect_adapter_for_pe \\
+            --trim_poly_g \\
+            --trim_poly_x \\
+            --cut_front \\
+            --cut_tail \\
+            --cut_window_size 4 \\
+            --cut_mean_quality 15 \\
+            --qualified_quality_phred 15 \\
+            --length_required 50 \\
+            --n_base_limit 5
+    fi
 elif [[ -f "\$INPUT_DIR/\${SAMPLE_NAME}.fastq.gz" ]]; then
-    echo "Processing SINGLE-END sample: \$SAMPLE_NAME"
+    echo "Processing SINGLE-END sample: \$SAMPLE_NAME (Type: \$SAMPLE_TYPE)"
 
-    fastp \\
-        -i "\$INPUT_DIR/\${SAMPLE_NAME}.fastq.gz" \\
-        -o "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed.fastq.gz" \\
-        --html "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.html" \\
-        --json "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.json" \\
-        --thread "\$THREADS" \\
-        --length_required 50 \\
-        --average_qual 20 \\
-        --cut_tail \\
-        --cut_tail_mean_quality 20 \\
-        --cut_tail_window_size 4
+    if [[ "\$SAMPLE_TYPE" == "16S" ]]; then
+        # 16S-specific parameters (strict)
+        fastp \\
+            -i "\$INPUT_DIR/\${SAMPLE_NAME}.fastq.gz" \\
+            -o "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed.fastq.gz" \\
+            --html "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.html" \\
+            --json "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.json" \\
+            --thread "\$THREADS" \\
+            --trim_poly_g \\
+            --trim_poly_x \\
+            --cut_front \\
+            --cut_tail \\
+            --cut_window_size 4 \\
+            --cut_mean_quality 20 \\
+            --qualified_quality_phred 20 \\
+            --length_required 100 \\
+            --n_base_limit 0
+    else
+        # Metagenomics parameters (lenient)
+        fastp \\
+            -i "\$INPUT_DIR/\${SAMPLE_NAME}.fastq.gz" \\
+            -o "\$OUTPUT_DIR/\${SAMPLE_NAME}_trimmed.fastq.gz" \\
+            --html "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.html" \\
+            --json "\$OUTPUT_DIR/\${SAMPLE_NAME}_report.json" \\
+            --thread "\$THREADS" \\
+            --trim_poly_g \\
+            --trim_poly_x \\
+            --cut_front \\
+            --cut_tail \\
+            --cut_window_size 4 \\
+            --cut_mean_quality 15 \\
+            --qualified_quality_phred 15 \\
+            --length_required 50 \\
+            --n_base_limit 5
+    fi
 else
     echo "ERROR: Could not find appropriate files for sample: \$SAMPLE_NAME"
     echo "Skipping \$SAMPLE_NAME" 1>&2
@@ -177,26 +243,10 @@ echo "Finished processing \$SAMPLE_NAME!"
 EOT
 
     sbatch "$JOB_SCRIPT"
-    echo "Submitted job for sample: $SAMPLE with memory $MEM_REQUIRED"
+    echo "Submitted job for sample: $SAMPLE (Type: $TYPE) with memory $MEM_REQUIRED"
 
     # Move to the next sample
     ((INDEX++))
 done
 
-###############################
-#  (OPTIONAL) WAIT FOR ALL JOBS
-###############################
-# echo "All jobs submitted. Waiting for all 'fastq_' jobs to complete..."
-# while true; do
-#     RUNNING_JOBS=$(squeue -u "$USER" -o "%A %j" | grep -c "fastq_")
-#     if [[ $RUNNING_JOBS -eq 0 ]]; then
-#         echo "All 'fastq_' jobs have completed."
-#         break
-#     else
-#         echo "Still \$RUNNING_JOBS jobs running... checking again in 30 seconds."
-#         sleep 30
-#     fi
-# done
-
 echo "Done submitting jobs."
-
