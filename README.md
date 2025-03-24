@@ -201,4 +201,5 @@ https://www.ebi.ac.uk/metagenomics/api/v1/studies/MGYS00006745
 
 ## Miscellaneous resources:
 
-1. Color palletes: https://www.simplifiedsciencepublishing.com/resources/best-color-palettes-for-scientific-figures-and-data-visualizations 
+1. Color palletes: https://www.simplifiedsciencepublishing.com/resources/best-color-palettes-for-scientific-figures-and-data-visualizations
+2. Color blindness viewer: https://davidmathlogic.com/colorblind/#%23D81B60-%231E88E5-%23FFC107-%23004D40
