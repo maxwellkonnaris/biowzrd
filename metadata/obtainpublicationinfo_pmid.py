@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime
 import sys
 import os
+import re
 
 try:
     from Bio import Entrez
@@ -60,6 +61,57 @@ def fetch_pubmed_data(pmid):
             print(f"Error fetching PMID {pmid}: {e}. Retrying in 30 seconds...")
             time.sleep(30)
 
+def detect_measurement_type(keywords, mesh_terms):
+    # Convert all to lowercase for case-insensitive matching
+    keywords_str = "; ".join(keywords).lower()
+    mesh_str = "; ".join(mesh_terms).lower()
+    
+    # Check for flow cytometry terms
+    flow_terms = ["flow cytometry", "flowcytometry", "flow-cytometry", 
+                 "facs", "fluorescence-activated cell sorting"]
+    if any(re.search(r'\b' + re.escape(term) + r'\b', keywords_str + mesh_str) for term in flow_terms):
+        return "Flow Cytometry"
+    
+    # Check for PCR terms
+    pcr_terms = ["qpcr", "quantitative pcr", "real-time pcr", "rt-pcr", "rt pcr",
+                "ddpcr", "digital pcr", "droplet digital pcr",
+                "hampcr", "ham pcr"]
+    if any(re.search(r'\b' + re.escape(term) + r'\b', keywords_str + mesh_str) for term in pcr_terms):
+        for term in pcr_terms:
+            if re.search(r'\b' + re.escape(term) + r'\b', keywords_str + mesh_str):
+                if term in ["qpcr", "quantitative pcr", "real-time pcr", "rt-pcr", "rt pcr"]:
+                    return "qPCR"
+                elif term in ["ddpcr", "digital pcr", "droplet digital pcr"]:
+                    return "ddPCR"
+                elif term in ["hampcr", "ham pcr"]:
+                    return "hamPCR"
+    
+    # Check for spike-in
+    if re.search(r'\bspike[\s-]?in\b', keywords_str + mesh_str):
+        return "spike-in"
+    
+    return ""
+
+def detect_sequencing_type(keywords, mesh_terms):
+    # Convert all to lowercase for case-insensitive matching
+    keywords_str = "; ".join(keywords).lower()
+    mesh_str = "; ".join(mesh_terms).lower()
+    
+    # Check for 16S or amplicon sequencing
+    if (re.search(r'\b16s\b', keywords_str + mesh_str) or 
+        re.search(r'\bamplicon\b', keywords_str + mesh_str)):
+        return "16S/amplicon"
+    
+    # Check for shotgun sequencing
+    if re.search(r'\bshotgun\b', keywords_str + mesh_str):
+        return "shotgun"
+    
+    # Check for metagenomics
+    if re.search(r'\bmetagenomic\b', keywords_str + mesh_str):
+        return "metagenomics"
+    
+    return ""
+
 def main():
     args = prompt_if_missing(parse_arguments())
 
@@ -72,7 +124,7 @@ def main():
         writer = csv.writer(file)
         writer.writerow([
             "PMID", "Study Identifier", "Title", "Authors", "Consortium", "Publication Year", "Link",
-            "Measurement Type", "Abstract", "Journal", "Volume", "Issue", "Pages", "DOI", "PMCID",
+            "Measurement Type", "Sequencing", "Abstract", "Journal", "Volume", "Issue", "Pages", "DOI", "PMCID",
             "Publication Types", "MeSH Terms", "Keywords", "Affiliations", "Grants", "Retrieved Date"
         ])
 
@@ -80,7 +132,7 @@ def main():
             today = datetime.today().strftime("%Y-%m-%d")
 
             if pmid.lower() == "na":
-                writer.writerow([pmid, study_identifier] + [""] * 18 + [today])
+                writer.writerow([pmid, study_identifier] + [""] * 19 + [today])
                 continue
 
             try:
@@ -119,9 +171,9 @@ def main():
                         pmcid = str(id_elem)
 
                 pub_types = [pt for pt in article.get("PublicationTypeList", [])]
-                mesh_terms = [m["DescriptorName"] for m in citation.get("MeshHeadingList", [])]
+                mesh_terms = [str(m["DescriptorName"]) for m in citation.get("MeshHeadingList", [])]
                 keyword_list = citation.get("KeywordList", [])
-                keywords = [kw for group in keyword_list for kw in group]
+                keywords = [str(kw) for group in keyword_list for kw in group]
 
                 affiliations = []
                 for author in authors:
@@ -135,7 +187,10 @@ def main():
                     grants.append(f"{agency} ({grant_id})" if grant_id else agency)
 
                 consortium = ""
-                measurement_type = ""
+                
+                # Detect measurement type and sequencing type
+                measurement_type = detect_measurement_type(keywords, mesh_terms)
+                sequencing_type = detect_sequencing_type(keywords, mesh_terms)
 
                 writer.writerow([
                     pmid,
@@ -146,6 +201,7 @@ def main():
                     pub_year,
                     link,
                     measurement_type,
+                    sequencing_type,
                     abstract_text,
                     journal,
                     volume,
@@ -163,10 +219,9 @@ def main():
 
             except Exception as e:
                 print(f"Final error for PMID {pmid}: {e}")
-                writer.writerow([pmid, study_identifier, "Error retrieving data"] + ["Error"] * 18 + [today])
+                writer.writerow([pmid, study_identifier, "Error retrieving data"] + ["Error"] * 19 + [today])
 
     print("CSV file 'study_data.csv' has been created.")
 
 if __name__ == "__main__":
     main()
-
