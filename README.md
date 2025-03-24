@@ -156,6 +156,9 @@ conda activate motus
 motus downloadDB  
 ```
 
+## List of studies with external total scale measurements paired with sequencing data
+Visit: https://docs.google.com/spreadsheets/d/13b4Toscse0MjyAGYt1zfWoPxSRpyuvENHVGKBLYwAAw/edit?usp=sharing
+
 ## Human Microbiome Project (HMP/)
 Packages required: aws (see download script for linux)
 1. To download via aws, navigate to home directory and Install aws (installaws.sh)
@@ -189,7 +192,6 @@ Packages optional: git lfs
 
 ```bash
 awk -F',' 'NR>1 && NF > 1 && !seen[$1]++ && $1 ~ /^[A-Za-z0-9_-]+$/ {print $5}' mgnify_samples_16s-rrna-gene-amplicon.csv > run_accessions.txt
-
 ```
    
 4. Use the sample accession to download the sequencing files with downloadingfastq.sh
