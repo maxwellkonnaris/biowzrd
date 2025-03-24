@@ -198,3 +198,7 @@ awk -F',' 'NR>1 && NF > 1 && !seen[$1]++ && $1 ~ /^[A-Za-z0-9_-]+$/ {print $5}' 
 ```code
 https://www.ebi.ac.uk/metagenomics/api/v1/studies/MGYS00006745 
 ```
+
+## Miscellaneous resources:
+
+1. Color palletes: https://www.simplifiedsciencepublishing.com/resources/best-color-palettes-for-scientific-figures-and-data-visualizations 
