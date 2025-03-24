@@ -6,45 +6,78 @@
 #SBATCH --account=one
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16        
-#SBATCH --mem=16G                   
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=16G
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=ALL
 
-# Source and destination paths
-SRC_DIR="/path/to/source_directory"
-DEST_DIR="."
+# Paths
+SRC_DIR="/storage/home/mak6930/scratch/SRA/fastq_data"
+DEST_DIR="/storage/home/mak6930/silvermanlab/datarepo/16s"
+STATUS_DIR="./transfer_status"
 
 # Validate paths
 if [ ! -d "$SRC_DIR" ]; then
   echo "ERROR: Source directory $SRC_DIR does not exist" >&2
   exit 1
 fi
-mkdir -p "$DEST_DIR" || { echo "Failed to create $DEST_DIR"; exit 1; }
+mkdir -p "$DEST_DIR" "$STATUS_DIR"
 
-# Generate a list of files to transfer (excluding temp files)
-find "$SRC_DIR" -type f -not -name "*.tmp" -not -name "*.swp" > filelist.txt
+# Generate relative file list
+cd "$SRC_DIR" || exit 1
+find . -type f -not -name "*.tmp" -not -name "*.swp" > "$SLURM_SUBMIT_DIR/filelist.txt"
+cd "$SLURM_SUBMIT_DIR"
 
-# Split the file list into chunks (1 chunk per CPU core)
-split -n l/$SLURM_CPUS_PER_TASK filelist.txt filelist_part_
+# Split file list into chunks
+if split --version | grep -q 'GNU coreutils'; then
+  split -n l/$SLURM_CPUS_PER_TASK filelist.txt filelist_part_
+else
+  split -l $(( $(wc -l < filelist.txt) / $SLURM_CPUS_PER_TASK + 1 )) filelist.txt filelist_part_
+fi
 
-# Function to transfer a chunk of files
-transfer_chunk() {
-  chunk="$1"
-  rsync -avh --progress --stats \
+# Create chunk transfer script
+cat << 'EOF' > transfer_chunk.sh
+#!/bin/bash
+chunk="$1"
+SRC_DIR="$2"
+DEST_DIR="$3"
+STATUS_DIR="$4"
+
+status_file="${STATUS_DIR}/$(basename "$chunk").done"
+
+# Skip if already completed
+if [ -f "$status_file" ]; then
+  echo "Skipping $chunk (already completed)"
+  exit 0
+fi
+
+# Perform transfer
+if rsync -avh --progress --stats \
     --partial --append-verify \
     --files-from="$chunk" \
-    "$SRC_DIR/" "$DEST_DIR/"
-  echo "Chunk $chunk completed: $(date)"
-}
-export -f transfer_chunk
+    "$SRC_DIR/" "$DEST_DIR/"; then
+    touch "$status_file"
+    echo "Chunk $chunk completed successfully: $(date)"
+else
+    echo "ERROR: Chunk $chunk failed: $(date)" >&2
+    exit 1
+fi
+EOF
 
-# Run transfers in parallel using GNU Parallel
+chmod +x transfer_chunk.sh
+
+# Run in parallel with no tty prompts
 echo "===== STARTING PARALLEL TRANSFER: $(date) ====="
-parallel -j $SLURM_CPUS_PER_TASK transfer_chunk ::: filelist_part_*
+parallel --no-notice --plain --eta --retries 3 -j $SLURM_CPUS_PER_TASK \
+  ./transfer_chunk.sh {} "$SRC_DIR" "$DEST_DIR" "$STATUS_DIR" ::: filelist_part_*
 
-# Final full sync to catch any missed files
+# Final sync for safety
 echo "===== FINAL SYNC: $(date) ====="
 rsync -avh --delete --progress "$SRC_DIR/" "$DEST_DIR/"
 
+# Summary
 echo "===== JOB COMPLETED: $(date) ====="
+echo "Chunks completed: $(ls $STATUS_DIR | wc -l) / $(ls filelist_part_* | wc -l)"
+
+# Optional cleanup (uncomment to enable)
+# rm -f filelist.txt filelist_part_* transfer_chunk.sh
