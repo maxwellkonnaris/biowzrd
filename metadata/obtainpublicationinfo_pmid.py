@@ -37,7 +37,7 @@ def detect_delimiter(filepath):
 
 def load_pmid_study_pairs(filepath):
     if not os.path.exists(filepath):
-        sys.exit(f"❌ File not found: {filepath}")
+        sys.exit(f"File not found: {filepath}")
     
     delimiter = detect_delimiter(filepath)
     pairs = []
