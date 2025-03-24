@@ -199,7 +199,8 @@ awk -F',' 'NR>1 && NF > 1 && !seen[$1]++ && $1 ~ /^[A-Za-z0-9_-]+$/ {print $5}' 
 https://www.ebi.ac.uk/metagenomics/api/v1/studies/MGYS00006745 
 ```
 
-## Miscellaneous resources:
+## Plotting (plotting/):
 
 1. Color palletes: https://www.simplifiedsciencepublishing.com/resources/best-color-palettes-for-scientific-figures-and-data-visualizations
 2. Color blindness viewer: https://davidmathlogic.com/colorblind/#%23D81B60-%231E88E5-%23FFC107-%23004D40
+3. In R, the tidyplots package is nice, but if making complicated larger figures use ggplot and a custom theme like in plot_theme.R. Ive also listed my 4 color colorway. 
