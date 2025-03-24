@@ -21,6 +21,35 @@ Follow these steps to **clone the repository** and **run the setup script** to c
    python setup.py
    ```
 
+## Papers (papers/)
+
+```
+📦 papers
+├── 📂 papers
+│   ├── 📄 {year}_{journal}_{author}_{description}.pdf
+├── 📄 .gitattributes
+├── 📄 .gitmodules
+├── 📄 bibliography.bib - contains BibTeX for all papers with a note field that contains keywords
+├── 📄 doi_links.txt - contains DOI links for all papers paired with keywords
+├── 📄 run_bib.py - creates and adds BibTeX to bibliography.bib based on doi_links.txt
+├── 📄 search_bib.py - functionality to search bibliography.bib based on `{year}, {title}, {keywords}, {author}`
+```
+
+Adding to bibliography.bib:
+
+1. Find paper
+2. Add DOI and keywords to doi\_links.txt 
+    - structure: <doi link> - keyword1, keyword2
+```
+python run_bib.py
+```
+
+Searching bibliography.bib:
+
+```
+python search_bib.py "keyword1 keyword2" 
+```
+
 ## Downloading files on high performance compute cluster (downloadingfiles/)
 Packages required: NCBI toolkit, fastq-dl
 1. create txt file of NCBI or ENA study BioProject accessions called studies.txt
