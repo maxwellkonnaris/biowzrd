@@ -297,6 +297,10 @@ def main():
                 authors = article.get("AuthorList", [])
                 author_names = [f"{a['ForeName']} {a['LastName']}" for a in authors if "ForeName" in a and "LastName" in a]
 
+                if study_identifier == "NA" and authors:
+                   first_author_lastname = authors[0].get("LastName", "Unknown")
+                   study_identifier = f"{first_author_lastname}{pub_year}"
+                
                 journal = article["Journal"].get("Title", "")
                 volume = article["Journal"]["JournalIssue"].get("Volume", "")
                 issue = article["Journal"]["JournalIssue"].get("Issue", "")
