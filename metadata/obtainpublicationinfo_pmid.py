@@ -8,7 +8,7 @@ import os
 try:
     from Bio import Entrez
 except ImportError:
-    sys.exit("❌ The Biopython package is required. Install it using `pip install biopython`.")
+    sys.exit("The Biopython package is required. Install it using `pip install biopython`.")
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Fetch PubMed metadata for a list of PMIDs.")
