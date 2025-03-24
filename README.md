@@ -203,4 +203,8 @@ https://www.ebi.ac.uk/metagenomics/api/v1/studies/MGYS00006745
 
 1. Color palletes: https://www.simplifiedsciencepublishing.com/resources/best-color-palettes-for-scientific-figures-and-data-visualizations
 2. Color blindness viewer: https://davidmathlogic.com/colorblind/#%23D81B60-%231E88E5-%23FFC107-%23004D40
-3. In R, the tidyplots package is nice, but if making complicated larger figures use ggplot and a custom theme like in plot_theme.R. Ive also listed my 4 color colorway. 
+3. In R, the tidyplots package is nice (https://tidyplots.org/), but if making complicated larger figures use ggplot and a custom theme like in theme.R. Ive also listed my 4 color colorway. You can load this into your R with:
+
+```R
+source("theme.R")
+```
