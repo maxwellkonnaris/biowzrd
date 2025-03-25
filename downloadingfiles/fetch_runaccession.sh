@@ -62,17 +62,18 @@ append_unique_runs() {
     local runs="$1"
 
     if [[ -z "$runs" ]]; then
-        echo "⚠️  No runs found"
-        return 1
+        echo "⚠️  No runs found for $STUDY_ID"
+        # Return 0 instead of 1 so the script doesn't exit under set -e
+        return 0
     fi
 
-    # For each run, append if not already in the file
     while IFS= read -r run; do
         if ! grep -qx "${run}" "$OUTPUT_FILE"; then
             echo "$run" >> "$OUTPUT_FILE"
         fi
     done <<< "$runs"
 }
+
 
 # -----------------------------------------------------
 # 4) Main loop: read each study, fetch run accessions
