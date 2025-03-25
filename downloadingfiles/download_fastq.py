@@ -15,10 +15,22 @@ import time
 import fcntl
 import glob
 import atexit
+import argparse
 
 ##########################
 # Helper Functions
 ##########################
+
+def parse_cli_args():
+    parser = argparse.ArgumentParser(
+        description="Download a single ENA/SRA accession via Slurm, with fallback and metadata merging."
+    )
+    parser.add_argument('--accession', help='Accession to download (e.g., ERR123456)')
+    parser.add_argument('--workdir', help='Working directory')
+    parser.add_argument('--dry-run', action='store_true', help='Only print actions without running them')
+    parser.add_argument('--metadata', help='Combined Metadata file (e.g., combined_metadata.csv)') 
+    parser.add_argument('--debug', action='store_true', help='Enable extra debug output')
+    return parser.parse_args()
 
 def read_env_var(name, required=True):
     """Reads an environment variable or exits if missing."""
@@ -344,7 +356,18 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, che
 # Main entry point
 ##########################
 if __name__ == "__main__":
-    # 1) Parse env vars
+    
+    args = parse_cli_args()
+
+    # Allow CLI args to override env vars (good for testing)
+    if args.accession:
+        os.environ["ACCESSION"] = args.accession
+    if args.workdir:
+        os.environ["WORKDIR"] = args.workdir
+    if args.metadata:
+        os.environ["COMBINED_METADATA"] = args.metadata
+
+    # Required variables
     accession       = read_env_var("ACCESSION")
     workdir         = read_env_var("WORKDIR")
     checkpoint_file = read_env_var("CHECKPOINT_FILE")
@@ -353,6 +376,7 @@ if __name__ == "__main__":
     debug_lock      = read_env_var("DEBUG_LOCK")
     token_file      = read_env_var("TOKEN_FILE")
     tokenlock_file  = read_env_var("TOKEN_LOCK_FILE")
+
 
     fastq_dir       = os.path.join(workdir, "fastq_data")
     metadata_dir    = os.path.join(workdir, "metadata")
