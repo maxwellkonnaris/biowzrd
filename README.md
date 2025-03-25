@@ -87,10 +87,10 @@ Packages required: biopython
          |                                     |
          v                                     |
      +-----------------------------+           |
-     | Job Script for Each ITEM    |           |
+     | Job Script for Each ITEM    |        COMPLETE
      +-----------------------------+           |
-             |                              COMPLETE
-             v                                 |
+             |                                 |
+             v                                 v 
    +-------------------------------+   +-------------------------------+   
    | python download_fastq.py      |   |   check_doublecheckfastq.sh   |
    +-------------------------------+   +-------------------------------+
