@@ -16,10 +16,20 @@ import fcntl
 import glob
 import atexit
 import argparse
+import shutil
 
 ##########################
 # Helper Functions
 ##########################
+
+def check_required_tools(tools):
+    missing = []
+    for tool in tools:
+        if shutil.which(tool) is None:
+            missing.append(tool)
+    if missing:
+        sys.stderr.write(f"ERROR: Missing required tools in PATH: {', '.join(missing)}\n")
+        sys.exit(1)
 
 def parse_cli_args():
     parser = argparse.ArgumentParser(
@@ -356,6 +366,11 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, che
 # Main entry point
 ##########################
 if __name__ == "__main__":
+
+    check_required_tools([
+        "enaDataGet", "prefetch", "fasterq-dump",
+        "esearch", "efetch", "wget", "curl", "gzip"
+    ])
     
     args = parse_cli_args()
 
