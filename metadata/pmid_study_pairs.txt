@@ -11,7 +11,7 @@
 39364592	Alessandri 2024
 30666957	Contijoch 2019
 37106038	Maghini 2023
-32433607	MetaCardis (Vieira-Silva 2020)
+32433607	BMIS-MetaCardis (Vieira-Silva 2020)
 34880489	MetaCardis (Fromentin 2021)
 35177860	MetaCardis (Forslund 2024)
 26435270	GALAXY (GALA-ALD 2016) 
