@@ -27,6 +27,7 @@ dependencies:
   - krona
   - muscle
   - sra-tools
+  - enaBrowserTools
   - r-base
   - r-ggplot2
   - r-dplyr
