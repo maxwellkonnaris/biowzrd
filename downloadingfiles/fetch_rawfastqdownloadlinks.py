@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Parallelized version of obtainrawfastqdownloadlinks.py
+Parallelized version of fetch_rawfastqdownloadlinks.py
 Extract AWS S3, EBI FTP, and HTTP links for SRA/ENA accessions using Selenium.
 
 Usage:
-    ./obtainrawfastqdownloadlinks.py --accession SRR32578126
-    ./obtainrawfastqdownloadlinks.py --list accessions.txt --threads 16 [--verbose]
+    ./fetch_rawfastqdownloadlinks.py --accession SRR32578126
+    ./fetch_rawfastqdownloadlinks.py --list accessions.txt --threads 16 [--verbose]
 """
 
 import os
