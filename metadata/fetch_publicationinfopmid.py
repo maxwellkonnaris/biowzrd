@@ -262,7 +262,7 @@ def safe_write(output_file, all_columns, pmid_study_pairs, processed_pmids):
                 # If "Study Identifier" is NA, try to set it from first author + year
                 if study_identifier.upper() == "NA" and authors:
                     first_author_lastname = authors[0].get("LastName", "Unknown")
-                    study_identifier = f"{first_author_lastname}{pub_year}"
+                    study_identifier = f"{first_author_lastname} {pub_year}"
 
                 journal = article["Journal"].get("Title", "")
                 volume = article["Journal"]["JournalIssue"].get("Volume", "")
