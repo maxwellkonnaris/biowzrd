@@ -1,22 +1,26 @@
 ## Setup
 
 Follow these steps to **clone the repository** and **run the setup script** to configure your environment.
-1. Clone the Repository from GitHub, run:
+1. Build conda environment and make sure git-lfs is installed:
+   ```bash
+   conda create -n biowzrd
+   conda install git-lfs -y
+   ```
+3. Clone the Repository from GitHub, run:
    ```bash
    git clone git@github.com:maxwellkonnaris/biowzrd.git
    cd biowzrd
    ```
-2. Build conda environment for dependencies and required packages, run:
+4. Update conda environment for dependencies and required packages, run:
    ```bash
-   conda create -n biowzrd
-   conda env update --name biowzrd --file environment.yml
+   conda env update --name biowzrd --file environment.yml -y
    conda activate biowzrd
    ```
-3. Set permissions for setup.py, run:
+5. Set permissions for setup.py, run:
    ```bash
    chmod +x setup.py
    ```
-5. Add executable permissions to all scripts, run:
+6. Add executable permissions to all scripts, run:
    ```python
    python setup.py
    ```
