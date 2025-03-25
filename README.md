@@ -56,11 +56,64 @@ python search_bib.py "keyword1 keyword2"
 ```
 
 ## Downloading files on high performance compute cluster (downloadingfiles/)
-Packages required: NCBI toolkit, fastq-dl
+Packages required: biopython
+
 1. create txt file of NCBI or ENA study BioProject accessions called studies.txt
-2. run binary file obtainstudyaccessions.sh
+2. run binary file fetch_runaccession.py
    - this will give you a list of all of the run accessions in the bioproject
-3. run binary file downloadingfastqcleaned.sh
+
+```text
+             +-----------------------------+
+             |       studies.txt           |
+             +-----------------------------+
+                        |
+                        v
+             +-----------------------------+
+             |    fetch_runaccession.py    |
+             +-----------------------------+
+                        |
+                        v
+             +-----------------------------+
+             |    run_accessions.txt       |
+             +-----------------------------+
+                        |
+                        v
+        +-------------------------------------------------+
+        |             execute_slurmmultijob.sh            |
+        +-------------------------------------------------+
+          |         ^         |                |
+          |         |         |                |
+   submit_job  cleanup   manage tokens         |
+         |                                     |
+         v                                     |
+     +-----------------------------+           |
+     | Job Script for Each ITEM    |           |
+     +-----------------------------+           |
+             |                              COMPLETE
+             v                                 |
+   +-------------------------------+   +-------------------------------+   
+   | python download_fastq.py      |   |   check_doublecheckfastq.sh   |
+   +-------------------------------+   +-------------------------------+
+      | env vars (e.g. ACCESSION)         |
+      | download + fallback logic         |
+      | metadata processing               |
+      | token release (atexit)            |
+      | checkpoint logging                |
+```
+3. run binary file execute_slurmmultijob.sh passing in the arguments below as an example:
+
+```bash
+./execute_slurmmultijob.sh \
+  -i run_accessions.txt \
+  -o completed_accessions.txt \
+  -m 20 \
+  -p fastq_ \
+  -C "python downloadingfiles/download_fastq.py" \
+  -T "04:00:00" \
+  -M "8G" \
+  --export "WORKDIR=$(pwd) CHECKPOINT_FILE=$(pwd)/completed_accessions.txt CHECKPOINT_LOCK_FILE=$(pwd)/checkpoint.lock DEBUG_LOCK=$(pwd)/debug.lock TOKEN_FILE=$(pwd)/.job_tokens TOKEN_LOCK_FILE=$(pwd)/.job_tokens.lock COMBINED_METADATA=$(pwd)/combined_metadata.tsv"
+```
+
 4. Alternatively, if you want/have access to the raw fastq files. I've created a web scraper that works with the same output from obtainstudyaccessions.sh. First create a conda environment:
 ```bash
 conda create -n sra_downloader -y
