@@ -5,6 +5,7 @@ from datetime import datetime
 import sys
 import os
 import re
+from collections import OrderedDict
 
 try:
     from Bio import Entrez
@@ -33,7 +34,6 @@ def detect_delimiter(filepath):
             dialect = sniffer.sniff(sample)
             return dialect.delimiter
         except csv.Error:
-            # Default to comma if detection fails
             return ','
 
 def load_pmid_study_pairs(filepath):
@@ -58,21 +58,17 @@ def fetch_pubmed_data(pmid):
             handle.close()
             return records
         except Exception as e:
-            print(f"Error fetching PMID {pmid}: {e}. Retrying in 30 seconds...")
             time.sleep(30)
 
 def detect_measurement_type(keywords, mesh_terms):
-    # Convert all to lowercase for case-insensitive matching
     keywords_str = "; ".join(keywords).lower()
     mesh_str = "; ".join(mesh_terms).lower()
     
-    # Check for flow cytometry terms
     flow_terms = ["flow cytometry", "flowcytometry", "flow-cytometry", 
                  "facs", "fluorescence-activated cell sorting"]
     if any(re.search(r'\b' + re.escape(term) + r'\b', keywords_str + mesh_str) for term in flow_terms):
         return "Flow Cytometry"
     
-    # Check for PCR terms
     pcr_terms = ["qpcr", "quantitative pcr", "real-time pcr", "rt-pcr", "rt pcr",
                 "ddpcr", "digital pcr", "droplet digital pcr",
                 "hampcr", "ham pcr"]
@@ -86,53 +82,171 @@ def detect_measurement_type(keywords, mesh_terms):
                 elif term in ["hampcr", "ham pcr"]:
                     return "hamPCR"
     
-    # Check for spike-in
     if re.search(r'\bspike[\s-]?in\b', keywords_str + mesh_str):
         return "spike-in"
     
     return ""
 
 def detect_sequencing_type(keywords, mesh_terms):
-    # Convert all to lowercase for case-insensitive matching
     keywords_str = "; ".join(keywords).lower()
     mesh_str = "; ".join(mesh_terms).lower()
     
-    # Check for 16S or amplicon sequencing
     if (re.search(r'\b16s\b', keywords_str + mesh_str) or 
         re.search(r'\bamplicon\b', keywords_str + mesh_str)):
         return "16S/amplicon"
     
-    # Check for shotgun sequencing
     if re.search(r'\bshotgun\b', keywords_str + mesh_str):
         return "shotgun"
     
-    # Check for metagenomics
     if re.search(r'\bmetagenomic\b', keywords_str + mesh_str):
         return "metagenomics"
     
     return ""
+    
+def get_processed_pmids(output_file):
+    processed = set()
+    if not os.path.exists(output_file):
+        return processed
+        
+    with open(output_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row and 'PMID' in row:
+                processed.add(row['PMID'])
+    return processed
+    
+def get_all_possible_fields(pmid_study_pairs, existing_columns):
+    all_fields = set(existing_columns)
+    sample_pmids = [p[0] for p in pmid_study_pairs[:3] if p[0].lower() != "na"]
+    
+    for pmid in sample_pmids:
+        try:
+            records = fetch_pubmed_data(pmid)
+            article = records["PubmedArticle"][0]["MedlineCitation"]["Article"]
+            citation = records["PubmedArticle"][0]["MedlineCitation"]
+            pubmed_data = records["PubmedArticle"][0].get("PubmedData", {})
+            
+            def add_nested_fields(prefix, data):
+                for field, value in data.items():
+                    full_field = f"{prefix}_{field}"
+                    all_fields.add(full_field)
+                    if isinstance(value, dict):
+                        add_nested_fields(full_field, value)
+                    elif isinstance(value, list) and value and isinstance(value[0], dict):
+                        for item in value:
+                            add_nested_fields(full_field, item)
+            
+            add_nested_fields("Article", article)
+            add_nested_fields("Citation", citation)
+            add_nested_fields("PubmedData", pubmed_data)
+                
+        except Exception as e:
+            print(f"Error processing sample PMID {pmid}: {e}")
+            continue
+    
+    return sorted(all_fields)
+
+def write_with_retry(writer, row_data, output_file, all_columns):
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            # Ensure all fields are present in the row
+            for field in all_columns:
+                if field not in row_data:
+                    row_data[field] = ""
+            
+            writer.writerow(row_data)
+            return all_columns
+            
+        except ValueError as e:
+            if "dict contains fields not in fieldnames" in str(e):
+                missing_fields = eval(str(e).split(": ")[1])
+                print(f"Adding missing fields to CSV: {missing_fields}")
+                
+                # Update the columns list
+                all_columns.extend(missing_fields)
+                all_columns = sorted(set(all_columns))  # Remove duplicates
+                
+                # Close the current file
+                writer.file.close()
+                
+                # Read existing data
+                existing_data = []
+                if os.path.exists(output_file):
+                    with open(output_file, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        existing_data = list(reader)
+                
+                # Rewrite the entire file with new headers
+                with open(output_file, 'w', newline='', encoding='utf-8') as f:
+                    new_writer = csv.DictWriter(f, fieldnames=all_columns)
+                    new_writer.writeheader()
+                    for row in existing_data:
+                        # Ensure all fields are present in existing rows
+                        for field in all_columns:
+                            if field not in row:
+                                row[field] = ""
+                        new_writer.writerow(row)
+                
+                # Reopen the file in append mode
+                file = open(output_file, 'a', newline='', encoding='utf-8')
+                writer = csv.DictWriter(file, fieldnames=all_columns)
+                
+                retry_count += 1
+                continue
+            else:
+                raise
+                
+    raise ValueError(f"Failed to write after {max_retries} retries")
 
 def main():
     args = prompt_if_missing(parse_arguments())
-
     Entrez.email = args.email
-    Entrez.api_key = args.api_key
+    if args.api_key:
+        Entrez.api_key = args.api_key
 
     pmid_study_pairs = load_pmid_study_pairs(args.pmid_study)
-
-    with open("study_data.csv", mode="w", newline="", encoding="utf-8") as file:
-        writer = csv.writer(file)
-        writer.writerow([
-            "PMID", "Study Identifier", "Title", "Authors", "Consortium", "Publication Year", "Link",
-            "Measurement Type", "Sequencing", "Abstract", "Journal", "Volume", "Issue", "Pages", "DOI", "PMCID",
-            "Publication Types", "MeSH Terms", "Keywords", "Affiliations", "Grants", "Retrieved Date"
-        ])
-
+    output_file = "publication_data.csv"
+    
+    existing_columns = [
+        "PMID", "Study Identifier", "Title", "Authors", "Consortium", "Publication Year", "Link",
+        "Measurement Type", "Sequencing", "Abstract", "Journal", "Volume", "Issue", "Pages", "DOI", "PMCID",
+        "Publication Types", "MeSH Terms", "Keywords", "Affiliations", "Grants", "Retrieved Date"
+    ]
+    
+    all_columns = get_all_possible_fields(pmid_study_pairs, existing_columns)
+    
+    if os.path.exists(output_file):
+        with open(output_file, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            existing_headers = next(reader, None)
+            if existing_headers:
+                all_columns = sorted(set(all_columns) | set(existing_headers))
+    
+    processed_pmids = get_processed_pmids(output_file)
+    file_exists = os.path.exists(output_file)
+    
+    # Open the file in append mode
+    with open(output_file, mode='a' if file_exists else 'w', newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=all_columns)
+        if not file_exists:
+            writer.writeheader()
+            
+        new_pmids_processed = 0
         for pmid, study_identifier in pmid_study_pairs:
-            today = datetime.today().strftime("%Y-%m-%d")
+            if pmid in processed_pmids:
+                continue
+                
+            new_pmids_processed += 1
+            row_data = {col: "" for col in all_columns}
+            row_data["Study Identifier"] = study_identifier
+            row_data["Retrieved Date"] = datetime.today().strftime("%Y-%m-%d")
 
             if pmid.lower() == "na":
-                writer.writerow([pmid, study_identifier] + [""] * 19 + [today])
+                row_data["PMID"] = pmid
+                all_columns = write_with_retry(writer, row_data, output_file, all_columns)
                 continue
 
             try:
@@ -170,7 +284,7 @@ def main():
                     elif id_type == "pmc":
                         pmcid = str(id_elem)
 
-                pub_types = [pt for pt in article.get("PublicationTypeList", [])]
+                pub_types = [str(pt) for pt in article.get("PublicationTypeList", [])]
                 mesh_terms = [str(m["DescriptorName"]) for m in citation.get("MeshHeadingList", [])]
                 keyword_list = citation.get("KeywordList", [])
                 keywords = [str(kw) for group in keyword_list for kw in group]
@@ -188,40 +302,65 @@ def main():
 
                 consortium = ""
                 
-                # Detect measurement type and sequencing type
                 measurement_type = detect_measurement_type(keywords, mesh_terms)
                 sequencing_type = detect_sequencing_type(keywords, mesh_terms)
 
-                writer.writerow([
-                    pmid,
-                    study_identifier,
-                    title,
-                    ", ".join(author_names),
-                    consortium,
-                    pub_year,
-                    link,
-                    measurement_type,
-                    sequencing_type,
-                    abstract_text,
-                    journal,
-                    volume,
-                    issue,
-                    pages,
-                    doi,
-                    pmcid,
-                    "; ".join(pub_types),
-                    "; ".join(mesh_terms),
-                    "; ".join(keywords),
-                    "; ".join(affiliations),
-                    "; ".join(grants),
-                    today
-                ])
+                row_data.update({
+                    "PMID": pmid,
+                    "Title": title,
+                    "Authors": ", ".join(author_names),
+                    "Consortium": consortium,
+                    "Publication Year": pub_year,
+                    "Link": link,
+                    "Measurement Type": measurement_type,
+                    "Sequencing": sequencing_type,
+                    "Abstract": abstract_text,
+                    "Journal": journal,
+                    "Volume": volume,
+                    "Issue": issue,
+                    "Pages": pages,
+                    "DOI": doi,
+                    "PMCID": pmcid,
+                    "Publication Types": "; ".join(pub_types),
+                    "MeSH Terms": "; ".join(mesh_terms),
+                    "Keywords": "; ".join(keywords),
+                    "Affiliations": "; ".join(affiliations),
+                    "Grants": "; ".join(grants)
+                })
+
+                # Add all article fields
+                for field in article.keys():
+                    field_name = f"Article_{field}"
+                    if field_name not in all_columns:
+                        all_columns.append(field_name)
+                    row_data[field_name] = str(article[field]) if isinstance(article[field], (dict, list)) else article[field]
+                
+                # Add all citation fields
+                for field in citation.keys():
+                    field_name = f"Citation_{field}"
+                    if field_name not in all_columns:
+                        all_columns.append(field_name)
+                    row_data[field_name] = str(citation[field]) if isinstance(citation[field], (dict, list)) else citation[field]
+                
+                # Add all pubmed_data fields
+                for field in pubmed_data.keys():
+                    field_name = f"PubmedData_{field}"
+                    if field_name not in all_columns:
+                        all_columns.append(field_name)
+                    row_data[field_name] = str(pubmed_data[field]) if isinstance(pubmed_data[field], (dict, list)) else pubmed_data[field]
+
+                all_columns = write_with_retry(writer, row_data, output_file, all_columns)
 
             except Exception as e:
                 print(f"Final error for PMID {pmid}: {e}")
-                writer.writerow([pmid, study_identifier, "Error retrieving data"] + ["Error"] * 19 + [today])
+                row_data["PMID"] = pmid
+                row_data["Title"] = "Error retrieving data"
+                all_columns = write_with_retry(writer, row_data, output_file, all_columns)
 
-    print("CSV file 'study_data.csv' has been created.")
+    total_pmids = len(pmid_study_pairs)
+    skipped_pmids = total_pmids - new_pmids_processed
+    print(f"Processing complete. Total PMIDs: {total_pmids}, New: {new_pmids_processed}, Skipped: {skipped_pmids}")
+    print(f"Data saved to: {output_file}")
 
 if __name__ == "__main__":
     main()
