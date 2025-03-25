@@ -4,6 +4,7 @@ Follow these steps to **clone the repository** and **run the setup script** to c
 1. Build conda environment and make sure git-lfs is installed:
    ```bash
    conda create -n biowzrd
+   conda activate biowzrd
    conda install git-lfs -y
    ```
 3. Clone the Repository from GitHub, run:
@@ -14,7 +15,6 @@ Follow these steps to **clone the repository** and **run the setup script** to c
 4. Update conda environment for dependencies and required packages, run:
    ```bash
    conda env update --name biowzrd --file environment.yml -y
-   conda activate biowzrd
    ```
 5. Set permissions for setup.py, run:
    ```bash
