@@ -8,24 +8,39 @@
 
 set -euo pipefail
 
-# Basic sanity checks for commands we rely on
-command -v esearch >/dev/null 2>&1 || { echo "ERROR: esearch not found in PATH."; exit 1; }
-command -v efetch  >/dev/null 2>&1 || { echo "ERROR: efetch not found in PATH.";  exit 1; }
-command -v elink   >/dev/null 2>&1 || { echo "ERROR: elink not found in PATH.";   exit 1; }
-command -v curl    >/dev/null 2>&1 || { echo "ERROR: curl not found in PATH.";    exit 1; }
+# ---[ Basic sanity checks for commands we rely on ]---
+if ! command -v esearch >/dev/null 2>&1; then
+    echo "ERROR: esearch not found in PATH."
+    exit 1
+fi
 
-# Get the study ID from the command line
+if ! command -v efetch >/dev/null 2>&1; then
+    echo "ERROR: efetch not found in PATH."
+    exit 1
+fi
+
+if ! command -v elink >/dev/null 2>&1; then
+    echo "ERROR: elink not found in PATH."
+    exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl not found in PATH."
+    exit 1
+fi
+
+# ---[ Get the study ID from the command line ]---
 STUDY_ID=${1:-}
 if [[ -z "$STUDY_ID" ]]; then
     echo "Usage: sbatch $0 <STUDY_ID>"
     exit 1
 fi
+
 echo "🔍 Processing study: $STUDY_ID"
 
-# Define the output file and a separate lock file
+# ---[ Define the output file and a separate lock file ]---
 OUTPUT_FILE="run_accessions.txt"
 LOCK_FILE="run_accessions.lock"
-TEMP_FILE="run_accessions.tmp"
 
 # Make sure OUTPUT_FILE exists so grep won't complain
 touch "$OUTPUT_FILE"
@@ -35,7 +50,6 @@ exec 200>"$LOCK_FILE"
 flock -x 200   # Blocks until lock is available
 
 # ---[ Start of Critical Section ]---
-# Function to append unique runs to output
 append_unique_runs() {
     local runs="$1"
     if [[ -z "$runs" ]]; then
@@ -51,7 +65,7 @@ append_unique_runs() {
     done <<< "$runs"
 }
 
-# Process based on study type
+# ---[ Process based on study type ]---
 case "$STUDY_ID" in
     PRJNA*|SRP*)
         # NCBI SRA query (using EDirect)
