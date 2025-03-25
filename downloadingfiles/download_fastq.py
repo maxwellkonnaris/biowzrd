@@ -17,6 +17,7 @@ import glob
 import atexit
 import argparse
 import shutil
+import xml.etree.ElementTree as ET
 
 ##########################
 # Helper Functions
@@ -71,16 +72,16 @@ def run_command(cmd_list, err_msg):
 def log_debug_message(debug_lock_path, message):
     """
     Appends a message to debug.log under a file lock.
-    In practice, you might prefer a separate lock file. This is a demo.
+    Reads the WORKDIR from the environment.
     """
+    workdir = read_env_var("WORKDIR")
     debug_log_path = os.path.join(workdir, "logs", "debug.log")
     try:
-        # We open the lock file (which might be the same file or a separate .lock)
+        # Open the lock file (could be the same as the log or separate)
         with open(debug_lock_path, "a+") as lk:
-            # If you want to truly lock it, do flock_exclusive(lk).
-            # flock_exclusive(lk)
+            # (Optional: acquire lock with flock_exclusive(lk) if needed)
             lk.write(f"{time.ctime()} {message}\n")
-            # flock_release(lk)
+            # (Optional: release lock with flock_release(lk))
     except Exception as e:
         sys.stderr.write(f"Could not log debug message '{message}' due to: {e}\n")
 
@@ -109,8 +110,9 @@ def release_token():
     Mimics the bash 'release_token' function:
     - Locks token file
     - Increments the token count
-    - Unlocks
+    - Logs the release using the current ACCESSION from env.
     """
+    accession = read_env_var("ACCESSION")
     token_file = read_env_var("TOKEN_FILE")
     tokenlock_file = read_env_var("TOKEN_LOCK_FILE")
     workdir = read_env_var("WORKDIR")
@@ -131,7 +133,7 @@ def release_token():
             errf.write(f"[{time.ctime()}] FAILED LOCK FOR {accession}: {str(e)}\n")
 
 def compress_fastqs(fastq_dir, accession, debug_lock_path):
-    """Find all uncompressed *.fastq and gzip them."""
+    """Find all uncompressed *.fastq files in fastq_dir matching accession and gzip them."""
     pattern = os.path.join(fastq_dir, f"{accession}*.fastq")
     fastq_files = glob.glob(pattern)
     for fq in fastq_files:
@@ -144,59 +146,103 @@ def compress_fastqs(fastq_dir, accession, debug_lock_path):
 def guess_ena_ftp_paths(accession):
     """
     Return a list of possible ftp paths for a given ENA accession.
-    This is a heuristic. Adjust for your naming scheme if needed.
-    e.g. ftp.sra.ebi.ac.uk/vol1/fastq/ERR119/...
     """
     base_ftp = "ftp.sra.ebi.ac.uk/vol1/fastq"
-    # We might guess subdirectories based on partial expansions of the accession
-    # e.g. ERR1193450 -> "ERR119", "3450" => There's variation in how ENA splits directories.
-    # We'll produce some plausible guesses.
-    # For example, subdir approach:
-    #   - ftp.sra.ebi.ac.uk/vol1/fastq/ERR119/003/ERR1193450
-    #   - ftp.sra.ebi.ac.uk/vol1/fastq/ERR119/450/ERR1193450
-    # We'll try a few. This is a *demo*; real logic can be more elaborate.
-
-    # Common pattern: The accession splitted after the first 6 or so digits, or last 3
-    # e.g. ERR119/3450 => "ERR1193450" or "ERR119" + "3450"
-    # Another approach is: (ERR119)(3450) => /ERR119/3450/ERR1193450. We'll try both.
-    # We'll also try no sub-subdir, in case the run is stored in a simpler path.
-
     prefix = accession[:6]  # e.g. ERR119
     suffix = accession[6:]   # e.g. 3450
 
-    # Potential subfolders to guess
     paths = [
         f"{base_ftp}/{prefix}/{suffix}/{accession}",
-        f"{base_ftp}/{prefix}/00{suffix[-1]}/{accession}",   # 3450 -> last digit = 0 => /003
-        f"{base_ftp}/{prefix}/{suffix[-3:]}/{accession}",    # last 3 digits
-        f"{base_ftp}/{prefix}/{accession}",                  # no sub-subdir
+        f"{base_ftp}/{prefix}/00{suffix[-1]}/{accession}",
+        f"{base_ftp}/{prefix}/{suffix[-3:]}/{accession}",
+        f"{base_ftp}/{prefix}/{accession}",
     ]
-    # We'll remove duplicates
     unique_paths = list(dict.fromkeys(paths))
     return unique_paths
 
-def try_enaDataGet(accession, fastq_dir, debug_lock):
+def flatten_xml_to_dict(element, path=""):
     """
-    Attempt to download using enaDataGet.
+    Recursively flatten an XML tree to {path: value} pairs.
+    """
+    flattened = {}
+    tag_path = f"{path}/{element.tag}" if path else element.tag
+
+    if len(element) == 0:
+        text = element.text.strip() if element.text else "NA"
+        flattened[tag_path] = text
+    else:
+        for child in element:
+            flattened.update(flatten_xml_to_dict(child, tag_path))
+    return flattened
+
+def try_enaDataGet(accession, fastq_dir, metadata_dir, debug_lock_path):
+    """
+    Attempt to download using enaDataGet. If successful:
+    - Convert XML to flattened TSV
+    - Append metadata to project-level TSV file
+    - Move FASTQ files into fastq_dir
+    - Remove the accession subdirectory
     Return True if successful, False otherwise.
     """
-    cmd = ["enaDataGet", "-f", "fastq", "-d", fastq_dir, accession]
+    cmd = ["enaDataGet", "-f", "fastq", "-d", fastq_dir, "-m", "True", accession]
+    accession_dir = os.path.join(fastq_dir, accession)
+    xml_path = os.path.join(accession_dir, f"{accession}.xml")
+
     try:
         run_command(cmd, f"❌ ERROR: {accession} enaDataGet failed")
+
+        if not os.path.exists(xml_path):
+            log_debug_message(debug_lock_path, f"⚠️ WARNING: XML metadata file missing for {accession}")
+            return False
+
+        # Parse XML and flatten to dictionary
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        flat_data = flatten_xml_to_dict(root)
+
+        # Extract study/project accession
+        study_accession = root.findtext(".//STUDY/IDENTIFIERS/PRIMARY_ID", default=None)
+        if not study_accession:
+            study_accession = root.findtext(".//STUDY_REF/IDENTIFIERS/PRIMARY_ID", default="unknown_project")
+        if not study_accession:
+            study_accession = "unknown_project"
+
+        project_tsv = os.path.join(metadata_dir, f"{study_accession}-project-metadata.tsv")
+        os.makedirs(metadata_dir, exist_ok=True)
+
+        # Write header if needed and append TSV row
+        write_header = not os.path.exists(project_tsv)
+        with open(project_tsv, "a") as out:
+            if write_header:
+                out.write("\t".join(flat_data.keys()) + "\n")
+            out.write("\t".join(flat_data.values()) + "\n")
+
+        print(f"📄 Appended metadata to project file: {project_tsv}")
+
+        # Move FASTQ files to fastq_dir
+        fastqs = glob.glob(os.path.join(accession_dir, "*.fastq.gz"))
+        for fq in fastqs:
+            dest = os.path.join(fastq_dir, os.path.basename(fq))
+            shutil.move(fq, dest)
+            print(f"📦 Moved FASTQ: {fq} → {dest}")
+
+        # Delete the accession subfolder
+        shutil.rmtree(accession_dir)
+        print(f"🗑️ Deleted {accession_dir}")
+
         return True
-    except RuntimeError as e:
-        log_debug_message(debug_lock, str(e))
+
+    except Exception as e:
+        log_debug_message(debug_lock_path, f"❌ ERROR in try_enaDataGet for {accession}: {e}")
         return False
 
-def try_direct_wget(accession, fastq_dir, debug_lock, max_retries=2):
+def try_direct_wget(accession, fastq_dir, debug_lock_path, max_retries=2):
     """
     Attempt direct wget from guessed ENA ftp paths.
-    We'll guess a few possible subdirectory patterns, each with .fastq.gz filenames.
     Return True if any file is successfully downloaded, else False.
     """
     success = False
     possible_dirs = guess_ena_ftp_paths(accession)
-    # We assume the actual files might be like: {accession}_1.fastq.gz, {accession}_2.fastq.gz, or {accession}.fastq.gz
     candidates = [
         f"{accession}.fastq.gz",
         f"{accession}_1.fastq.gz",
@@ -205,33 +251,24 @@ def try_direct_wget(accession, fastq_dir, debug_lock, max_retries=2):
     for dir_url in possible_dirs:
         for f in candidates:
             url = f"https://{dir_url}/{f}"
-            # We'll do a few retries
             for attempt in range(1, max_retries+1):
                 cmd = ["wget", "-O", os.path.join(fastq_dir, f), url]
                 try:
                     run_command(cmd, f"Wget attempt {attempt} for {accession} failed: {url}")
                     success = True
-                    break  # break out of the attempt loop
+                    break  # exit retry loop if successful
                 except RuntimeError as e:
-                    log_debug_message(debug_lock, str(e))
+                    log_debug_message(debug_lock_path, str(e))
                     time.sleep(2 * attempt)
-            if success:
-                # If we got one file, let's continue with the next candidate
-                # But maybe we want to see if there's also a _2?
-                # We'll not break from the entire loop, so we continue to get both _1 and _2 if they exist.
-                pass
-        # After finishing candidates in one dir
-    # We'll consider success if we at least got one .fastq.gz
+            # Continue to try other candidate files even if one succeeds
     downloaded = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz"))
     return len(downloaded) > 0
 
-def try_ftp_fallback(accession, fastq_dir, debug_lock):
+def try_ftp_fallback(accession, fastq_dir, debug_lock_path):
     """
-    Another fallback with 'curl' or 'wget' from an ftp: path
-    Usually the URL is ftp://ftp.sra.ebi.ac.uk/vol1/fastq/<subdir>/...
+    Fallback method using ftp URLs with 'curl' or 'wget'.
     Return True if any file is downloaded, else False.
     """
-    # We'll just re-use the guess_ena_ftp_paths, but with ftp://
     success = False
     possible_dirs = guess_ena_ftp_paths(accession)
     candidates = [
@@ -248,55 +285,36 @@ def try_ftp_fallback(accession, fastq_dir, debug_lock):
                 run_command(cmd, f"curl ftp fallback for {accession} failed: {url}")
                 success = True
             except RuntimeError as e:
-                log_debug_message(debug_lock, str(e))
-                # last resort: try wget ftp
+                log_debug_message(debug_lock_path, str(e))
                 cmd2 = ["wget", "-O", out_path, url]
                 try:
                     run_command(cmd2, f"wget ftp fallback for {accession} failed: {url}")
                     success = True
                 except RuntimeError as e2:
-                    log_debug_message(debug_lock, str(e2))
-            # If success, keep going to try to get _2 if it exists
+                    log_debug_message(debug_lock_path, str(e2))
     downloaded = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz"))
     return len(downloaded) > 0
 
-def fetch_ena_metadata_and_merge(accession, fastq_dir, metadata_dir, combined_meta, checkpoint_lock, debug_lock):
-    """
-    Since we're not using fastq-dl's built-in metadata, we might rely on
-    'enaDataGet' generating some metadata or do custom steps. Here is a placeholder
-    that you can adapt to fetch ENA metadata. For now, let's just do a no-op or
-    a hypothetical 'enaBrowserTools' run info extraction.
-    """
-    # If enaDataGet succeeded, it usually places a directory with run data and maybe
-    # a readme. The official 'enaDataGet' doesn't automatically produce a single TSV
-    # with metadata. You can parse the 'run.xml' or other info if you want to
-    # unify with your combined_meta. This is just a placeholder.
-
-    # lock combined meta if needed
-    pass
-
-def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, checkpoint_lock):
+def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path, checkpoint_lock):
     """
     Attempt SRA route: prefetch + fasterq-dump + SRA metadata.
     Return True if successful, else False.
     """
-    sra_files = os.path.join(fastq_dir, f"{accession}.sra")
+    sra_file = os.path.join(fastq_dir, f"{accession}.sra")
 
-    # Prefetch
     print(f"🔹 [Fallback] Prefetching SRA file for {accession}")
-    cmd_prefetch = ["prefetch", accession, "--output-file", sra_files]
+    cmd_prefetch = ["prefetch", accession, "--output-file", sra_file]
     try:
         run_command(cmd_prefetch, f"❌ ERROR: {accession} prefetch failed")
     except RuntimeError as e:
-        log_debug_message(debug_lock, str(e))
+        log_debug_message(debug_lock_path, str(e))
         return False
     time.sleep(2)
 
-    # fasterq-dump
     print(f"🔹 [Fallback] Converting SRA to FASTQ for {accession}")
     cmd_fasterq = [
         "fasterq-dump",
-        sra_files,
+        sra_file,
         "--outdir", fastq_dir,
         "--threads", "4",
         "--mem", "8G",
@@ -305,29 +323,25 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, che
     try:
         run_command(cmd_fasterq, f"❌ ERROR: {accession} fasterq-dump failed")
     except RuntimeError as e:
-        log_debug_message(debug_lock, str(e))
+        log_debug_message(debug_lock_path, str(e))
         return False
     time.sleep(2)
 
-    # fetch SRA metadata
+    # Fetch SRA metadata via esearch/efetch
     max_retries  = 3
     success_meta = False
     csv_path = os.path.join(metadata_dir, f"{accession}-run-info.csv")
 
     for i in range(1, max_retries + 1):
-        cmd_esearch = (
-            f'esearch -db sra -query "{accession}" | efetch -format runinfo > {csv_path}'
-        )
+        cmd_esearch = f'esearch -db sra -query "{accession}" | efetch -format runinfo > {csv_path}'
         ret = subprocess.call(cmd_esearch, shell=True)
         if ret == 0 and os.path.isfile(csv_path) and os.path.getsize(csv_path) > 0:
             success_meta = True
-            # Convert CSV -> TSV
             tsv_file = os.path.join(metadata_dir, f"{accession}-run-info.tsv")
             try:
                 with open(csv_path, "r") as inf, open(tsv_file, "w") as outf:
                     for line in inf:
                         outf.write(line.replace(",", "\t"))
-                # Merge into combined
                 with open(checkpoint_lock, "r+") as lock_fd:
                     flock_exclusive(lock_fd)
                     if not os.path.isfile(combined_meta):
@@ -340,24 +354,21 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, che
                         for row in tsv_in:
                             cm.write(row)
                     flock_release(lock_fd)
-                # Cleanup
-                remove_file_safely(tsv_file, accession, debug_lock)
-                remove_file_safely(csv_path, accession, debug_lock)
+                remove_file_safely(tsv_file, accession, debug_lock_path)
+                remove_file_safely(csv_path, accession, debug_lock_path)
             except Exception as e:
-                log_debug_message(debug_lock, f"⚠️ WARNING: {accession} SRA metadata handling error: {e}")
+                log_debug_message(debug_lock_path, f"⚠️ WARNING: {accession} SRA metadata handling error: {e}")
             break
         else:
-            log_debug_message(debug_lock, f"⚠️ WARNING: {accession} SRA metadata attempt {i} failed")
+            log_debug_message(debug_lock_path, f"⚠️ WARNING: {accession} SRA metadata attempt {i} failed")
             time.sleep(i)
 
-    # If we got here, success_meta might be True or False
     if not success_meta:
-        log_debug_message(debug_lock, f"❌ ERROR: {accession} All SRA metadata attempts failed")
+        log_debug_message(debug_lock_path, f"❌ ERROR: {accession} All SRA metadata attempts failed")
 
-    # Check if we got any .fastq files
     all_fastqs = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq"))
     if not all_fastqs:
-        log_debug_message(debug_lock, f"❌ ERROR: {accession} No .fastq from fallback SRA route.")
+        log_debug_message(debug_lock_path, f"❌ ERROR: {accession} No .fastq from fallback SRA route.")
         return False
 
     return True
@@ -374,7 +385,7 @@ if __name__ == "__main__":
     
     args = parse_cli_args()
 
-    # Allow CLI args to override env vars (good for testing)
+    # Allow CLI args to override environment variables (useful for testing)
     if args.accession:
         os.environ["ACCESSION"] = args.accession
     if args.workdir:
@@ -382,7 +393,7 @@ if __name__ == "__main__":
     if args.metadata:
         os.environ["COMBINED_METADATA"] = args.metadata
 
-    # Required variables
+    # Required variables from environment
     accession       = read_env_var("ACCESSION")
     workdir         = read_env_var("WORKDIR")
     checkpoint_file = read_env_var("CHECKPOINT_FILE")
@@ -392,9 +403,8 @@ if __name__ == "__main__":
     token_file      = read_env_var("TOKEN_FILE")
     tokenlock_file  = read_env_var("TOKEN_LOCK_FILE")
 
-
-    fastq_dir       = os.path.join(workdir, "fastq_data")
-    metadata_dir    = os.path.join(workdir, "metadata")
+    fastq_dir    = os.path.join(workdir, "fastq_data")
+    metadata_dir = os.path.join(workdir, "metadata")
     os.makedirs(fastq_dir, exist_ok=True)
     os.makedirs(metadata_dir, exist_ok=True)
 
@@ -402,49 +412,39 @@ if __name__ == "__main__":
     def on_exit():
         release_token()
 
-    global accession
     print(f"[DEBUG] Accession={accession}", flush=True)
 
-    # 2) Determine if it's SRA or ENA by prefix
+    # Determine provider by accession prefix
     prefix = accession[:3].upper()
-    if prefix in ("SRR","SRX","SRS","SRP"):
+    if prefix in ("SRR", "SRX", "SRS", "SRP"):
         provider = "sra"
-    elif prefix in ("ERR","ERX","ERS","ERP","DRR","DRX","DRS","DRP"):
+    elif prefix in ("ERR", "ERX", "ERS", "ERP", "DRR", "DRX", "DRS", "DRP"):
         provider = "ena"
     else:
         log_debug_message(debug_lock, f"❌ ERROR: {accession} Unrecognized prefix => no known route.")
         sys.exit(1)
 
-    # 3) If SRA => do the SRA route
     if provider == "sra":
         print(f"[INFO] Using SRA route for {accession}")
         ok = sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, checkpoint_lock)
         if not ok:
             sys.exit(1)
-
-    # 4) If ENA => attempt multiple methods:
     else:
         print(f"[INFO] Using ENA route(s) for {accession}")
-        # 4a) Try enaDataGet
-        ena_ok = try_enaDataGet(accession, fastq_dir, debug_lock)
+        # Try enaDataGet first (pass metadata_dir as well)
+        ena_ok = try_enaDataGet(accession, fastq_dir, metadata_dir, debug_lock)
         if not ena_ok:
-            # 4b) If that fails => direct wget
             print(f"[WARN] enaDataGet failed => trying direct wget for {accession}")
             ena_ok = try_direct_wget(accession, fastq_dir, debug_lock, max_retries=2)
             if not ena_ok:
-                # 4c) If that fails => ftp fallback with curl/wget
                 print(f"[WARN] direct wget failed => trying ftp fallback for {accession}")
                 ena_ok = try_ftp_fallback(accession, fastq_dir, debug_lock)
                 if not ena_ok:
-                    # 4d) If that fails => fallback to SRA route
                     print(f"[WARN] All ENA methods failed => fallback to SRA route for {accession}")
                     sra_ok = sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, checkpoint_lock)
                     if not sra_ok:
                         log_debug_message(debug_lock, f"❌ ERROR: {accession} ENA + SRA fallback all failed.")
                         sys.exit(1)
-                    else:
-                        # If SRA fallback worked, we continue below
-                        pass
                 else:
                     print(f"[INFO] ftp fallback succeeded for {accession}")
             else:
@@ -452,24 +452,20 @@ if __name__ == "__main__":
         else:
             print(f"[INFO] enaDataGet succeeded for {accession}")
 
-        # If the final ENA route we used was enaDataGet, directWget, or ftp fallback
-        # and it succeeded, we can do metadata merges if you want:
-        # fetch_ena_metadata_and_merge(accession, fastq_dir, metadata_dir, combined_meta, checkpoint_lock, debug_lock)
-
-    # 5) Compress any leftover .fastq
+    # Compress any leftover .fastq files
     compress_fastqs(fastq_dir, accession, debug_lock)
 
-    # 6) Check we have .fastq.gz
+    # Check for .fastq.gz files
     gz_pattern = os.path.join(fastq_dir, f"{accession}*.fastq.gz")
     found_gz = glob.glob(gz_pattern)
     if not found_gz:
         log_debug_message(debug_lock, f"❌ ERROR: {accession} No FASTQ files found after process.")
         sys.exit(1)
 
-    # 7) Append to checkpoint
+    # Append accession to checkpoint file
     append_to_checkpoint(accession, checkpoint_file, checkpoint_lock)
 
-    # 8) Cleanup any leftover .sra if it existed
+    # Cleanup any leftover .sra file
     sra_file_path = os.path.join(fastq_dir, f"{accession}.sra")
     remove_file_safely(sra_file_path, accession, debug_lock)
 
