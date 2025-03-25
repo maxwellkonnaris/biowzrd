@@ -192,6 +192,7 @@ def main():
     )
     parser.add_argument("input_file", help="Input file with one project accession per line.")
     parser.add_argument("-o", "--output_file", default="run_accessions.csv", help="CSV output file name.")
+    parser.add_argument("--runs-only", default="run_accessions_only.txt", help="Text file with only run accessions.")
     parser.add_argument("--fail-log", default="failed_accessions.log", help="File to log failed accessions.")
     parser.add_argument("--email", help="Your email address (required for NCBI queries).")
     parser.add_argument("--api-key", help="Your NCBI API key (optional).")
@@ -203,13 +204,16 @@ def main():
     accessions = read_accessions(args.input_file)
     results = []
     failed = []
+    runs_only = []
 
     for accession in accessions:
         print(f"\n🔍 Processing: {accession}")
         try:
             run_list = process_accession(accession, email, api_key)
             if run_list:
-                results.extend([(accession, run) for run in run_list])
+                for run in run_list:
+                    results.append((accession, run))
+                    runs_only.append(run)
             else:
                 results.append((accession, "No run accessions found"))
                 failed.append((accession, "No run accessions found"))
@@ -228,6 +232,14 @@ def main():
         print(f"\n✅ Results saved to {args.output_file}")
     except Exception as e:
         print(f"Error writing CSV: {e}")
+
+    try:
+        with open(args.runs_only, "w") as txtfile:
+            for run in runs_only:
+                txtfile.write(run + "\n")
+        print(f"✅ Run accessions only saved to {args.runs_only}")
+    except Exception as e:
+        print(f"Error writing run accessions only file: {e}")
 
     if failed:
         try:
