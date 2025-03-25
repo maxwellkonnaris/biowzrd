@@ -16,6 +16,10 @@ Follow these steps to **clone the repository** and **run the setup script** to c
    ```bash
    conda env update --name biowzrd --file environment.yml 
    ```
+   or, if you are working with micromamba instead
+   ```bash
+   micromamba update --name biowzrd --file environment.yml
+   ```
 5. Set permissions for setup.py, run:
    ```bash
    chmod +x setup.py
