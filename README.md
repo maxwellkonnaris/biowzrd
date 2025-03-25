@@ -111,7 +111,15 @@ Packages required: biopython
   -C "python downloadingfiles/download_fastq.py" \
   -T "04:00:00" \
   -M "8G" \
-  --export "WORKDIR=$(pwd) CHECKPOINT_FILE=$(pwd)/completed_accessions.txt CHECKPOINT_LOCK_FILE=$(pwd)/checkpoint.lock DEBUG_LOCK=$(pwd)/debug.lock TOKEN_FILE=$(pwd)/.job_tokens TOKEN_LOCK_FILE=$(pwd)/.job_tokens.lock COMBINED_METADATA=$(pwd)/combined_metadata.tsv"
+  --export "WORKDIR=$(pwd) \
+            CHECKPOINT_FILE=$(pwd)/completed_accessions.txt \
+            CHECKPOINT_LOCK_FILE=$(pwd)/checkpoint.lock \
+            DEBUG_LOCK=$(pwd)/debug.lock \
+            TOKEN_FILE=$(pwd)/.job_tokens \
+            TOKEN_LOCK_FILE=$(pwd)/.job_tokens.lock \
+            COMBINED_METADATA=$(pwd)/combined_metadata.tsv \
+            NCBI_API_KEY=YOUR_API_KEY_HERE \
+            EMAIL=your@email.com"
 ```
 
 4. Alternatively, if you want/have access to the raw fastq files. I've created a web scraper that works with the same output from obtainstudyaccessions.sh. First create a conda environment:
