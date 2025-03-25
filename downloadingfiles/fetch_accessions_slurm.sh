@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --time=00:30:00   # Adjust as needed
-#SBATCH --mem=2G          # Adjust memory as needed
+#SBATCH --mem=1G          # Adjust memory as needed
 #SBATCH --cpus-per-task=1
 #SBATCH --ntasks=1
 #SBATCH --output=logs/%x.out
