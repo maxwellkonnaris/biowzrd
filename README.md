@@ -1,7 +1,7 @@
 ## Setup
 
 Follow these steps to **clone the repository** and **run the setup script** to configure your environment.
-1. Build conda environment and make sure git-lfs is installed:
+1. Build conda environment and make sure git-lfs is installed, run:
    ```bash
    conda create -n biowzrd
    conda activate biowzrd
