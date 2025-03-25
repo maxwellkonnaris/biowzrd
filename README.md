@@ -14,7 +14,7 @@ Follow these steps to **clone the repository** and **run the setup script** to c
    ```
 4. Update conda environment for dependencies and required packages, run:
    ```bash
-   conda env update --name biowzrd --file environment.yml --yes
+   conda env update --name biowzrd --file environment.yml 
    ```
 5. Set permissions for setup.py, run:
    ```bash
