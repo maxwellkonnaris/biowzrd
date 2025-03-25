@@ -20,12 +20,9 @@ Follow these steps to **clone the repository** and **run the setup script** to c
    ```bash
    micromamba update --name biowzrd --file environment.yml --yes
    ```
-5. Set permissions for setup.py, run:
+5. Set permissions for setup.py and Add executable permissions to all script, run:
    ```bash
    chmod +x setup.py
-   ```
-6. Add executable permissions to all scripts, run:
-   ```python
    python setup.py
    ```
 
