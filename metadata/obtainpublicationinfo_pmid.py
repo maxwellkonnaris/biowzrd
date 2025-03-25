@@ -129,38 +129,48 @@ def detect_measurement_type(keywords, mesh_terms, abstract):
     return ""
 
 
+
 def detect_sequencing_type(keywords, mesh_terms, abstract):
     """
-    Returns a recognized sequencing type if any known synonyms are found
+    Returns a list of recognized sequencing types if any known synonyms are found
     in keywords, MeSH terms, or abstract text.
     """
-    # Combine all text into one lowercase string
     combined_text = "; ".join(keywords + mesh_terms + [abstract]).lower()
+    detected_types = set()
 
-    # 1) 16S or Amplicon
-    # Also looking for explicit mention of "16s rRNA" or "amplicon-based"
-    s16_synonyms = [
-        "16s", "16s rrna", "16s rna", "16s ribosomal rna",
-        "amplicon", "amplicon-based", "targeted amplicon"
-    ]
-    if any(re.search(r'\b' + re.escape(term) + r'\b', combined_text) for term in s16_synonyms):
-        return "16S/amplicon"
-    
-    # 2) Shotgun
-    shotgun_synonyms = [
-        "shotgun", "shotgun metagenomic", "whole-genome shotgun", "wgs"
-    ]
-    if any(re.search(r'\b' + re.escape(term) + r'\b', combined_text) for term in shotgun_synonyms):
-        return "shotgun"
-    
-    # 3) Metagenomic
-    metagenomic_synonyms = [
-        "metagenomic", "metagenomics", "whole-metagenome"
-    ]
-    if any(re.search(r'\b' + re.escape(term) + r'\b', combined_text) for term in metagenomic_synonyms):
-        return "metagenomics"
-    
-    return ""
+    type_synonyms = {
+        "Amplicon": [
+            "amplicon", "amplicon-based", "targeted amplicon", "amplicon sequencing",
+            "16s amplicon", "pcr amplicon", "pcr-based", "marker gene sequencing"
+        ],
+        "Shotgun": [
+            "shotgun", "shotgun metagenomic", "whole-genome shotgun", "wgs",
+            "shotgun sequencing", "untargeted sequencing"
+        ],
+        "Metagenomics": [
+            "metagenomic", "metagenomics", "whole-metagenome", "metagenomic sequencing",
+            "environmental genomics", "microbiome profiling", "meta-genome", "metagenome"
+        ],
+        "16S": [
+            "16s", "16s rrna", "16s rna", "16s ribosomal rna", "16s sequencing",
+            "16s gene", "16s-based", "rrs gene"
+        ],
+        "ITS": [
+            "its", "internal transcribed spacer", "its1", "its2", "fungal sequencing",
+            "fungal profiling", "its region", "its amplicon"
+        ],
+        "Metatranscriptomics": [
+            "metatranscriptomics", "metatranscriptomic", "rna-based metagenomics",
+            "environmental rna", "total rna sequencing", "meta-transcriptome"
+        ]
+    }
+
+    # Check for all matches
+    for seq_type, synonyms in type_synonyms.items():
+        if any(re.search(r'\b' + re.escape(term) + r'\b', combined_text) for term in synonyms):
+            detected_types.add(seq_type)
+
+    return sorted(detected_types)  
 
 
 def get_processed_pmids():
