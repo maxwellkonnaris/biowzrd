@@ -42,6 +42,7 @@ SLURM_MEM="8G"
 
 # Let user optionally define an API key, plus arbitrary "export" lines
 NCBI_API_KEY=""
+EMAIL=""
 USER_EXPORTS=""
 
 WORKDIR="$(pwd)"
@@ -107,6 +108,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --api-key)
       NCBI_API_KEY="$2"
+      shift 2
+      ;;
+    --email)
+      EMAIL="$2"
       shift 2
       ;;
     --export)
@@ -221,6 +226,9 @@ submit_job() {
   ENV_EXPORTS+="export ITEM=\"${ITEM}\"\n"
   if [[ -n "$NCBI_API_KEY" ]]; then
     ENV_EXPORTS+="export NCBI_API_KEY=\"${NCBI_API_KEY}\"\n"
+  fi
+  if [[ -n "$EMAIL" ]]; then
+    ENV_EXPORTS+="export EMAIL=\"${EMAIL}\"\n"
   fi
   # Additional user exports
   if [[ -n "$USER_EXPORTS" ]]; then
