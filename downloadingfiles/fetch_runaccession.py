@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import csv
-import re
 import sys
 import time
 import requests
@@ -19,140 +18,130 @@ try:
 except ImportError:
     SRAweb = None
 
+def safe_entrez_request(func, *args, max_retries=5, **kwargs):
+    for attempt in range(max_retries):
+        try:
+            handle = func(*args, **kwargs)
+            return handle
+        except Exception as e:
+            if "HTTP Error 429" in str(e):
+                wait_time = 2 ** attempt
+                print(f"Entrez 429: Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise e
+    raise RuntimeError(f"Entrez request failed after {max_retries} retries.")
+
+def safe_requests_get(url, params=None, max_retries=5, timeout=30):
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except requests.exceptions.RequestException as e:
+            wait_time = 2 ** attempt
+            print(f"Request error: {e}. Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+    raise RuntimeError(f"Requests failed after {max_retries} retries.")
+
 def get_run_accessions_ncbi(accession, email, api_key):
-    """
-    For accessions starting with PRJNA* or SRP*, use Bio.Entrez to search SRA,
-    fetch run information, and return a list of run accessions.
-    """
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
+
     try:
-        # Search SRA for the accession.
-        handle = Entrez.esearch(db="sra", term=accession)
+        handle = safe_entrez_request(Entrez.esearch, db="sra", term=accession)
         record = Entrez.read(handle)
         handle.close()
         id_list = record.get("IdList", [])
         if not id_list:
             return []
-        # Fetch run info using the list of IDs.
-        try:
-            handle = Entrez.efetch(db="sra", id=",".join(id_list),
-                                   rettype="runinfo", retmode="text")
-            text = handle.read()
-            handle.close()
-        except Exception as e:
-            if "HTTP Error 429" in str(e):
-                print(f"HTTP 429 received for {accession}, waiting before retrying...")
-                time.sleep(5)
-                handle = Entrez.efetch(db="sra", id=",".join(id_list),
-                                       rettype="runinfo", retmode="text")
-                text = handle.read()
-                handle.close()
-            else:
-                raise e
+
+        handle = safe_entrez_request(Entrez.efetch, db="sra", id=",".join(id_list),
+                                     rettype="runinfo", retmode="text")
+        text = handle.read()
+        handle.close()
+
         if isinstance(text, bytes):
             text = text.decode("utf-8")
         lines = text.strip().split("\n")
         if len(lines) < 2:
             return []
+
         header = lines[0].split(",")
         try:
             run_index = header.index("Run")
         except ValueError:
-            run_index = 0  # fallback if "Run" not found
-        runs = []
-        for line in lines[1:]:
-            cols = line.split(",")
-            if len(cols) > run_index:
-                runs.append(cols[run_index].strip())
+            run_index = 0
+        runs = [line.split(",")[run_index].strip() for line in lines[1:] if len(line.split(",")) > run_index]
         return runs
+
     except Exception as e:
         print(f"Error using Bio.Entrez for accession {accession}: {e}")
         return []
 
 def get_run_accessions_geo(accession, email, api_key):
-    """
-    For GEO accessions (GSE*), first try to use Bio.Entrez to search the gds
-    database and link to SRA. If that fails (or returns no runs) and pysradb
-    is available, fall back to pysradb to retrieve run accessions.
-    """
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
+
     runs = []
-    # First attempt: use Entrez.
+
     try:
-        handle = Entrez.esearch(db="gds", term=accession)
+        handle = safe_entrez_request(Entrez.esearch, db="gds", term=accession)
         record = Entrez.read(handle)
         handle.close()
         id_list = record.get("IdList", [])
         if id_list:
-            try:
-                handle = Entrez.elink(dbfrom="gds", db="sra", id=",".join(id_list))
-                record = Entrez.read(handle)
+            handle = safe_entrez_request(Entrez.elink, dbfrom="gds", db="sra", id=",".join(id_list))
+            record = Entrez.read(handle)
+            handle.close()
+
+            sra_ids = []
+            for rec in record:
+                if "LinkSetDb" in rec and rec["LinkSetDb"]:
+                    for link in rec["LinkSetDb"][0]["Link"]:
+                        sra_ids.append(link["Id"])
+
+            if sra_ids:
+                handle = safe_entrez_request(Entrez.efetch, db="sra", id=",".join(sra_ids),
+                                             rettype="runinfo", retmode="text")
+                text = handle.read()
                 handle.close()
-                sra_ids = []
-                for rec in record:
-                    if "LinkSetDb" in rec and rec["LinkSetDb"]:
-                        for link in rec["LinkSetDb"][0]["Link"]:
-                            sra_ids.append(link["Id"])
-                if sra_ids:
+
+                if isinstance(text, bytes):
+                    text = text.decode("utf-8")
+                lines = text.strip().split("\n")
+                if len(lines) >= 2:
+                    header = lines[0].split(",")
                     try:
-                        handle = Entrez.efetch(db="sra", id=",".join(sra_ids),
-                                               rettype="runinfo", retmode="text")
-                        text = handle.read()
-                        handle.close()
-                    except Exception as e:
-                        if "HTTP Error 429" in str(e):
-                            print(f"HTTP 429 received for GEO accession {accession}, waiting before retrying...")
-                            time.sleep(5)
-                            handle = Entrez.efetch(db="sra", id=",".join(sra_ids),
-                                                   rettype="runinfo", retmode="text")
-                            text = handle.read()
-                            handle.close()
-                        else:
-                            raise e
-                    if isinstance(text, bytes):
-                        text = text.decode("utf-8")
-                    lines = text.strip().split("\n")
-                    if len(lines) >= 2:
-                        header = lines[0].split(",")
-                        try:
-                            run_index = header.index("Run")
-                        except ValueError:
-                            run_index = 0
-                        for line in lines[1:]:
-                            cols = line.split(",")
-                            if len(cols) > run_index:
-                                runs.append(cols[run_index].strip())
-            except Exception as e:
-                if "Couldn't resolve #exLinkSrv2" in str(e):
-                    print(f"Warning: GEO accession {accession} does not link to SRA runs via Entrez.")
-                else:
-                    print(f"Error linking GEO accession {accession} to SRA: {e}")
+                        run_index = header.index("Run")
+                    except ValueError:
+                        run_index = 0
+                    for line in lines[1:]:
+                        cols = line.split(",")
+                        if len(cols) > run_index:
+                            runs.append(cols[run_index].strip())
     except Exception as e:
-        print(f"Error searching gds for GEO accession {accession}: {e}")
-    
-    # If no runs were found via Entrez and pysradb is available, try fallback.
+        print(f"Entrez failed for GEO accession {accession}: {e}")
+
     if not runs and SRAweb is not None:
-        try:
-            print(f"Falling back to pysradb for GEO accession {accession}")
-            db = SRAweb()
-            # Query using the GEO accession; this returns a DataFrame.
-            df = db.sra_metadata(geo=accession, detailed=True)
-            if not df.empty and "run_accession" in df.columns:
-                runs = df["run_accession"].dropna().unique().tolist()
-        except Exception as e:
-            print(f"Error using pysradb for GEO accession {accession}: {e}")
-    
+        for attempt in range(5):
+            try:
+                print(f"Falling back to pysradb for GEO accession {accession} (attempt {attempt + 1})")
+                db = SRAweb()
+                df = db.sra_metadata(geo=accession, detailed=True)
+                if not df.empty and "run_accession" in df.columns:
+                    runs = df["run_accession"].dropna().unique().tolist()
+                break
+            except Exception as e:
+                wait_time = 2 ** attempt
+                print(f"pysradb error: {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+
     return runs
 
 def fetch_runs_ena(accession):
-    """
-    For accessions starting with PRJEB*, ERP*, or EGAS*,
-    use the ENA API to fetch run accessions.
-    """
     url = "https://www.ebi.ac.uk/ena/portal/api/filereport"
     params = {
         "accession": accession,
@@ -161,39 +150,29 @@ def fetch_runs_ena(accession):
         "format": "tsv"
     }
     try:
-        r = requests.get(url, params=params, timeout=30)
-        r.raise_for_status()
+        r = safe_requests_get(url, params=params)
         lines = r.text.strip().split("\n")
         if len(lines) > 1:
-            runs = [line.strip() for line in lines[1:] if line.strip()]
+            return [line.strip() for line in lines[1:] if line.strip()]
         else:
-            runs = []
-        return runs
+            return []
     except Exception as e:
-        print(f"Error fetching ENA data for {accession}: {e}")
+        print(f"ENA fetch failed for {accession}: {e}")
         return []
 
 def process_accession(accession, email, api_key):
-    """
-    Select the appropriate method for fetching run accessions based on the accession prefix.
-    """
     accession = accession.strip()
-    runs = []
     if accession.startswith("PRJNA") or accession.startswith("SRP"):
-        runs = get_run_accessions_ncbi(accession, email, api_key)
+        return get_run_accessions_ncbi(accession, email, api_key)
     elif accession.startswith("GSE"):
-        runs = get_run_accessions_geo(accession, email, api_key)
+        return get_run_accessions_geo(accession, email, api_key)
     elif accession.startswith("PRJEB") or accession.startswith("ERP") or accession.startswith("EGAS"):
-        runs = fetch_runs_ena(accession)
+        return fetch_runs_ena(accession)
     else:
         print(f"Unknown accession prefix for {accession}. Skipping.")
-    return runs
+        return []
 
 def read_accessions(input_file):
-    """
-    Read the input file and return a list of project accessions.
-    The file should contain one accession per line (ignores blank lines and comments starting with '#').
-    """
     accessions = []
     try:
         with open(input_file, "r") as f:
@@ -211,40 +190,53 @@ def main():
         description="Download run accessions for a list of project accessions sequentially.",
         epilog="Example usage: python download_runs.py projects.txt --email your_email@example.com --api-key YOUR_API_KEY"
     )
-    parser.add_argument("input_file", help="Input file (txt/tsv/csv) with one project accession per line.")
-    parser.add_argument("-o", "--output_file", default="run_accessions.csv",
-                        help="Output CSV file name (default: run_accessions.csv).")
+    parser.add_argument("input_file", help="Input file with one project accession per line.")
+    parser.add_argument("-o", "--output_file", default="run_accessions.csv", help="CSV output file name.")
+    parser.add_argument("--fail-log", default="failed_accessions.log", help="File to log failed accessions.")
     parser.add_argument("--email", help="Your email address (required for NCBI queries).")
     parser.add_argument("--api-key", help="Your NCBI API key (optional).")
     args = parser.parse_args()
 
-    # Get email and API key (prompt if not provided via flags)
     email = args.email if args.email else input("Enter your email (required for NCBI queries): ").strip()
     api_key = args.api_key if args.api_key else input("Enter your NCBI API key (press enter if none): ").strip()
 
     accessions = read_accessions(args.input_file)
-    results = []  # List of tuples: (Project Accession, Run Accession)
+    results = []
+    failed = []
 
     for accession in accessions:
-        print(f"Processing accession: {accession}")
-        run_list = process_accession(accession, email, api_key)
-        if run_list:
-            for run in run_list:
-                results.append((accession, run))
-        else:
-            results.append((accession, "No run accessions found"))
-        # Pause briefly to avoid overloading servers.
+        print(f"\n🔍 Processing: {accession}")
+        try:
+            run_list = process_accession(accession, email, api_key)
+            if run_list:
+                results.extend([(accession, run) for run in run_list])
+            else:
+                results.append((accession, "No run accessions found"))
+                failed.append((accession, "No run accessions found"))
+        except Exception as e:
+            print(f"❌ Failed to process {accession}: {e}")
+            failed.append((accession, str(e)))
+            results.append((accession, "ERROR"))
+
         time.sleep(0.5)
 
-    # Write the results sequentially to a CSV file.
     try:
-        with open(args.output_file, mode="w", newline="") as csvfile:
+        with open(args.output_file, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(["Project Accession", "Run Accession"])
             writer.writerows(results)
-        print(f"Results saved to {args.output_file}")
+        print(f"\n✅ Results saved to {args.output_file}")
     except Exception as e:
-        print(f"Error writing to {args.output_file}: {e}")
+        print(f"Error writing CSV: {e}")
+
+    if failed:
+        try:
+            with open(args.fail_log, "w") as flog:
+                for acc, reason in failed:
+                    flog.write(f"{acc}\t{reason}\n")
+            print(f"⚠️ Failed accessions logged to {args.fail_log}")
+        except Exception as e:
+            print(f"Error writing failure log: {e}")
 
 if __name__ == '__main__':
     main()
