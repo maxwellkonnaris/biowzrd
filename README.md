@@ -126,7 +126,7 @@ Packages required: biopython
 ```bash
 conda create -n sra_downloader -y
 conda activate sra_downloader
-conda install -y selenium requests beautifulsoup4 tqdm firefox geckodriver
+conda install -y selenium requests beautifulsoup4 tqdm firefox geckodriver sra-tools entrez-direct enaBrowserTools
 conda install -y -c conda-forge awscli wget
 ```
 5. run python obtainrawfastqdownloadlinks.py
