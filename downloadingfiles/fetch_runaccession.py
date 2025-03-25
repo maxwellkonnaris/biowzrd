@@ -13,6 +13,12 @@ except ImportError:
     print("Error: Biopython is required but not installed. Please install it (e.g., pip install biopython) and try again.")
     sys.exit(1)
 
+# Attempt to import pysradb for fallback on GEO accessions.
+try:
+    from pysradb import SRAweb
+except ImportError:
+    SRAweb = None
+
 def get_run_accessions_ncbi(accession, email, api_key):
     """
     For accessions starting with PRJNA* or SRP*, use Bio.Entrez to search SRA,
@@ -22,7 +28,7 @@ def get_run_accessions_ncbi(accession, email, api_key):
     if api_key:
         Entrez.api_key = api_key
     try:
-        # Search SRA for the accession
+        # Search SRA for the accession.
         handle = Entrez.esearch(db="sra", term=accession)
         record = Entrez.read(handle)
         handle.close()
@@ -31,14 +37,16 @@ def get_run_accessions_ncbi(accession, email, api_key):
             return []
         # Fetch run info using the list of IDs.
         try:
-            handle = Entrez.efetch(db="sra", id=",".join(id_list), rettype="runinfo", retmode="text")
+            handle = Entrez.efetch(db="sra", id=",".join(id_list),
+                                   rettype="runinfo", retmode="text")
             text = handle.read()
             handle.close()
         except Exception as e:
             if "HTTP Error 429" in str(e):
                 print(f"HTTP 429 received for {accession}, waiting before retrying...")
                 time.sleep(5)
-                handle = Entrez.efetch(db="sra", id=",".join(id_list), rettype="runinfo", retmode="text")
+                handle = Entrez.efetch(db="sra", id=",".join(id_list),
+                                       rettype="runinfo", retmode="text")
                 text = handle.read()
                 handle.close()
             else:
@@ -52,7 +60,7 @@ def get_run_accessions_ncbi(accession, email, api_key):
         try:
             run_index = header.index("Run")
         except ValueError:
-            run_index = 0  # fallback if "Run" is not found
+            run_index = 0  # fallback if "Run" not found
         runs = []
         for line in lines[1:]:
             cols = line.split(",")
@@ -65,68 +73,85 @@ def get_run_accessions_ncbi(accession, email, api_key):
 
 def get_run_accessions_geo(accession, email, api_key):
     """
-    For GEO accessions (GSE*), search the gds database,
-    then use elink to connect to SRA and fetch run info.
+    For GEO accessions (GSE*), first try to use Bio.Entrez to search the gds
+    database and link to SRA. If that fails (or returns no runs) and pysradb
+    is available, fall back to pysradb to retrieve run accessions.
     """
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
+    runs = []
+    # First attempt: use Entrez.
     try:
-        # Search gds for the GEO accession
         handle = Entrez.esearch(db="gds", term=accession)
         record = Entrez.read(handle)
         handle.close()
         id_list = record.get("IdList", [])
-        if not id_list:
-            return []
-        # Use elink to link from gds to sra
-        handle = Entrez.elink(dbfrom="gds", db="sra", id=",".join(id_list))
-        record = Entrez.read(handle)
-        handle.close()
-        sra_ids = []
-        for rec in record:
-            if "LinkSetDb" in rec and rec["LinkSetDb"]:
-                for link in rec["LinkSetDb"][0]["Link"]:
-                    sra_ids.append(link["Id"])
-        if not sra_ids:
-            return []
-        # Fetch run info using the linked SRA IDs.
-        try:
-            handle = Entrez.efetch(db="sra", id=",".join(sra_ids), rettype="runinfo", retmode="text")
-            text = handle.read()
-            handle.close()
-        except Exception as e:
-            if "HTTP Error 429" in str(e):
-                print(f"HTTP 429 received for GEO accession {accession}, waiting before retrying...")
-                time.sleep(5)
-                handle = Entrez.efetch(db="sra", id=",".join(sra_ids), rettype="runinfo", retmode="text")
-                text = handle.read()
+        if id_list:
+            try:
+                handle = Entrez.elink(dbfrom="gds", db="sra", id=",".join(id_list))
+                record = Entrez.read(handle)
                 handle.close()
-            else:
-                raise e
-        if isinstance(text, bytes):
-            text = text.decode("utf-8")
-        lines = text.strip().split("\n")
-        if len(lines) < 2:
-            return []
-        header = lines[0].split(",")
-        try:
-            run_index = header.index("Run")
-        except ValueError:
-            run_index = 0
-        runs = []
-        for line in lines[1:]:
-            cols = line.split(",")
-            if len(cols) > run_index:
-                runs.append(cols[run_index].strip())
-        return runs
+                sra_ids = []
+                for rec in record:
+                    if "LinkSetDb" in rec and rec["LinkSetDb"]:
+                        for link in rec["LinkSetDb"][0]["Link"]:
+                            sra_ids.append(link["Id"])
+                if sra_ids:
+                    try:
+                        handle = Entrez.efetch(db="sra", id=",".join(sra_ids),
+                                               rettype="runinfo", retmode="text")
+                        text = handle.read()
+                        handle.close()
+                    except Exception as e:
+                        if "HTTP Error 429" in str(e):
+                            print(f"HTTP 429 received for GEO accession {accession}, waiting before retrying...")
+                            time.sleep(5)
+                            handle = Entrez.efetch(db="sra", id=",".join(sra_ids),
+                                                   rettype="runinfo", retmode="text")
+                            text = handle.read()
+                            handle.close()
+                        else:
+                            raise e
+                    if isinstance(text, bytes):
+                        text = text.decode("utf-8")
+                    lines = text.strip().split("\n")
+                    if len(lines) >= 2:
+                        header = lines[0].split(",")
+                        try:
+                            run_index = header.index("Run")
+                        except ValueError:
+                            run_index = 0
+                        for line in lines[1:]:
+                            cols = line.split(",")
+                            if len(cols) > run_index:
+                                runs.append(cols[run_index].strip())
+            except Exception as e:
+                if "Couldn't resolve #exLinkSrv2" in str(e):
+                    print(f"Warning: GEO accession {accession} does not link to SRA runs via Entrez.")
+                else:
+                    print(f"Error linking GEO accession {accession} to SRA: {e}")
     except Exception as e:
-        print(f"Error using Bio.Entrez for GEO accession {accession}: {e}")
-        return []
+        print(f"Error searching gds for GEO accession {accession}: {e}")
+    
+    # If no runs were found via Entrez and pysradb is available, try fallback.
+    if not runs and SRAweb is not None:
+        try:
+            print(f"Falling back to pysradb for GEO accession {accession}")
+            db = SRAweb()
+            # Query using the GEO accession; this returns a DataFrame.
+            df = db.sra_metadata(geo=accession, detailed=True)
+            if not df.empty and "run_accession" in df.columns:
+                runs = df["run_accession"].dropna().unique().tolist()
+        except Exception as e:
+            print(f"Error using pysradb for GEO accession {accession}: {e}")
+    
+    return runs
 
 def fetch_runs_ena(accession):
     """
-    For accessions starting with PRJEB*, ERP*, or EGAS*, use the ENA API to fetch run accessions.
+    For accessions starting with PRJEB*, ERP*, or EGAS*,
+    use the ENA API to fetch run accessions.
     """
     url = "https://www.ebi.ac.uk/ena/portal/api/filereport"
     params = {
@@ -187,7 +212,8 @@ def main():
         epilog="Example usage: python download_runs.py projects.txt --email your_email@example.com --api-key YOUR_API_KEY"
     )
     parser.add_argument("input_file", help="Input file (txt/tsv/csv) with one project accession per line.")
-    parser.add_argument("-o", "--output_file", default="run_accessions.csv", help="Output CSV file name (default: run_accessions.csv).")
+    parser.add_argument("-o", "--output_file", default="run_accessions.csv",
+                        help="Output CSV file name (default: run_accessions.csv).")
     parser.add_argument("--email", help="Your email address (required for NCBI queries).")
     parser.add_argument("--api-key", help="Your NCBI API key (optional).")
     args = parser.parse_args()
@@ -207,7 +233,7 @@ def main():
                 results.append((accession, run))
         else:
             results.append((accession, "No run accessions found"))
-        # Pause briefly to avoid overloading servers
+        # Pause briefly to avoid overloading servers.
         time.sleep(0.5)
 
     # Write the results sequentially to a CSV file.
