@@ -13,3 +13,5 @@ while read -r study_id; do
     echo "✅ Submitted job for $study_id"
 done < "$STUDY_FILE"
 
+rm -rf run_accessions.lock
+
