@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-download_fastq.py
+download_rawfastq.py
 
 Download raw FASTQ files in parallel from paths specified in a tab-separated file.
 Each line must contain two columns: 'accession' and 'download_path'.
@@ -14,7 +14,7 @@ Example input (download_links.txt):
     ...
 
 Usage:
-    python download_fastq.py --input download_links.txt [--output raw_fastq_files] [--verbose]
+    python download_rawfastq.py --input download_links.txt [--output raw_fastq_files] [--verbose]
 
 Options:
     --input <str>       Path to the tab-separated input file (required).
