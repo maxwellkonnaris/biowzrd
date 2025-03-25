@@ -29,19 +29,30 @@ def get_run_accessions_ncbi(accession, email, api_key):
         id_list = record.get("IdList", [])
         if not id_list:
             return []
-        # Fetch run info using the list of IDs
-        handle = Entrez.efetch(db="sra", id=",".join(id_list), rettype="runinfo", retmode="text")
-        text = handle.read()
-        handle.close()
+        # Fetch run info using the list of IDs.
+        try:
+            handle = Entrez.efetch(db="sra", id=",".join(id_list), rettype="runinfo", retmode="text")
+            text = handle.read()
+            handle.close()
+        except Exception as e:
+            if "HTTP Error 429" in str(e):
+                print(f"HTTP 429 received for {accession}, waiting before retrying...")
+                time.sleep(5)
+                handle = Entrez.efetch(db="sra", id=",".join(id_list), rettype="runinfo", retmode="text")
+                text = handle.read()
+                handle.close()
+            else:
+                raise e
+        if isinstance(text, bytes):
+            text = text.decode("utf-8")
         lines = text.strip().split("\n")
         if len(lines) < 2:
             return []
-        # Determine the column index for "Run" (should be present in the header)
         header = lines[0].split(",")
         try:
             run_index = header.index("Run")
         except ValueError:
-            run_index = 0  # Fallback if not found
+            run_index = 0  # fallback if "Run" is not found
         runs = []
         for line in lines[1:]:
             cols = line.split(",")
@@ -80,9 +91,21 @@ def get_run_accessions_geo(accession, email, api_key):
         if not sra_ids:
             return []
         # Fetch run info using the linked SRA IDs.
-        handle = Entrez.efetch(db="sra", id=",".join(sra_ids), rettype="runinfo", retmode="text")
-        text = handle.read()
-        handle.close()
+        try:
+            handle = Entrez.efetch(db="sra", id=",".join(sra_ids), rettype="runinfo", retmode="text")
+            text = handle.read()
+            handle.close()
+        except Exception as e:
+            if "HTTP Error 429" in str(e):
+                print(f"HTTP 429 received for GEO accession {accession}, waiting before retrying...")
+                time.sleep(5)
+                handle = Entrez.efetch(db="sra", id=",".join(sra_ids), rettype="runinfo", retmode="text")
+                text = handle.read()
+                handle.close()
+            else:
+                raise e
+        if isinstance(text, bytes):
+            text = text.decode("utf-8")
         lines = text.strip().split("\n")
         if len(lines) < 2:
             return []
@@ -116,7 +139,6 @@ def fetch_runs_ena(accession):
         r = requests.get(url, params=params, timeout=30)
         r.raise_for_status()
         lines = r.text.strip().split("\n")
-        # Skip header line if present.
         if len(lines) > 1:
             runs = [line.strip() for line in lines[1:] if line.strip()]
         else:
