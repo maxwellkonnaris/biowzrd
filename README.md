@@ -89,16 +89,16 @@ Packages required: biopython
      +-----------------------------+           |       +-----------------------------+  
      | Job Script for Each ITEM    |        COMPLETE   |    check_accessions.py      | 
      +-----------------------------+           |       +-----------------------------+     
-             |                                 |                      ^
-             v                                 |                      |
+             |                                 |                       ^
+             v                                 |                       |
    +-------------------------------+           |        +-----------------------------+ 
    |        download_fastq.py      |           |        |  check_doublecheckfastq.py  |
    +-------------------------------+           |        +-----------------------------+ 
-      | env vars (e.g. ACCESSION)              v        
-      | download + fallback logic      +-------------------------------+                
-      | metadata processing            | Job Script for remaining .SRA |
-      | token release (atexit)         +-------------------------------+ 
-      | checkpoint logging                
+      | env vars (e.g. ACCESSION)              |                 ^
+      | download + fallback logic              v                 |
+      | metadata processing            +-------------------------------+
+      | token release (atexit)         | Job Script for remaining .SRA |
+      | checkpoint logging             +-------------------------------+   
 ```
 3. run binary file execute_slurmmultijob.sh passing in the arguments below as an example:
 
