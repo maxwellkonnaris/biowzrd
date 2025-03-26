@@ -109,12 +109,11 @@ Packages required: biopython
   -o completed_accessions.txt \
   -m 20 \
   -p fastq_ \
-  -C "python downloadingfiles/download_fastq.py" \
-  -T "04:00:00" \
-  -M "8G" \
+  -C "python download_fastq.py" \
   --api-key "your-ncbi-api-key" \
   --email "you@example.com" \
   --export "WORKDIR=$(pwd); CHECKPOINT_FILE=$(pwd)/completed_accessions.txt; CHECKPOINT_LOCK_FILE=$(pwd)/checkpoint.lock; DEBUG_LOCK=$(pwd)/debug.lock; TOKEN_FILE=$(pwd)/.job_tokens; TOKEN_LOCK_FILE=$(pwd)/.job_tokens.lock; COMBINED_METADATA=$(pwd)/combined_metadata.tsv"
+   --dynamic-resources
 
 ```
 
