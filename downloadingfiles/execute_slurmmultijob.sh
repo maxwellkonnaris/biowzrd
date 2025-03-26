@@ -264,9 +264,9 @@ estimate_resources() {
 
   # Set thresholds (tune as needed)
 if (( size_bytes > 20000000000 )); then      # >20 GB
-    time="12:00:00"; mem="8G"; cpus="8"
+    time="12:00:00"; mem="10G"; cpus="10"
   elif (( size_bytes > 5000000000 )); then       # >5 GB
-    time="03:00:00"; mem="6G"; cpus="4"
+    time="03:00:00"; mem="6G"; cpus="6"
   else                                           # Small
     time="01:00:00"; mem="4G"; cpus="4"
   fi
