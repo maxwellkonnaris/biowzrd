@@ -100,7 +100,7 @@ def release_token():
     """
     Mimics the bash 'release_token' function:
     - Locks token file
-    - Increments the token count
+    - Increments the token count safely
     - Logs the release using the current ACCESSION from env.
     """
     accession = read_env_var("ACCESSION")
@@ -111,14 +111,27 @@ def release_token():
     try:
         with open(tokenlock_file, "r+") as lf:
             flock_exclusive(lf)
-            with open(token_file, "r") as tf:
-                current_tokens = int(tf.read().strip())
+
+            # Safely read the current token count
+            try:
+                with open(token_file, "r") as tf:
+                    contents = tf.read().strip()
+                    if not contents:
+                        log_debug_message(tokenlock_file, f"⚠️ WARNING: token file was empty when accessed by {accession}")
+                    current_tokens = int(contents) if contents.isdigit() else 0
+            except Exception as read_err:
+                current_tokens = 0
+                log_debug_message(tokenlock_file, f"⚠️ WARNING: Failed to read token file: {read_err}")
+
+            # Increment and write back
             new_tokens = current_tokens + 1
             with open(token_file, "w") as tf:
-                tf.write(str(new_tokens) + "\n")
-            # Log the token release
+                tf.write(f"{new_tokens}\n")
+
+            # Log the release
             with open(os.path.join(workdir, "token_audit.log"), "a") as ta:
                 ta.write(f"[{time.ctime()}] RELEASED TOKEN FOR {accession} (NOW {new_tokens})\n")
+
     except Exception as e:
         with open(os.path.join(workdir, "lock_errors.log"), "a") as errf:
             errf.write(f"[{time.ctime()}] FAILED LOCK FOR {accession}: {str(e)}\n")
@@ -294,7 +307,7 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
     sra_file = os.path.join(fastq_dir, f"{accession}.sra")
 
     print(f"🔹 [Fallback] Prefetching SRA file for {accession}")
-    cmd_prefetch = ["prefetch", accession, "--output-file", sra_file]
+    cmd_prefetch = ["prefetch", accession, "--max-size", "100G", "--output-file", sra_file]
     try:
         run_command(cmd_prefetch, f"❌ ERROR: {accession} prefetch failed")
     except RuntimeError as e:
