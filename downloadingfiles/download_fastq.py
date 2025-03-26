@@ -206,7 +206,8 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
         "--outdir", fastq_dir,
         "--threads", threads,
         "--mem", mem,
-        "--split-3"
+        "--split-files",
+        "--include-technical"
     ]
     try:
         run_command(cmd_fasterq, f"ERROR: {accession} fasterq-dump failed")
