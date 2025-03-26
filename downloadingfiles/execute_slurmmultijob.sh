@@ -213,6 +213,58 @@ cleanup_successful_jobs() {
   flock -u "$CHECKPOINT_LOCK_FILE"
 }
 
+estimate_resources() {
+  local accession="$1"
+  local provider=""
+  local size_bytes=0
+  local time="01:00:00"
+  local mem="8G"
+  local cpus="2"
+
+  local prefix="${accession:0:3}"
+  case "$prefix" in
+    SRR|SRX|SRS|SRP)
+      provider="sra"
+      ;;
+    ERR|ERX|ERS|ERP|DRR|DRX|DRS|DRP)
+      provider="ena"
+      ;;
+    *)
+      echo "Unknown provider for accession $accession" >&2
+      echo "$time $mem $cpus"
+      return
+      ;;
+  esac
+
+  # Estimate size
+  if [[ "$provider" == "sra" ]]; then
+    size_bytes=$(esummary -db sra -id "$accession" | xtract -pattern DocumentSummary -element Size 2>/dev/null)
+  else
+    size_bytes=$(curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${accession}&result=read_run&fields=fastq_bytes" \
+      | tail -n +2 | tr ',' '\n' | awk '{s+=$1} END {print s}')
+  fi
+
+  # Default to 0 if unset or failed
+  [[ -z "$size_bytes" || ! "$size_bytes" =~ ^[0-9]+$ ]] && size_bytes=0
+
+  # Set thresholds (tune as needed)
+  if (( size_bytes > 100000000000 )); then       # >100 GB
+    time="24:00:00"; mem="32G"; cpus="8"
+  elif (( size_bytes > 60000000000 )); then      # >60 GB
+    time="10:00:00"; mem="24G"; cpus="6"
+  elif (( size_bytes > 20000000000 )); then      # >20 GB
+    time="05:00:00"; mem="16G"; cpus="4"
+  elif (( size_bytes > 5000000000 )); then       # >5 GB
+    time="02:00:00"; mem="12G"; cpus="2"
+  else                                           # Small
+    time="01:00:00"; mem="8G"; cpus="2"
+  fi
+
+  echo "$time $mem $cpus"
+}
+
+read SLURM_TIME SLURM_MEM CPUS < <(estimate_resources "$ITEM")
+
 ########################################
 # submit_job function
 ########################################
@@ -251,7 +303,7 @@ submit_job() {
 #SBATCH --error=${LOG_DIR}/${ITEM}.err
 #SBATCH --time=${SLURM_TIME}
 #SBATCH --mem=${SLURM_MEM}
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=${CPUS}
 #SBATCH --ntasks=1
 
 set -euo pipefail
