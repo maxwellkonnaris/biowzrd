@@ -49,6 +49,7 @@ USER_EXPORTS=""
 WORKDIR="$(pwd)"
 LOG_DIR="${WORKDIR}/logs"
 JOBS_DIR="${WORKDIR}/jobs"
+#MET_DIR="${WORKDIR}/metadata"
 
 TOKEN_FILE="${WORKDIR}/.job_tokens"
 TOKEN_LOCK_FILE="${WORKDIR}/.job_tokens.lock"
@@ -133,13 +134,15 @@ done
 ########################################
 # Setup directories/files
 ########################################
-mkdir -p "$JOBS_DIR" "$LOG_DIR"
+mkdir -p "$JOBS_DIR" "$LOG_DIR" #"$MET_DIR"
 touch "$COMPLETED_FILE"
+touch "$CHECKPOINT_LOCK_FILE" 
 
 # Initialize the token file if missing
-if [[ ! -f "$TOKEN_FILE" ]]; then
+if ! [[ -f "$TOKEN_FILE" && "$(cat "$TOKEN_FILE")" =~ ^[0-9]+$ ]]; then
   echo "$MAX_JOBS" > "$TOKEN_FILE"
 fi
+
 
 ########################################
 # periodic_reset function
@@ -260,8 +263,11 @@ ${ENV_EXPORTS}
 ${JOB_COMMAND}
 
 # Run the command and capture exit status
+EXIT_CODE=0
+set +e
 ${JOB_COMMAND}
-STATUS=\$?
+EXIT_CODE=$?
+set -e
 echo "Exit code: \$STATUS" >> "${LOG_DIR}/${ITEM}.debug.log"
 
 # Only write to checkpoint if the command succeeded
