@@ -8,7 +8,7 @@
 #   5) Exports environment variables (like NCBI_API_KEY) to each job
 #
 # Example usage:
-#   sbatch main_concurrent_submit.sh \
+#   sbatch execute_slurmmultijob.sh \
 #       -i run_accessions.txt \
 #       -o completed_accessions.txt \
 #       -m 20 \
