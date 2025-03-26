@@ -81,24 +81,24 @@ Packages required: biopython
         +-------------------------------------------------+
         |             execute_slurmmultijob.sh            |
         +-------------------------------------------------+
-          |         ^         |                |
-          |         |         |                |
-   submit_job  cleanup   manage tokens         |
-         |                                     |
-         v                                     |
-     +-----------------------------+           |
-     | Job Script for Each ITEM    |        COMPLETE
-     +-----------------------------+           |
-             |                                 |
-             v                                 v 
+          |         ^         |                |         ^ 
+          |         |         |                |         |
+   submit_job  cleanup   manage tokens         |         | _ _ _ _ _ _
+         |                                     |                       |
+         v                                     |                       |
+     +-----------------------------+           |       +-----------------------------+  
+     | Job Script for Each ITEM    |        COMPLETE   |    check_accessions.py      | 
+     +-----------------------------+           |       +-----------------------------+     
+             |                                 |                ^
+             v                                 v                |
    +-------------------------------+   +-------------------------------+   
    |        download_fastq.py      |   |   check_doublecheckfastq.py   |
    +-------------------------------+   +-------------------------------+
-      | env vars (e.g. ACCESSION)         | 
-      | download + fallback logic         |
-      | metadata processing               |
-      | token release (atexit)            |
-      | checkpoint logging                |
+      | env vars (e.g. ACCESSION)                     
+      | download + fallback logic                     
+      | metadata processing               
+      | token release (atexit)            
+      | checkpoint logging                
 ```
 3. run binary file execute_slurmmultijob.sh passing in the arguments below as an example:
 
