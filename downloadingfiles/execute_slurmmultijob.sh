@@ -41,6 +41,11 @@ JOB_COMMAND="echo 'Processing \$ITEM'"
 SLURM_TIME="02:00:00"
 SLURM_MEM="8G"
 CPUS="4"
+THIS_JOB_ID="${SLURM_JOB_ID}"
+ORIGINAL_COMMAND="sbatch $0 $@"
+START_TIME="$(date +%s)"
+MAX_RUNTIME=$(( 47 * 3600 -60 ))
+
 
 # Let user optionally define an API key, plus arbitrary "export" lines
 NCBI_API_KEY=""
@@ -330,7 +335,7 @@ if [[ \$STATUS -eq 0 ]]; then
     echo "\${ITEM}" >> "${COMPLETED_FILE}"
   } 200>"${CHECKPOINT_LOCK_FILE}"
 else
-  echo "❌ Job failed, not checkpointing" >> "${LOG_DIR}/${ITEM}.debug.log"
+  echo "Job failed, not checkpointing" >> "${LOG_DIR}/${ITEM}.debug.log"
   exit \$STATUS
 fi
 EOF
@@ -348,6 +353,17 @@ CLEANUP_COUNTER=0
 
 # Read each line of the items file
 while IFS= read -r ITEM; do
+
+  # Check run time
+  CURRENT_TIME=$(date +%s)
+  ELAPSED=$(( CURRENT_TIME - START_TIME ))
+  if (( ELAPSED > MAX_RUNTIME )); then
+    echo "Time nearly up (47:59). Resubmitting job..."
+    echo "$ORIGINAL_COMMAND"
+    $ORIGINAL_COMMAND
+    exit 0
+  fi
+  
   # Skip if already completed
   grep -Fxq "$ITEM" "$COMPLETED_FILE" && continue
   ITEM=$(echo "$ITEM" | xargs)
