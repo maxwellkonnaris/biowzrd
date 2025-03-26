@@ -6,7 +6,6 @@ Follow these steps to **clone the repository** and **run the setup script** to c
    conda create -n biowzrd
    conda activate biowzrd
    conda install git-lfs -y
-   conda install -c hcc aspera-cli -y
    ```
 3. Clone the Repository from GitHub, run:
    ```bash
