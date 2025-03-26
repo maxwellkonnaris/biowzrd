@@ -51,6 +51,7 @@ MAX_RUNTIME=$(( 47 * 3600 -60 ))
 NCBI_API_KEY=""
 EMAIL=""
 USER_EXPORTS=""
+DYNAMIC_RESOURCES=0  
 
 WORKDIR="$(pwd)"
 LOG_DIR="${WORKDIR}/logs"
@@ -78,6 +79,7 @@ usage() {
   echo "  --email <str>    NCBI Email account address (your-email@email.edu)"
   echo "  --api-key <key>  NCBI API key or any other single-value key"
   echo "  --export <str>   Additional environment exports (e.g. 'VAR1=val VAR2=val')"
+  echo "  --dynamic-resources  Dynamically estimate time/mem/CPUs per job"
   echo "  -h               Show this help message"
   exit 1
 }
@@ -130,6 +132,10 @@ while [[ $# -gt 0 ]]; do
     --export)
       USER_EXPORTS="$2"
       shift 2
+      ;;
+    --dynamic-resources)
+      DYNAMIC_RESOURCES=1
+      shift
       ;;
     -h)
       usage
@@ -269,7 +275,6 @@ if (( size_bytes > 20000000000 )); then      # >20 GB
   echo "$time $mem $cpus"
 }
 
-read SLURM_TIME SLURM_MEM CPUS < <(estimate_resources "$ITEM")
 
 ########################################
 # submit_job function
@@ -395,7 +400,11 @@ while IFS= read -r ITEM; do
     esac
   done
 
+  if [[ "$DYNAMIC_RESOURCES" == "1" ]]; then
+    read SLURM_TIME SLURM_MEM CPUS < <(estimate_resources "$ITEM")
+  fi
   submit_job "$ITEM"
+
 
   if (( ++CLEANUP_COUNTER >= 20 )); then
     cleanup_successful_jobs &
