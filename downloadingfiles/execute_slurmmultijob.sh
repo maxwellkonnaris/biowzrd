@@ -259,11 +259,21 @@ ${ENV_EXPORTS}
 # The user-specified command:
 ${JOB_COMMAND}
 
-# If the command succeeds, append to checkpoint:
-{
-  flock 200
-  echo "\${ITEM}" >> "${COMPLETED_FILE}"
-} 200>"${CHECKPOINT_LOCK_FILE}"
+# Run the command and capture exit status
+${JOB_COMMAND}
+STATUS=\$?
+echo "Exit code: \$STATUS" >> "${LOG_DIR}/${ITEM}.debug.log"
+
+# Only write to checkpoint if the command succeeded
+if [[ \$STATUS -eq 0 ]]; then
+  {
+    flock 200
+    echo "\${ITEM}" >> "${COMPLETED_FILE}"
+  } 200>"${CHECKPOINT_LOCK_FILE}"
+else
+  echo "❌ Job failed, not checkpointing" >> "${LOG_DIR}/${ITEM}.debug.log"
+  exit \$STATUS
+fi
 EOF
 
   chmod +x "$JOB_SCRIPT"
