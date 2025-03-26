@@ -224,6 +224,7 @@ submit_job() {
   ENV_EXPORTS=$(
     cat <<EOF
 export ITEM="${ITEM}"
+export ACCESSION="${ITEM}"
 EOF
   )
 
