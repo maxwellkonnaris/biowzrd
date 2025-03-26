@@ -92,7 +92,7 @@ Packages required: biopython
              |                                 |
              v                                 v 
    +-------------------------------+   +-------------------------------+   
-   | python download_fastq.py      |   |   check_doublecheckfastq.sh   |
+   |        download_fastq.py      |   |   check_doublecheckfastq.sh   |
    +-------------------------------+   +-------------------------------+
       | env vars (e.g. ACCESSION)         |
       | download + fallback logic         |
