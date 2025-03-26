@@ -92,9 +92,9 @@ Packages required: biopython
              |                                 |
              v                                 v 
    +-------------------------------+   +-------------------------------+   
-   |        download_fastq.py      |   |   check_doublecheckfastq.sh   |
+   |        download_fastq.py      |   |   check_doublecheckfastq.py   |
    +-------------------------------+   +-------------------------------+
-      | env vars (e.g. ACCESSION)         |
+      | env vars (e.g. ACCESSION)         | 
       | download + fallback logic         |
       | metadata processing               |
       | token release (atexit)            |
