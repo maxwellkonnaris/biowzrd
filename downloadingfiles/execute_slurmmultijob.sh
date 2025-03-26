@@ -221,12 +221,9 @@ submit_job() {
   [[ -z "$ITEM" ]] && return
 
   # Build environment exports with proper newlines
-  ENV_EXPORTS=$(
-    cat <<EOF
-export ITEM="${ITEM}"
-export ACCESSION="${ITEM}"
-EOF
-  )
+  ENV_EXPORTS="export ITEM=\"${ITEM}\""
+  ENV_EXPORTS+=$'\n'"export ACCESSION=\"${ITEM}\""
+
 
   if [[ -n "$NCBI_API_KEY" ]]; then
     ENV_EXPORTS+=$'\n'"export NCBI_API_KEY=\"${NCBI_API_KEY}\""
@@ -246,34 +243,33 @@ EOF
   cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
 #SBATCH --export=ALL
-#SBATCH --job-name=\${JOB_NAME_PREFIX}\${ITEM}
-#SBATCH --output=\${LOG_DIR}/\${ITEM}.out
-#SBATCH --error=\${LOG_DIR}/\${ITEM}.err
-#SBATCH --time=\${SLURM_TIME}
-#SBATCH --mem=\${SLURM_MEM}
+#SBATCH --job-name=${JOB_NAME_PREFIX}${ITEM}
+#SBATCH --output=${LOG_DIR}/${ITEM}.out
+#SBATCH --error=${LOG_DIR}/${ITEM}.err
+#SBATCH --time=${SLURM_TIME}
+#SBATCH --mem=${SLURM_MEM}
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
 set -euo pipefail
 
 # Environment exports
-\${ENV_EXPORTS}
+${ENV_EXPORTS}
 
 # The user-specified command:
-\${JOB_COMMAND}
+${JOB_COMMAND}
 
 # If the command succeeds, append to checkpoint:
 {
   flock 200
-  echo "\${ITEM}" >> "\${COMPLETED_FILE}"
-} 200>"\${CHECKPOINT_LOCK_FILE}"
+  echo "\${ITEM}" >> "${COMPLETED_FILE}"
+} 200>"${CHECKPOINT_LOCK_FILE}"
 EOF
 
-  chmod +x "\$JOB_SCRIPT"
-  sbatch "\$JOB_SCRIPT"
-  echo "Submitted job for item: \$ITEM"
+  chmod +x "$JOB_SCRIPT"
+  sbatch "$JOB_SCRIPT"
+  echo "Submitted job for item: $ITEM"
 }
-
 
 
 ########################################
