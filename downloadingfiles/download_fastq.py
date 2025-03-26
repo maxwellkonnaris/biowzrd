@@ -190,7 +190,7 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
     """
     sra_file = os.path.join(fastq_dir, f"{accession}.sra")
 
-    print(f"🔹 [Fallback] Prefetching SRA file for {accession}")
+    print(f"Prefetching SRA file for {accession}")
     cmd_prefetch = ["prefetch", accession, "--max-size", "100G", "--output-file", sra_file]
     try:
         run_command(cmd_prefetch, f"ERROR: {accession} prefetch failed")
@@ -199,7 +199,20 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
         return False
     time.sleep(2)
 
-    print(f"🔹 [Fallback] Converting SRA to FASTQ for {accession}")
+    print(f"Running vdb-validate for {accession}")
+    cmd_validate = ["vdb-validate", sra_file]
+    try:
+        result = subprocess.run(cmd_validate, capture_output=True, text=True)
+        if result.returncode != 0:
+            log_debug_message(debug_lock_path, f"ERROR: {accession} vdb-validate failed:\n{result.stderr}")
+            return False
+        else:
+            print(" vdb-validate passed")
+    except Exception as e:
+        log_debug_message(debug_lock_path, f"ERROR: {accession} vdb-validate exception: {e}")
+        return False
+
+    print(f"Converting SRA to FASTQ for {accession}")
     cmd_fasterq = [
         "fasterq-dump",
         sra_file,
@@ -263,8 +276,43 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
     for f in all_fastqs:
         is_valid_fastq(f, min_size_bytes=1024)
 
-
     return True
+
+def classify_fastq_by_read_type(accession, fastq_dir, debug_lock_path):
+    """
+    Use vdb-dump to classify compressed FASTQ files into biological or technical read directories.
+    """
+    try:
+        print(f"[Classify] Getting READ_TYPE for {accession}")
+        cmd_read_type = f"vdb-dump {accession} -C READ_TYPE | head -n 1"
+        result = subprocess.run(cmd_read_type, shell=True, capture_output=True, text=True)
+        line = result.stdout.strip()
+
+        if "READ_TYPE:" in line:
+            types_part = line.split(":", 1)[1].strip()
+            read_types = [t.strip() for t in types_part.split(",")]
+
+            bio_dir = os.path.join(fastq_dir, "fastq_biologicaldata")
+            tech_dir = os.path.join(fastq_dir, "fastq_technicaldata")
+            os.makedirs(bio_dir, exist_ok=True)
+            os.makedirs(tech_dir, exist_ok=True)
+
+            for i, read_type in enumerate(read_types):
+                gz_filename = f"{accession}_{i+1}.fastq.gz"
+                src_path = os.path.join(fastq_dir, gz_filename)
+                if not os.path.exists(src_path):
+                    continue
+
+                dest_dir = bio_dir if "BIOLOGICAL" in read_type else tech_dir
+                dest_path = os.path.join(dest_dir, gz_filename)
+                print(f"  Moving {src_path} → {dest_path}")
+                shutil.move(src_path, dest_path)
+
+        else:
+            log_debug_message(debug_lock_path, f"WARNING: {accession} Could not parse READ_TYPE info")
+
+    except Exception as e:
+        log_debug_message(debug_lock_path, f"WARNING: {accession} FASTQ classification failed: {e}")
 
 ##########################
 # Main entry point
@@ -298,8 +346,8 @@ if __name__ == "__main__":
     threads = os.cpu_count()
     mem_bytes = psutil.virtual_memory().available
     mem_gb = int(mem_bytes / (1024**3))
+    mem = f"{mem_gb}G"
     
-
     fastq_dir    = os.path.join(workdir, "fastq_data")
     metadata_dir = os.path.join(workdir, "metadata")
     os.makedirs(fastq_dir, exist_ok=True)
@@ -309,28 +357,21 @@ if __name__ == "__main__":
     def on_exit():
         release_token()
 
+    # Pipeline
     print(f"[DEBUG] Accession={accession}", flush=True)
-
-
     ok = sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, checkpoint_lock, threads, mem)
     if not ok:
         sys.exit(1)
-
-    # Compress any leftover .fastq files
     compress_fastqs(fastq_dir, accession, debug_lock)
-
-    # Check for .fastq.gz files
     gz_pattern = os.path.join(fastq_dir, f"{accession}*.fastq.gz")
     found_gz = glob.glob(gz_pattern)
     if not found_gz:
         log_debug_message(debug_lock, f"ERROR: {accession} No FASTQ files found after process.")
         sys.exit(1)
     is_valid_gzip(gz_pattern)
+    classify_fastq_by_read_type(accession, fastq_dir, debug_lock)
     cleanup_invalid_fastqs(fastq_dir, accession)
     sra_file_path = os.path.join(fastq_dir, f"{accession}.sra")
     remove_file_safely(sra_file_path, accession, debug_lock)
-    
-    # Append accession to checkpoint file
     append_to_checkpoint(accession, checkpoint_file, checkpoint_lock)
-
     print(f"Success: {accession}")
