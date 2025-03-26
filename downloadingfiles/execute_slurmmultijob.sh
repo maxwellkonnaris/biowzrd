@@ -14,11 +14,10 @@
 #       -m 20 \
 #       -p fastq_ \
 #       -C "python /path/to/download_accession.py" \
-#       -T "04:00:00" \
-#       -M "8G" \
 #       --email "XXXXX" \
 #       --api-key "XXXXXX" \
 #       --export "WORKDIR=$(pwd)"
+#       --dynamic-resources
 
 
 #SBATCH --export=ALL
