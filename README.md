@@ -113,13 +113,8 @@ Packages required: biopython
   -M "8G" \
   --api-key "your-ncbi-api-key" \
   --email "you@example.com" \
-  --export "WORKDIR=$(pwd) \
-            CHECKPOINT_FILE=$(pwd)/completed_accessions.txt \
-            CHECKPOINT_LOCK_FILE=$(pwd)/checkpoint.lock \
-            DEBUG_LOCK=$(pwd)/debug.lock \
-            TOKEN_FILE=$(pwd)/.job_tokens \
-            TOKEN_LOCK_FILE=$(pwd)/.job_tokens.lock \
-            COMBINED_METADATA=$(pwd)/combined_metadata.tsv 
+  --export "WORKDIR=$(pwd); CHECKPOINT_FILE=$(pwd)/completed_accessions.txt; CHECKPOINT_LOCK_FILE=$(pwd)/checkpoint.lock; DEBUG_LOCK=$(pwd)/debug.lock; TOKEN_FILE=$(pwd)/.job_tokens; TOKEN_LOCK_FILE=$(pwd)/.job_tokens.lock; COMBINED_METADATA=$(pwd)/combined_metadata.tsv"
+
 ```
 
 4. Alternatively, if you want/have access to the raw fastq files. I've created a web scraper that works with the same output from obtainstudyaccessions.sh. First create a conda environment:
