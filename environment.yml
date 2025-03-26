@@ -29,6 +29,7 @@ dependencies:
   - sra-tools
   - enaBrowserTools
   - git-lfs
+  - pigz
   - r-base
   - r-ggplot2
   - r-dplyr
