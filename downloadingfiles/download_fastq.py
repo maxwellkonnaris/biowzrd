@@ -117,11 +117,11 @@ def release_token():
                 with open(token_file, "r") as tf:
                     contents = tf.read().strip()
                     if not contents:
-                        log_debug_message(tokenlock_file, f"⚠️ WARNING: token file was empty when accessed by {accession}")
+                        log_debug_message(tokenlock_file, f"WARNING: token file was empty when accessed by {accession}")
                     current_tokens = int(contents) if contents.isdigit() else 0
             except Exception as read_err:
                 current_tokens = 0
-                log_debug_message(tokenlock_file, f"⚠️ WARNING: Failed to read token file: {read_err}")
+                log_debug_message(tokenlock_file, f"WARNING: Failed to read token file: {read_err}")
 
             # Increment and write back
             new_tokens = current_tokens + 1
@@ -147,23 +147,6 @@ def compress_fastqs(fastq_dir, accession, debug_lock_path):
                 run_command(["pigz", "-p", str(threads), fq], f"ERROR: {accession} pigz failed on {fq}")
             except RuntimeError as e:
                 log_debug_message(debug_lock_path, str(e))
-
-def guess_ena_ftp_paths(accession):
-    """
-    Return a list of possible ftp paths for a given ENA accession.
-    """
-    base_ftp = "ftp.sra.ebi.ac.uk/vol1/fastq"
-    prefix = accession[:6]  # e.g. ERR119
-    suffix = accession[6:]   # e.g. 3450
-
-    paths = [
-        f"{base_ftp}/{prefix}/{suffix}/{accession}",
-        f"{base_ftp}/{prefix}/00{suffix[-1]}/{accession}",
-        f"{base_ftp}/{prefix}/{suffix[-3:]}/{accession}",
-        f"{base_ftp}/{prefix}/{accession}",
-    ]
-    unique_paths = list(dict.fromkeys(paths))
-    return unique_paths
 
 def flatten_xml_to_dict(element, path=""):
     """
@@ -200,7 +183,7 @@ def cleanup_invalid_fastqs(fastq_dir, accession):
             removed = True
     return removed
 
-def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path, checkpoint_lock):
+def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path, checkpoint_lock, threads, mem):
     """
     Attempt SRA route: prefetch + fasterq-dump + SRA metadata.
     Return True if successful, else False.
@@ -221,8 +204,8 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
         "fasterq-dump",
         sra_file,
         "--outdir", fastq_dir,
-        "--threads", "4",
-        "--mem", "8G",
+        "--threads", threads,
+        "--mem", mem,
         "--split-3"
     ]
     try:
@@ -276,6 +259,10 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
         log_debug_message(debug_lock_path, f"ERROR: {accession} No .fastq from fallback SRA route.")
         return False
 
+    for f in all_fastqs:
+        is_valid_fastq(f, min_size_bytes=1024)
+
+
     return True
 
 ##########################
@@ -284,7 +271,7 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
 if __name__ == "__main__":
 
     check_required_tools([
-        "enaDataGet", "prefetch", "fasterq-dump",
+        "prefetch", "fasterq-dump",
         "esearch", "efetch", "wget", "curl", "gzip", "pigz"
     ])
     
@@ -307,6 +294,10 @@ if __name__ == "__main__":
     debug_lock      = read_env_var("DEBUG_LOCK")
     token_file      = read_env_var("TOKEN_FILE")
     tokenlock_file  = read_env_var("TOKEN_LOCK_FILE")
+    threads = os.cpu_count()
+    mem_bytes = psutil.virtual_memory().available
+    mem_gb = int(mem_bytes / (1024**3))
+    
 
     fastq_dir    = os.path.join(workdir, "fastq_data")
     metadata_dir = os.path.join(workdir, "metadata")
@@ -320,7 +311,7 @@ if __name__ == "__main__":
     print(f"[DEBUG] Accession={accession}", flush=True)
 
 
-    ok = sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, checkpoint_lock)
+    ok = sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, checkpoint_lock, threads, mem)
     if not ok:
         sys.exit(1)
 
@@ -333,12 +324,12 @@ if __name__ == "__main__":
     if not found_gz:
         log_debug_message(debug_lock, f"ERROR: {accession} No FASTQ files found after process.")
         sys.exit(1)
-
+    is_valid_gzip(gz_pattern)
+    cleanup_invalid_fastqs(fastq_dir, accession)
+    sra_file_path = os.path.join(fastq_dir, f"{accession}.sra")
+    remove_file_safely(sra_file_path, accession, debug_lock)
+    
     # Append accession to checkpoint file
     append_to_checkpoint(accession, checkpoint_file, checkpoint_lock)
 
-    # Cleanup any leftover .sra file
-    sra_file_path = os.path.join(fastq_dir, f"{accession}.sra")
-    remove_file_safely(sra_file_path, accession, debug_lock)
-
-    print(f"✅ Successfully processed {accession}")
+    print(f"Success: {accession}")
