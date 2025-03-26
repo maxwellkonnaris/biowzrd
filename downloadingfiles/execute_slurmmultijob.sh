@@ -40,6 +40,7 @@ JOB_NAME_PREFIX="concurrent_"
 JOB_COMMAND="echo 'Processing \$ITEM'"
 SLURM_TIME="02:00:00"
 SLURM_MEM="8G"
+CPUS="4"
 
 # Let user optionally define an API key, plus arbitrary "export" lines
 NCBI_API_KEY=""
@@ -95,6 +96,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -p)
       JOB_NAME_PREFIX="$2"
+      shift 2
+      ;;
+    -c)
+      CPUS="$2"
       shift 2
       ;;
     -C)
@@ -214,14 +219,14 @@ cleanup_successful_jobs() {
 }
 
 estimate_resources() {
-  local accession="$1"
+  local ITEM="$1"
   local provider=""
   local size_bytes=0
   local time="01:00:00"
-  local mem="8G"
-  local cpus="2"
+  local mem="1G"
+  local cpus="1"
 
-  local prefix="${accession:0:3}"
+  local prefix="${ITEM:0:3}"
   case "$prefix" in
     SRR|SRX|SRS|SRP)
       provider="sra"
@@ -230,7 +235,7 @@ estimate_resources() {
       provider="ena"
       ;;
     *)
-      echo "Unknown provider for accession $accession" >&2
+      echo "Unknown provider for accession $ITEM" >&2
       echo "$time $mem $cpus"
       return
       ;;
@@ -238,9 +243,9 @@ estimate_resources() {
 
   # Estimate size
   if [[ "$provider" == "sra" ]]; then
-    size_bytes=$(esummary -db sra -id "$accession" | xtract -pattern DocumentSummary -element Size 2>/dev/null)
+    size_bytes=$(esummary -db sra -id "$ITEM" | xtract -pattern DocumentSummary -element Size 2>/dev/null)
   else
-    size_bytes=$(curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${accession}&result=read_run&fields=fastq_bytes" \
+    size_bytes=$(curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ITEM}&result=read_run&fields=fastq_bytes" \
       | tail -n +2 | tr ',' '\n' | awk '{s+=$1} END {print s}')
   fi
 
@@ -248,16 +253,12 @@ estimate_resources() {
   [[ -z "$size_bytes" || ! "$size_bytes" =~ ^[0-9]+$ ]] && size_bytes=0
 
   # Set thresholds (tune as needed)
-  if (( size_bytes > 100000000000 )); then       # >100 GB
-    time="24:00:00"; mem="32G"; cpus="8"
-  elif (( size_bytes > 60000000000 )); then      # >60 GB
-    time="10:00:00"; mem="24G"; cpus="6"
-  elif (( size_bytes > 20000000000 )); then      # >20 GB
-    time="05:00:00"; mem="16G"; cpus="4"
+if (( size_bytes > 20000000000 )); then      # >20 GB
+    time="12:00:00"; mem="8G"; cpus="8"
   elif (( size_bytes > 5000000000 )); then       # >5 GB
-    time="02:00:00"; mem="12G"; cpus="2"
+    time="03:00:00"; mem="6G"; cpus="4"
   else                                           # Small
-    time="01:00:00"; mem="8G"; cpus="2"
+    time="01:00:00"; mem="4G"; cpus="4"
   fi
 
   echo "$time $mem $cpus"
