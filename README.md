@@ -271,3 +271,7 @@ https://www.ebi.ac.uk/metagenomics/api/v1/studies/MGYS00006745
 ```R
 source("theme.R")
 ```
+
+## Garbage, but got it done (garbage/)
+
+This is literally a folder full of garbage scripts that I used to do select analysis. A lot of this code is chatgpt generated (not all) because I just needed to get something done quickly. Was not made for users.
