@@ -8,7 +8,7 @@
 #   5) Exports environment variables (like NCBI_API_KEY) to each job
 #
 # Example usage:
-#   ./main_concurrent_submit.sh \
+#   sbatch main_concurrent_submit.sh \
 #       -i run_accessions.txt \
 #       -o completed_accessions.txt \
 #       -m 20 \
@@ -16,6 +16,7 @@
 #       -C "python /path/to/download_accession.py" \
 #       -T "04:00:00" \
 #       -M "8G" \
+#       --email "XXXXX" \
 #       --api-key "XXXXXX" \
 #       --export "WORKDIR=$(pwd)"
 
@@ -25,15 +26,15 @@
 #SBATCH --output=slurm_%A.out
 #SBATCH --error=slurm_%A.err
 #SBATCH --time=48:00:00
-#SBATCH --mem=4G
+#SBATCH --mem=2G
 #SBATCH --cpus-per-task=1
 #SBATCH --ntasks=1
 
 ########################################
 # Default Config
 ########################################
-ITEMS_FILE="items_to_process.txt"
-COMPLETED_FILE="completed_items.txt"
+ITEMS_FILE="run_accessions.txt"
+COMPLETED_FILE="completed_accessions.txt"
 MAX_JOBS=20
 JOB_NAME_PREFIX="concurrent_"
 JOB_COMMAND="echo 'Processing \$ITEM'"
@@ -67,6 +68,7 @@ usage() {
   echo "  -C <cmd>         Command to run per item (default: \"$JOB_COMMAND\")"
   echo "  -T <time>        Slurm time limit per job (default: $SLURM_TIME)"
   echo "  -M <mem>         Slurm memory per job (default: $SLURM_MEM)"
+  echo "  --email <str>    NCBI Email account address (your-email@email.edu)"
   echo "  --api-key <key>  NCBI API key or any other single-value key"
   echo "  --export <str>   Additional environment exports (e.g. 'VAR1=val VAR2=val')"
   echo "  -h               Show this help message"
@@ -218,26 +220,24 @@ submit_job() {
   ITEM=$(echo "$ITEM" | xargs)
   [[ -z "$ITEM" ]] && return
 
-  # Build environment exports for the job
-  # - We'll always export ITEM
-  # - If user specified an API key, we export that
-  # - If user gave extra export lines, we include them
-  local ENV_EXPORTS=""
-  ENV_EXPORTS+="export ITEM=\"${ITEM}\"\n"
+  # Build environment exports with proper newlines
+  ENV_EXPORTS=$(
+    cat <<EOF
+export ITEM="${ITEM}"
+EOF
+  )
+
   if [[ -n "$NCBI_API_KEY" ]]; then
-    ENV_EXPORTS+="export NCBI_API_KEY=\"${NCBI_API_KEY}\"\n"
+    ENV_EXPORTS+=$'\n'"export NCBI_API_KEY=\"${NCBI_API_KEY}\""
   fi
+
   if [[ -n "$EMAIL" ]]; then
-    ENV_EXPORTS+="export EMAIL=\"${EMAIL}\"\n"
+    ENV_EXPORTS+=$'\n'"export EMAIL=\"${EMAIL}\""
   fi
-  # Additional user exports
+
   if [[ -n "$USER_EXPORTS" ]]; then
-    # Example: "WORKDIR=/my/path FOO=bar"
-    # We'll split on spaces. If you have more complex usage, you can adapt.
-    # You might just embed them verbatim:
-    # ENV_EXPORTS+="${USER_EXPORTS}\n"
     for kv in $USER_EXPORTS; do
-      ENV_EXPORTS+="export $kv\n"
+      ENV_EXPORTS+=$'\n'"export $kv"
     done
   fi
 
@@ -250,7 +250,7 @@ submit_job() {
 #SBATCH --error=${LOG_DIR}/${ITEM}.err
 #SBATCH --time=${SLURM_TIME}
 #SBATCH --mem=${SLURM_MEM}
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=4
 #SBATCH --ntasks=1
 
 set -euo pipefail
@@ -272,6 +272,7 @@ EOF
   sbatch "$JOB_SCRIPT"
   echo "Submitted job for item: $ITEM"
 }
+
 
 ########################################
 # Main logic
