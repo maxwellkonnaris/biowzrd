@@ -3,8 +3,9 @@ channels:
   - conda-forge
   - bioconda
   - defaults
+  - hcc
 dependencies:
-  - python=3.9
+  - python=3.8
   - numpy
   - pandas
   - scipy
@@ -30,6 +31,7 @@ dependencies:
   - enaBrowserTools
   - git-lfs
   - pigz
+  - aspera-cli
   - r-base
   - r-ggplot2
   - r-dplyr
