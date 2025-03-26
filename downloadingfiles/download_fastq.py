@@ -143,7 +143,8 @@ def compress_fastqs(fastq_dir, accession, debug_lock_path):
     for fq in fastq_files:
         if not fq.endswith(".gz"):
             try:
-                run_command(["gzip", fq], f"ERROR: {accession} gzip failed on {fq}")
+                threads = max(1, os.cpu_count() - 1)
+                run_command(["pigz", "-p", str(threads), fq], f"ERROR: {accession} pigz failed on {fq}")
             except RuntimeError as e:
                 log_debug_message(debug_lock_path, str(e))
 
@@ -384,7 +385,7 @@ if __name__ == "__main__":
 
     check_required_tools([
         "enaDataGet", "prefetch", "fasterq-dump",
-        "esearch", "efetch", "wget", "curl", "gzip"
+        "esearch", "efetch", "wget", "curl", "gzip", "pigz"
     ])
     
     args = parse_cli_args()
