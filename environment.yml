@@ -28,6 +28,7 @@ dependencies:
   - muscle
   - sra-tools
   - enaBrowserTools
+  - git-lfs
   - r-base
   - r-ggplot2
   - r-dplyr
