@@ -5,7 +5,7 @@ channels:
   - defaults
   - hcc
 dependencies:
-  - python=3.8
+  - python=3.9
   - numpy
   - pandas
   - scipy
@@ -31,7 +31,6 @@ dependencies:
   - enaBrowserTools
   - git-lfs
   - pigz
-  - aspera-cli
   - r-base
   - r-ggplot2
   - r-dplyr
