@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-#SBATCH --export=ALL
-#SBATCH --job-name=fastq_{ACCESSION}
-#SBATCH --output={WORKDIR}/logs/{ACCESSION}.out
-#SBATCH --error={WORKDIR}/logs/{ACCESSION}.err
-#SBATCH --time=02:00:00
-#SBATCH --mem=8G
-#SBATCH --cpus-per-task=4
-#SBATCH --ntasks=1
-
 import os
 import sys
 import subprocess
