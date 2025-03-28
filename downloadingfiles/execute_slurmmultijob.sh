@@ -58,7 +58,7 @@ JOBS_DIR="${WORKDIR}/jobs"
 #MET_DIR="${WORKDIR}/metadata"
 
 TOKEN_FILE="${LOG_DIR}/.job_tokens"
-TOKEN_LOCK_FILE="${LOG_KDIR}/.job_tokens.lock"
+TOKEN_LOCK_FILE="${LOG_DIR}/.job_tokens.lock"
 CHECKPOINT_LOCK_FILE="${LOG_DIR}/checkpoint.lock"
 PERIODIC_RESET_LOG="${LOG_DIR}/periodic_reset.log"
 CLEANUP_COUNTER=0
