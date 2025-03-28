@@ -288,7 +288,10 @@ submit_job() {
   # Build environment exports with proper newlines
   ENV_EXPORTS="export ITEM=\"${ITEM}\""
   ENV_EXPORTS+=$'\n'"export ACCESSION=\"${ITEM}\""
-
+  ENV_EXPORTS+=$'\n'"export LOG_DIR=\"${LOG_DIR}\""
+  ENV_EXPORTS+=$'\n'"export CHECKPOINT_LOCK_FILE=\"${CHECKPOINT_LOCK_FILE}\""
+  ENV_EXPORTS+=$'\n'"export TOKEN_LOCK_FILE=\"${TOKEN_LOCK_FILE}\""
+  ENV_EXPORTS+=$'\n'"export COMPLETED_FILE=\"${COMPLETED_FILE}\""
 
   if [[ -n "$NCBI_API_KEY" ]]; then
     ENV_EXPORTS+=$'\n'"export NCBI_API_KEY=\"${NCBI_API_KEY}\""
