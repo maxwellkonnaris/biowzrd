@@ -8,6 +8,7 @@ import glob
 import atexit
 import argparse
 import shutil
+import psutil
 import xml.etree.ElementTree as ET
 
 ##########################
