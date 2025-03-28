@@ -315,6 +315,7 @@ submit_job() {
 #SBATCH --mem=${SLURM_MEM}
 #SBATCH --cpus-per-task=${CPUS}
 #SBATCH --ntasks=1
+#SBATCH --account=one
 
 set -euo pipefail
 
