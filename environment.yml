@@ -31,6 +31,7 @@ dependencies:
   - enaBrowserTools
   - git-lfs
   - pigz
+  - psutil
   - r-base
   - r-ggplot2
   - r-dplyr
