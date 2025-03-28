@@ -192,7 +192,7 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
     sra_file = os.path.join(fastq_dir, f"{accession}.sra")
 
     print(f"Prefetching SRA file for {accession}")
-    cmd_prefetch = ["prefetch", accession, "--max-size", "100G", "--output-file", sra_file]
+    cmd_prefetch = ["prefetch", str(accession), "--max-size", "100G", "--output-file", str(sra_file)]
     try:
         run_command(cmd_prefetch, f"ERROR: {accession} prefetch failed")
     except RuntimeError as e:
@@ -217,9 +217,9 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
     cmd_fasterq = [
         "fasterq-dump",
         sra_file,
-        "--outdir", fastq_dir,
-        "--threads", threads,
-        "--mem", mem,
+        "--outdir", str(fastq_dir),
+        "--threads", str(threads),
+        "--mem", str(mem),
         "--split-files",
         "--include-technical"
     ]
