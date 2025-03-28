@@ -331,17 +331,17 @@ set +e
 ${JOB_COMMAND}
 EXIT_CODE=$?
 set -e
-echo "Exit code: \$STATUS" >> "${LOG_DIR}/${ITEM}.debug.log"
+echo "Exit code: $EXIT_CODE" >> "${LOG_DIR}/${ITEM}.debug.log"
 
 # Only write to checkpoint if the command succeeded
-if [[ \$STATUS -eq 0 ]]; then
+if [[ $EXIT_CODE -eq 0 ]]; then
   {
     flock 200
-    echo "\${ITEM}" >> "${COMPLETED_FILE}"
+    echo "${ITEM}" >> "${COMPLETED_FILE}"
   } 200>"${CHECKPOINT_LOCK_FILE}"
 else
   echo "Job failed, not checkpointing" >> "${LOG_DIR}/${ITEM}.debug.log"
-  exit \$STATUS
+  exit $EXIT_CODE
 fi
 EOF
 
