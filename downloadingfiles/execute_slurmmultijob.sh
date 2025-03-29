@@ -310,7 +310,6 @@ submit_job() {
   # Create the job script
   cat <<EOF > "$JOB_SCRIPT"
 #!/bin/bash
-#SBATCH --export=ALL
 #SBATCH --job-name=${JOB_NAME_PREFIX}${ITEM}
 #SBATCH --output=${LOG_DIR}/${ITEM}.out
 #SBATCH --error=${LOG_DIR}/${ITEM}.err
