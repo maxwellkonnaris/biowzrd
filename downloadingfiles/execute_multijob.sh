@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# A general-purpose Slurm batch “driver” script tailored for download_accession.py
+# Slurm batch script for download_accession.py
 #
 
 #SBATCH --export=ALL
@@ -19,7 +19,7 @@ ITEMS_FILE="run_accessions.txt"
 COMPLETED_FILE="completed_accessions.txt"
 MAX_JOBS=20
 JOB_NAME_PREFIX="concurrent_"
-JOB_COMMAND="python3 /path/to/download_accession.py"  # Update this path to your script
+JOB_COMMAND="python3 /path/to/download_accession.py"  # Update this path
 SLURM_TIME="02:00:00"
 SLURM_MEM="8G"
 CPUS="4"
@@ -38,8 +38,9 @@ LOG_DIR="${WORKDIR}/logs"
 JOBS_DIR="${WORKDIR}/jobs"
 TOKEN_FILE="${LOG_DIR}/.job_tokens"
 TOKEN_LOCK_FILE="${LOG_DIR}/.job_tokens.lock"
+CHECKPOINT_FILE="${WORKDIR}/completed_accessions.txt"  # Explicitly set to match Python expectation
 CHECKPOINT_LOCK_FILE="${LOG_DIR}/checkpoint.lock"
-DEBUG_LOCK_FILE="${LOG_DIR}/debug.lock"  # Added for Python script
+DEBUG_LOCK_FILE="${LOG_DIR}/debug.lock"
 PERIODIC_RESET_LOG="${LOG_DIR}/periodic_reset.log"
 CLEANUP_COUNTER=0
 
@@ -55,9 +56,9 @@ usage() {
   echo "  -C <cmd>         Command to run per item (default: \"$JOB_COMMAND\")"
   echo "  -T <time>        Slurm time limit per job (default: $SLURM_TIME)"
   echo "  -M <mem>         Slurm memory per job (default: $SLURM_MEM)"
-  echo "  --email <str>    NCBI Email account address (your-email@email.edu)"
-  echo "  --api-key <key>  NCBI API key or any other single-value key"
-  echo "  --export <str>   Additional environment exports (e.g. 'VAR1=val VAR2=val')"
+  echo "  --email <str>    NCBI Email account address"
+  echo "  --api-key <key>  NCBI API key"
+  echo "  --export <str>   Additional environment exports"
   echo "  --dynamic-resources  Dynamically estimate time/mem/CPUs per job"
   echo "  -h               Show this help message"
   exit 1
@@ -90,11 +91,15 @@ done
 ########################################
 echo "Setting up directories in $WORKDIR" >&2
 mkdir -p "$JOBS_DIR" "$LOG_DIR" || { echo "ERROR: Failed to create $JOBS_DIR or $LOG_DIR" >&2; exit 1; }
-touch "$COMPLETED_FILE" "$CHECKPOINT_LOCK_FILE" "$TOKEN_FILE" "$DEBUG_LOCK_FILE" || { echo "ERROR: Failed to create initial files" >&2; exit 1; }
+touch "$CHECKPOINT_FILE" "$CHECKPOINT_LOCK_FILE" "$TOKEN_FILE" "$DEBUG_LOCK_FILE" || { echo "ERROR: Failed to create initial files" >&2; exit 1; }
 
 # Debug file locations
+echo "[$(date)] Setup:" >> "${LOG_DIR}/setup_debug.log"
+echo "WORKDIR=$WORKDIR" >> "${LOG_DIR}/setup_debug.log"
 echo "LOG_DIR=$LOG_DIR" >> "${LOG_DIR}/setup_debug.log"
 echo "TOKEN_FILE=$TOKEN_FILE" >> "${LOG_DIR}/setup_debug.log"
+echo "TOKEN_LOCK_FILE=$TOKEN_LOCK_FILE" >> "${LOG_DIR}/setup_debug.log"
+echo "CHECKPOINT_FILE=$CHECKPOINT_FILE" >> "${LOG_DIR}/setup_debug.log"
 echo "CHECKPOINT_LOCK_FILE=$CHECKPOINT_LOCK_FILE" >> "${LOG_DIR}/setup_debug.log"
 echo "DEBUG_LOCK_FILE=$DEBUG_LOCK_FILE" >> "${LOG_DIR}/setup_debug.log"
 
@@ -152,7 +157,7 @@ periodic_reset() {
 ########################################
 cleanup_successful_jobs() {
   flock -n "$CHECKPOINT_LOCK_FILE" || { echo "Cleanup skipped: lock held" >> "${LOG_DIR}/lock_errors.log"; return; }
-  tail -n 100 "$COMPLETED_FILE" | while read -r ITEM; do
+  tail -n 100 "$CHECKPOINT_FILE" | while read -r ITEM; do
     ITEM=$(echo "$ITEM" | xargs)
     [[ -z "$ITEM" ]] && continue
 
@@ -214,11 +219,12 @@ submit_job() {
   ITEM=$(echo "$ITEM" | xargs)
   [[ -z "$ITEM" ]] && return
 
+  # Use globally defined variables directly
   ENV_EXPORTS="export ITEM=\"${ITEM}\""
   ENV_EXPORTS+=$'\n'"export ACCESSION=\"${ITEM}\""
   ENV_EXPORTS+=$'\n'"export WORKDIR=\"${WORKDIR}\""
   ENV_EXPORTS+=$'\n'"export LOG_DIR=\"${LOG_DIR}\""
-  ENV_EXPORTS+=$'\n'"export CHECKPOINT_FILE=\"${COMPLETED_FILE}\""
+  ENV_EXPORTS+=$'\n'"export CHECKPOINT_FILE=\"${CHECKPOINT_FILE}\""
   ENV_EXPORTS+=$'\n'"export CHECKPOINT_LOCK_FILE=\"${CHECKPOINT_LOCK_FILE}\""
   ENV_EXPORTS+=$'\n'"export TOKEN_FILE=\"${TOKEN_FILE}\""
   ENV_EXPORTS+=$'\n'"export TOKEN_LOCK_FILE=\"${TOKEN_LOCK_FILE}\""
@@ -245,6 +251,15 @@ set -euo pipefail
 # Environment exports
 ${ENV_EXPORTS}
 
+# Debug environment variables
+echo "Running job for \$ITEM" >> "${LOG_DIR}/${ITEM}.debug.log"
+echo "WORKDIR=\$WORKDIR" >> "${LOG_DIR}/${ITEM}.debug.log"
+echo "CHECKPOINT_FILE=\$CHECKPOINT_FILE" >> "${LOG_DIR}/${ITEM}.debug.log"
+echo "CHECKPOINT_LOCK_FILE=\$CHECKPOINT_LOCK_FILE" >> "${LOG_DIR}/${ITEM}.debug.log"
+echo "TOKEN_FILE=\$TOKEN_FILE" >> "${LOG_DIR}/${ITEM}.debug.log"
+echo "TOKEN_LOCK_FILE=\$TOKEN_LOCK_FILE" >> "${LOG_DIR}/${ITEM}.debug.log"
+echo "DEBUG_LOCK=\$DEBUG_LOCK" >> "${LOG_DIR}/${ITEM}.debug.log"
+
 # Run the command
 EXIT_CODE=0
 set +e
@@ -252,10 +267,6 @@ ${JOB_COMMAND}
 EXIT_CODE=$?
 set -e
 echo "Exit code: \$EXIT_CODE" >> "${LOG_DIR}/${ITEM}.debug.log"
-
-# Token release is handled by Python script via atexit
-
-# Checkpoint is handled by Python script
 EOF
 
   chmod +x "$JOB_SCRIPT" || { echo "ERROR: Failed to make $JOB_SCRIPT executable" >&2; exit 1; }
@@ -276,7 +287,7 @@ while IFS= read -r ITEM; do
     exit 42
   fi
 
-  grep -Fxq "$ITEM" "$COMPLETED_FILE" && continue
+  grep -Fxq "$ITEM" "$CHECKPOINT_FILE" && continue
   ITEM=$(echo "$ITEM" | xargs)
   [[ -z "$ITEM" ]] && continue
 
