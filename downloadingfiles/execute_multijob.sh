@@ -24,6 +24,9 @@ THIS_JOB_ID="${SLURM_JOB_ID:-$$}"
 ORIGINAL_COMMAND="sbatch $0 $@"
 START_TIME="$(date +%s)"
 MAX_RUNTIME=$(( 47 * 3600 - 60 ))
+LAST_RESET_TIME=0
+RESET_INTERVAL=600  
+
 
 NCBI_API_KEY=""
 EMAIL=""
@@ -83,6 +86,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+declare -A COMPLETED
+if [[ -f "$CHECKPOINT_FILE" ]]; then
+  while read -r line; do
+    line=$(echo "$line" | xargs)
+    [[ -n "$line" ]] && COMPLETED["$line"]=1
+  done < "$CHECKPOINT_FILE"
+fi
 ########################################
 # Apply user exports early
 ########################################
@@ -369,13 +379,13 @@ while IFS= read -r ITEM || [[ -n "$ITEM" ]]; do
     exit 42
   fi
 
-  grep -Fxq "$ITEM" "$CHECKPOINT_FILE" && continue
   ITEM=$(echo "$ITEM" | xargs)
   [[ -z "$ITEM" ]] && continue
+  [[ -n "${COMPLETED[$ITEM]}" ]] && continue
 
   RETRY_COUNT=0
   MAX_RETRIES=3600
-  while (( RETRY_COUNT < MAX_RETRIES )); do
+    while (( RETRY_COUNT < MAX_RETRIES )); do
     (
       flock -x 9 || { echo "Lock starvation detected" >> "${LOG_DIR}/lock_errors.log"; exit 99; }
       current_tokens=$(cat "$TOKEN_FILE" 2>/dev/null || echo "0")
@@ -394,8 +404,23 @@ while IFS= read -r ITEM || [[ -n "$ITEM" ]]; do
 
     case $? in
       0) break ;;
-      1) sleep 1; periodic_reset || { echo "Periodic reset failed" >&2; exit 1; }; ((RETRY_COUNT++)) ;;
-      99) sleep 2; ((RETRY_COUNT++)) ;;
+      1)
+        sleep 1
+        CURRENT_TIME=$(date +%s)
+        if (( CURRENT_TIME - LAST_RESET_TIME >= RESET_INTERVAL )); then
+          if periodic_reset; then
+            LAST_RESET_TIME=$CURRENT_TIME
+          else
+            echo "Periodic reset failed" >&2
+            exit 1
+          fi
+        fi
+        ((RETRY_COUNT++))
+        ;;
+      99)
+        sleep 2
+        ((RETRY_COUNT++))
+        ;;
     esac
   done
   if (( RETRY_COUNT >= MAX_RETRIES )); then
