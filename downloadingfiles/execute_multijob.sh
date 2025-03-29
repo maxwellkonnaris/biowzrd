@@ -217,6 +217,9 @@ cleanup_successful_jobs() {
         LOG_ERR="${LOG_DIR}/${ITEM}.err"
         [[ -f "$LOG_OUT" ]] && rm -f "$LOG_OUT" && echo "Removed log file $LOG_OUT" >> "${LOG_DIR}/cleanup.log"
         [[ -f "$LOG_ERR" ]] && rm -f "$LOG_ERR" && echo "Removed log file $LOG_ERR" >> "${LOG_DIR}/cleanup.log"
+
+        DEBUGLOGFILE="${LOG_DIR}/${ITEM}.debug.log"
+        [[ -f "$DEBUGLOGFILE" ]] && rm -f "$DEBUGLOGFILE" && echo "Removed debug log file $DEBUGLOGFILE" >> "${LOG_DIR}/cleanup.log"
       done
       exit 0
     ) 9>"$CHECKPOINT_LOCK_FILE" && return 0
