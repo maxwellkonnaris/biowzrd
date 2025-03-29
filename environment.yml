@@ -32,6 +32,7 @@ dependencies:
   - git-lfs
   - pigz
   - psutil
+  - tenacity
   - r-base
   - r-ggplot2
   - r-dplyr
