@@ -26,13 +26,10 @@ START_TIME="$(date +%s)"
 MAX_RUNTIME=$(( 47 * 3600 - 60 ))
 LAST_RESET_TIME=0
 RESET_INTERVAL=600  
-
-
 NCBI_API_KEY=""
 EMAIL=""
 USER_EXPORTS=""
 DYNAMIC_RESOURCES=0  
-
 WORKDIR="$(pwd)"
 LOG_DIR="${WORKDIR}/logs"
 JOBS_DIR="${WORKDIR}/jobs"
@@ -144,89 +141,87 @@ for cmd in sbatch squeue flock curl python3; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: $cmd is required but not found" >&2; exit 1; }
 done
 
-# Initialize token file with retry
-for attempt in {1..3}; do
-  if ! [[ -f "$TOKEN_FILE" && "$(cat "$TOKEN_FILE")" =~ ^[0-9]+$ ]]; then
-    (
-      flock -x 9 || { echo "ERROR: Failed to lock $TOKEN_LOCK_FILE" >&2; exit 1; }
-      echo "$MAX_JOBS" > "$TOKEN_FILE" || { echo "ERROR: Failed to initialize $TOKEN_FILE" >&2; exit 1; }
-    ) 9>"$TOKEN_LOCK_FILE" && break
-  fi
-  [[ $attempt -lt 3 ]] && sleep 2
-done || { echo "ERROR: Failed to initialize tokens after retries" >&2; exit 1; }
+# Initialize or adjust token file
+if [[ ! -f "$TOKEN_FILE" ]]; then
+  # Token file doesn’t exist, initialize it with MAX_JOBS
+  (
+    flock -x 9
+    echo "$MAX_JOBS" > "$TOKEN_FILE"
+    echo "[$(date)] Initialized token file with $MAX_JOBS tokens" >> "${LOG_DIR}/token_audit.log"
+  ) 9>"$TOKEN_LOCK_FILE"
+else
+  # Token file exists, check running jobs and adjust if needed
+  (
+    flock -x 9
+    current_tokens=$(cat "$TOKEN_FILE")
+    running_jobs=$(squeue --noheader --format '%j' -u "$USER" 2>/dev/null | grep -c "^${JOB_NAME_PREFIX}" || echo "0")
+    expected_tokens=$((MAX_JOBS - running_jobs))
+
+    if [[ ! "$current_tokens" =~ ^[0-9]+$ || $current_tokens -ne $expected_tokens ]]; then
+      echo "$expected_tokens" > "$TOKEN_FILE"
+      echo "[$(date)] Reset token file to $expected_tokens (running jobs: $running_jobs)" >> "${LOG_DIR}/token_audit.log"
+    else
+      echo "[$(date)] Token file OK: $current_tokens tokens, $running_jobs running jobs" >> "${LOG_DIR}/token_audit.log"
+    fi
+  ) 9>"$TOKEN_LOCK_FILE"
+fi
 
 ########################################
 # periodic_reset function
 ########################################
 periodic_reset() {
-  local attempt
-  for attempt in {1..3}; do
-    (
-      flock -x 9 || { echo "ERROR: Failed to lock $TOKEN_LOCK_FILE (attempt $attempt)" >> "${LOG_DIR}/lock_errors.log"; exit 1; }
-      current_tokens=$(cat "$TOKEN_FILE" 2>/dev/null || echo "0")
-      if ! [[ "$current_tokens" =~ ^[0-9]+$ ]]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $TOKEN_FILE invalid: '$current_tokens'. Resetting to $MAX_JOBS." | tee -a "$PERIODIC_RESET_LOG"
-        echo "$MAX_JOBS" > "$TOKEN_FILE"
-        exit 0
-      fi
-
-      RUNNING_JOBS=$(squeue --noheader --format '%j' -u "$USER" 2>/dev/null | grep -c "^${JOB_NAME_PREFIX}" || echo "0")
-      tokens_out=$((MAX_JOBS - current_tokens))
-
-      if (( tokens_out < 0 )); then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: tokens_out < 0 => reset to $MAX_JOBS." | tee -a "$PERIODIC_RESET_LOG"
-        echo "$MAX_JOBS" > "$TOKEN_FILE"
-        exit 0
-      fi
-
-      if (( tokens_out > RUNNING_JOBS )); then
-        mismatch=$(( tokens_out - RUNNING_JOBS ))
-        new_tokens=$(( current_tokens + mismatch ))
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] MISMATCH: tokens_out=$tokens_out, running=$RUNNING_JOBS. Restoring $mismatch tokens." | tee -a "$PERIODIC_RESET_LOG"
-        echo "$new_tokens" > "$TOKEN_FILE"
-      elif (( RUNNING_JOBS > MAX_JOBS )); then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: running=$RUNNING_JOBS exceeds MAX_JOBS=$MAX_JOBS. Limiting to $MAX_JOBS." | tee -a "$PERIODIC_RESET_LOG"
-        echo "0" > "$TOKEN_FILE"  # Force no new jobs until running drops
-      else
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] OK: tokens_out=$tokens_out, running=$RUNNING_JOBS, current_tokens=$current_tokens" >> "$PERIODIC_RESET_LOG"
-      fi
-      exit 0
-    ) 9>"$TOKEN_LOCK_FILE" && return 0
-    sleep $((attempt * 2))
-  done
-  echo "ERROR: Failed to reset tokens after retries" >&2
-  return 1
+  (
+    flock -x 9 || { echo "ERROR: Failed to lock $TOKEN_LOCK_FILE" >&2; exit 1; }
+    
+    # Read current tokens, default to 0 if invalid
+    current_tokens=$(cat "$TOKEN_FILE" 2>/dev/null || echo "0")
+    if [[ ! "$current_tokens" =~ ^[0-9]+$ ]]; then
+      current_tokens=0
+    fi
+    
+    # Count running and pending jobs
+    active_jobs=$(squeue --noheader --format '%j' -u "$USER" -t RUNNING,PENDING 2>/dev/null | grep -c "^${JOB_NAME_PREFIX}" || echo "0")
+    
+    # Calculate expected tokens
+    expected_tokens=$((MAX_JOBS - active_jobs))
+    if (( expected_tokens < 0 )); then
+      expected_tokens=0  # Prevent negative tokens
+    fi
+    
+    # Update token file if misaligned
+    if (( current_tokens != expected_tokens )); then
+      echo "$expected_tokens" > "$TOKEN_FILE"
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Reset tokens to $expected_tokens (active jobs: $active_jobs)" >> "$PERIODIC_RESET_LOG"
+    else
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Tokens OK: $current_tokens (active jobs: $active_jobs)" >> "$PERIODIC_RESET_LOG"
+    fi
+  ) 9>"$TOKEN_LOCK_FILE" || { echo "ERROR: Failed to reset tokens" >&2; return 1; }
+  return 0
 }
 
 ########################################
 # cleanup_successful_jobs function
 ########################################
 cleanup_successful_jobs() {
-  local attempt
-  for attempt in {1..3}; do
-    (
-      flock -n 9 || { echo "Cleanup skipped: lock held (attempt $attempt)" >> "${LOG_DIR}/lock_errors.log"; exit 1; }
-      tail -n 100 "$CHECKPOINT_FILE" | while read -r ITEM; do
-        ITEM=$(echo "$ITEM" | xargs)
-        [[ -z "$ITEM" ]] && continue
-
-        SCRIPT_PATH="${JOBS_DIR}/${ITEM}.sh"
-        [[ -f "$SCRIPT_PATH" ]] && rm -f "$SCRIPT_PATH" && echo "Removed job script for $ITEM" >> "${LOG_DIR}/cleanup.log"
-
-        LOG_OUT="${LOG_DIR}/${ITEM}.out"
-        LOG_ERR="${LOG_DIR}/${ITEM}.err"
-        [[ -f "$LOG_OUT" ]] && rm -f "$LOG_OUT" && echo "Removed log file $LOG_OUT" >> "${LOG_DIR}/cleanup.log"
-        [[ -f "$LOG_ERR" ]] && rm -f "$LOG_ERR" && echo "Removed log file $LOG_ERR" >> "${LOG_DIR}/cleanup.log"
-
-        DEBUGLOGFILE="${LOG_DIR}/${ITEM}.debug.log"
-        [[ -f "$DEBUGLOGFILE" ]] && rm -f "$DEBUGLOGFILE" && echo "Removed debug log file $DEBUGLOGFILE" >> "${LOG_DIR}/cleanup.log"
+  (
+    flock -n 9 || return 0  # Skip if locked, no big deal
+    
+    # Process the last 5000 completed items
+    tail -n 5000 "$CHECKPOINT_FILE" | while read -r ITEM; do
+      ITEM=$(echo "$ITEM" | xargs)
+      [[ -z "$ITEM" ]] && continue
+      
+      # Clean up files, track deletions
+      deleted=0
+      for file in "${JOBS_DIR}/${ITEM}.sh" "${LOG_DIR}/${ITEM}.out" "${LOG_DIR}/${ITEM}.err" "${LOG_DIR}/${ITEM}.debug.log"; do
+        [[ -f "$file" ]] && rm -f "$file" && ((deleted++))
       done
-      exit 0
-    ) 9>"$CHECKPOINT_LOCK_FILE" && return 0
-    sleep $((attempt * 2))
-  done
-  echo "WARNING: Cleanup failed after retries" >&2
-  return 1
+      [[ $deleted -gt 0 ]] && echo "[$(date)] Cleaned $deleted files for $ITEM" >> "${LOG_DIR}/cleanup.log"
+    done
+    
+    exit 0
+  ) 9>"$CHECKPOINT_LOCK_FILE" || return 0
+  return 0
 }
 
 ########################################
@@ -234,39 +229,45 @@ cleanup_successful_jobs() {
 ########################################
 estimate_resources() {
   local ITEM="$1"
-  local provider=""
   local size_bytes=0
-  local time="20:00:00"
-  local mem="10G"
-  local cpus="4"
-
+  local time="10:00:00"  # Default: 10 hours
+  local mem="8G"         # Default: 8 GB
+  local cpus="4"         # Default: 4 CPUs
   local prefix="${ITEM:0:3}"
+
+  # Determine provider
   case "$prefix" in
-    SRR|SRX|SRS|SRP) provider="sra" ;;
-    ERR|ERX|ERS|ERP|DRR|DRX|DRS|DRP) provider="ena" ;;
-    *) echo "Unknown provider for accession $ITEM" >> "${LOG_DIR}/resource_errors.log"; echo "$time $mem $cpus"; return ;;
+    SRR|SRX|SRS|SRP)
+      # SRA: Single attempt, fallback to default if fails
+      size_bytes=$(esummary -db sra -id "$ITEM" 2>/dev/null | xtract -pattern DocumentSummary -element Size 2>/dev/null || echo "0")
+      ;;
+    ERR|ERX|ERS|ERP|DRR|DRX|DRS|DRP)
+      # ENA: Single attempt, sum fastq_bytes
+      size_bytes=$(curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ITEM}&result=read_run&fields=fastq_bytes" \
+        | awk 'NR>1 {split($1, a, ","); for (i in a) s+=a[i]} END {print s+0}' 2>/dev/null || echo "0")
+      ;;
+    *)
+      echo "[$(date)] Unknown provider for $ITEM" >> "${LOG_DIR}/resource_errors.log"
+      echo "$time $mem $cpus"
+      return
+      ;;
   esac
 
-  for attempt in {1..3}; do
-    if [[ "$provider" == "sra" ]]; then
-      size_bytes=$(esummary -db sra -id "$ITEM" 2>/dev/null | xtract -pattern DocumentSummary -element Size 2>/dev/null)
-    else
-      size_bytes=$(curl -s --retry 3 "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ITEM}&result=read_run&fields=fastq_bytes" \
-        | tail -n +2 | tr ',' '\n' | awk '{s+=$1} END {print s}' 2>/dev/null)
-    fi
-    [[ -n "$size_bytes" && "$size_bytes" =~ ^[0-9]+$ ]] && break
-    echo "Retry $attempt: Failed to estimate size for $ITEM" >> "${LOG_DIR}/resource_errors.log"
-    sleep $((attempt * 2))
-  done
+  # Validate size, log if fetch failed
+  if [[ ! "$size_bytes" =~ ^[0-9]+$ || $size_bytes -eq 0 ]]; then
+    echo "[$(date)] Failed to fetch size for $ITEM, using defaults" >> "${LOG_DIR}/resource_errors.log"
+    size_bytes=0
+  fi
 
-  [[ -z "$size_bytes" || ! "$size_bytes" =~ ^[0-9]+$ ]] && { echo "Failed to estimate size for $ITEM" >> "${LOG_DIR}/resource_errors.log"; size_bytes=0; }
-
+  # Assign resources based on size
   if (( size_bytes > 20000000000 )); then      # >20 GB
-    time="12:00:00"; mem="10G"; cpus="10"
+    time="12:00:00"; mem="12G"; cpus="8"
   elif (( size_bytes > 5000000000 )); then    # >5 GB
-    time="03:00:00"; mem="6G"; cpus="6"
-  else                                        # Small
-    time="01:00:00"; mem="4G"; cpus="4"
+    time="04:00:00"; mem="8G"; cpus="6"
+  elif (( size_bytes > 1000000000 )); then    # >1 GB
+    time="02:00:00"; mem="6G"; cpus="4"
+  else                                        # ≤1 GB or unknown
+    time="01:00:00"; mem="4G"; cpus="2"
   fi
 
   echo "$time $mem $cpus"
@@ -318,51 +319,57 @@ for var in WORKDIR CHECKPOINT_FILE CHECKPOINT_LOCK_FILE TOKEN_FILE TOKEN_LOCK_FI
   printf '%s=%s\n' "\$var" "\${!var}" >> "${LOG_DIR}/${ITEM}.debug.log"
 done
 
-# Function to release token
+# Function to release token using flock timeout
 release_token() {
-  for attempt in {1..5}; do
-    (
-      flock -x 9 || exit 1
-      current=\$(cat "\$TOKEN_FILE" 2>/dev/null || echo "0")
-      if [[ "\$current" =~ ^[0-9]+$ ]]; then
-        new=\$((current + 1))
-        echo "\$new" > "\$TOKEN_FILE"
-        echo "[$(date)] RELEASED TOKEN FOR \$ITEM (NOW \$new)" >> "${LOG_DIR}/token_audit.log"
-        exit 0
-      fi
-      echo "Invalid token count: \$current" >> "${LOG_DIR}/token_errors.log"
-      exit 1
-    ) 9>"\$TOKEN_LOCK_FILE" && return 0
-    sleep \$((attempt * 2))
-  done
-  echo "ERROR: Failed to release token for \$ITEM after 5 attempts" >> "${LOG_DIR}/${ITEM}.err"
+  # Open file descriptor 9 for the lock file
+  exec 9>"$TOKEN_LOCK_FILE" || {
+    echo "ERROR: Unable to open lock file $TOKEN_LOCK_FILE" >> "${LOG_DIR}/${ITEM}.err"
+    return 1
+  }
+
+  # Attempt to acquire an exclusive lock, waiting up to 10 seconds
+  if ! flock -x -w 10 9; then
+    echo "ERROR: Failed to acquire lock for $ITEM" >> "${LOG_DIR}/${ITEM}.err"
+    return 1
+  fi
+
+  # Read the current token value, defaulting to 0 if missing
+  current=$(<"$TOKEN_FILE" 2>/dev/null || echo "0")
+
+  # Validate that the token is a non-negative integer
+  if ! [[ "$current" =~ ^[0-9]+$ ]]; then
+    echo "Invalid token count: $current" >> "${LOG_DIR}/token_errors.log"
+    flock -u 9
+    return 1
+  fi
+
+  # Increment the token and write the new value back to the file
+  new=$((current + 1))
+  echo "$new" > "$TOKEN_FILE"
+
+  # Log the token release event with a timestamp
+  echo "[$(date)] RELEASED TOKEN FOR $ITEM (NOW $new)" >> "${LOG_DIR}/token_audit.log"
+
+  # Release the lock
+  flock -u 9
+  return 0
 }
 
-# Trap to ensure token release on exit
+# Ensure that the token is released when the script exits
 trap 'release_token' EXIT
 
 # Run the command with retry
 EXIT_CODE=0
-for attempt in {1..3}; do
-  set +e
-  ${JOB_COMMAND}
-  EXIT_CODE=\$?
-  set -e
-  [[ \$EXIT_CODE -eq 0 ]] && break
-  echo "Attempt \$attempt failed with exit code \$EXIT_CODE. Retrying..." >> "${LOG_DIR}/${ITEM}.debug.log"
-  sleep \$((attempt * 5))
-done
+set +e
+${JOB_COMMAND}
+EXIT_CODE=\$?
+set -e
 echo "Final exit code: \$EXIT_CODE" >> "${LOG_DIR}/${ITEM}.debug.log"
 exit \$EXIT_CODE
 EOF
 
   chmod +x "$JOB_SCRIPT" || { echo "ERROR: Failed to make $JOB_SCRIPT executable" >&2; return 1; }
-  for attempt in {1..3}; do
-    sbatch "$JOB_SCRIPT" && { echo "Submitted job for item: $ITEM" >&2; return 0; }
-    echo "ERROR: Failed to submit $JOB_SCRIPT (attempt $attempt)" >&2
-    sleep $((attempt * 2))
-  done
-  echo "ERROR: Failed to submit $JOB_SCRIPT after retries" >&2
+  sbatch "$JOB_SCRIPT" && { echo "Submitted job for item: $ITEM" >&2; return 0; }
   return 1
 }
 
@@ -434,33 +441,12 @@ while IFS= read -r ITEM || [[ -n "$ITEM" ]]; do
   [[ "$DYNAMIC_RESOURCES" == "1" ]] && read SLURM_TIME SLURM_MEM CPUS < <(estimate_resources "$ITEM")
   submit_job "$ITEM" || { echo "ERROR: Job submission failed for $ITEM" >&2; exit 1; }
 
-  if (( ++CLEANUP_COUNTER >= 20 )); then
+  if (( ++CLEANUP_COUNTER >= 100 )); then
     cleanup_successful_jobs &
     CLEANUP_COUNTER=0
   fi
 done < "$ITEMS_FILE"
 
 cleanup_successful_jobs
-
-# Wait for all tokens to return with timeout
-TIMEOUT=$((60 * 5))  # 5 minutes
-START_WAIT=$(date +%s)
-while true; do
-  CURRENT_WAIT=$(date +%s)
-  ELAPSED_WAIT=$((CURRENT_WAIT - START_WAIT))
-  if (( ELAPSED_WAIT > TIMEOUT )); then
-    echo "ERROR: Timeout waiting for tokens to return (current_tokens=$(cat "$TOKEN_FILE"))" >&2
-    exit 1
-  fi
-  (
-    flock -x 9 || exit 1
-    current_tokens=$(cat "$TOKEN_FILE" 2>/dev/null || echo "0")
-    [[ "$current_tokens" =~ ^[0-9]+$ ]] || { echo "$MAX_JOBS" > "$TOKEN_FILE"; current_tokens=$MAX_JOBS; }
-    [[ "$current_tokens" -eq "$MAX_JOBS" ]] && exit 0
-    exit 1
-  ) 9>"$TOKEN_LOCK_FILE" && break
-  periodic_reset || { echo "Periodic reset failed in final wait" >&2; exit 1; }
-  sleep 5
-done
 
 echo "🎉 All jobs completed!" >&2
