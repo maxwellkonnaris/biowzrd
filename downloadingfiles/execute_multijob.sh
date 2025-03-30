@@ -236,9 +236,9 @@ estimate_resources() {
   local ITEM="$1"
   local provider=""
   local size_bytes=0
-  local time="01:00:00"
-  local mem="1G"
-  local cpus="1"
+  local time="20:00:00"
+  local mem="10G"
+  local cpus="4"
 
   local prefix="${ITEM:0:3}"
   case "$prefix" in
