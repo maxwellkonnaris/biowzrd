@@ -324,7 +324,7 @@ estimate_resources() {
       # Build esummary command with email and API key if provided
       local esummary_cmd="esummary -db sra -id \"$ITEM\""
       [[ -n "$EMAIL" ]] && esummary_cmd="$esummary_cmd -email \"$EMAIL\""
-      [[ -n "$NCBI_API_KEY" ]] && esummary_cmd="$esummary_cmd -api_key \"$NCBI_API_KEY\""
+      [[ -n "$NCBI_API_KEY" ]] && export "$NCBI_API_KEY"
       size_bytes=$($esummary_cmd | xtract -pattern DocumentSummary -block ExpXml -block Summary -element "Statistics@total_size" 2>/dev/null || echo "0")
       echo "[$(date)] DEBUG: SRA fetch for $ITEM returned size_bytes='$size_bytes'" >> "${LOG_DIR}/resource_debug.log"
       if [[ "$size_bytes" == "0" ]]; then
