@@ -76,7 +76,7 @@ def remove_file_safely(path, accession, debug_lock_path):
         try:
             os.remove(path)
         except Exception as e:
-            log_debug_message(debug_lock_path, f"❌ ERROR: {accession} Failed to delete {path}: {e}")
+            log_debug_message(debug_lock_path, f"ERROR: {accession} Failed to delete {path}: {e}")
             raise
 
 def append_to_checkpoint(accession, checkpoint_file, checkpoint_lock):
@@ -159,15 +159,21 @@ def cleanup_invalid_fastqs(fastq_dir, accession):
     return removed
 
 def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path, checkpoint_lock, threads, mem):
+    max_retries = 3
     sra_file = os.path.join(fastq_dir, f"{accession}.sra")
-    print(f"Prefetching SRA file for {accession}")
-    cmd_prefetch = ["prefetch", str(accession), "--max-size", "100G", "--output-file", str(sra_file)]
-    try:
-        run_command(cmd_prefetch, f"ERROR: {accession} prefetch failed", debug_lock_path, accession)
-    except RuntimeError as e:
-        log_debug_message(debug_lock_path, str(e))
-        return False
-    time.sleep(2)
+    
+    for i in range(1, max_retries + 1):
+        print(f"Prefetching SRA file for {accession}: attempt {i}")
+        cmd_prefetch = ["prefetch", str(accession), "--max-size", "200G", "--output-file", str(sra_file)]
+        try:
+            run_command(cmd_prefetch, f"ERROR: {accession} prefetch failed", debug_lock_path, accession)
+            break  # success: exit the loop
+        except RuntimeError as e:
+            log_debug_message(debug_lock_path, f"Attempt {i} failed: {e}")
+            if i == max_retries:
+                return False  # only return False after final failed attempt
+            time.sleep(2)
+
 
     print(f"Running vdb-validate for {accession}")
     cmd_validate = ["vdb-validate", sra_file]
@@ -193,7 +199,6 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
         return False
     time.sleep(2)
 
-    max_retries = 3
     success_meta = False
     csv_path = os.path.join(metadata_dir, f"{accession}-run-info.csv")
     for i in range(1, max_retries + 1):
@@ -252,7 +257,7 @@ def sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock_path
 def classify_fastq_by_read_type(accession, fastq_dir, debug_lock_path):
     try:
         print(f"[Classify] Getting READ_TYPE for {accession}")
-        cmd_read_type = f"vdb-dump {accession} -C READ_TYPE | head -n 1"
+        cmd_read_type = f"vdb-dump {accession} -C READ_TYPE 2>/dev/null | head -n 1"
         result = subprocess.run(cmd_read_type, shell=True, capture_output=True, text=True, check=True)
         line = result.stdout.strip()
 
@@ -266,14 +271,39 @@ def classify_fastq_by_read_type(accession, fastq_dir, debug_lock_path):
             os.makedirs(tech_dir, exist_ok=True)
 
             for i, read_type in enumerate(read_types):
-                gz_filename = f"{accession}_{i+1}.fastq.gz"
-                src_path = os.path.join(fastq_dir, gz_filename)
-                if not os.path.exists(src_path):
-                    continue
+                # First try suffixed filename (e.g., accession_1.fastq.gz)
+                gz_suffixed = f"{accession}_{i+1}.fastq.gz"
+                src_suffixed = os.path.join(fastq_dir, gz_suffixed)
+            
+                # Initialize source path as None
+                src_path = None
+                gz_filename = None
+            
+                if os.path.exists(src_suffixed):
+                    src_path = src_suffixed
+                    gz_filename = gz_suffixed
+                elif i == 0:
+                    # Only try unsuffixed for first read type
+                    gz_unsuffixed = f"{accession}.fastq.gz"
+                    src_unsuffixed = os.path.join(fastq_dir, gz_unsuffixed)
+                    if os.path.exists(src_unsuffixed):
+                        src_path = src_unsuffixed
+                        gz_filename = gz_unsuffixed
+            
+                # If neither file was found, raise an error
+                if src_path is None:
+                    raise FileNotFoundError(
+                        f"Missing FASTQ file for accession {accession}, read_type {read_type}. "
+                        f"Tried: {src_suffixed}" + (f" and {src_unsuffixed}" if i == 0 else "")
+                    )
+            
+                # Determine destination directory (biological or technical)
                 dest_dir = bio_dir if "BIOLOGICAL" in read_type else tech_dir
                 dest_path = os.path.join(dest_dir, gz_filename)
                 print(f"  Moving {src_path} → {dest_path}")
                 shutil.move(src_path, dest_path)
+
+                
         else:
             log_debug_message(debug_lock_path, f"WARNING: {accession} Could not parse READ_TYPE info")
     except subprocess.CalledProcessError as e:
@@ -321,27 +351,72 @@ if __name__ == "__main__":
 
 
     print(f"[DEBUG] Accession={accession}", flush=True)
+
     try:
-        ok = sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, checkpoint_lock, threads, mem)
-        if not ok:
-            raise RuntimeError(f"SRA route failed for {accession}")
-        
-        compress_fastqs(fastq_dir, accession, debug_lock)
-        gz_pattern = os.path.join(fastq_dir, f"{accession}*.fastq.gz")
-        found_gz = glob.glob(gz_pattern)
-        if not found_gz:
-            raise RuntimeError(f"No FASTQ files found after processing {accession}")
-
-        for gz_file in found_gz:
-            if not is_valid_gzip(gz_file):
-                raise RuntimeError(f"Invalid gzip file: {gz_file}")
-
-        classify_fastq_by_read_type(accession, fastq_dir, debug_lock)
-        cleanup_invalid_fastqs(fastq_dir, accession)
-        sra_file_path = os.path.join(fastq_dir, f"{accession}.sra")
-        remove_file_safely(sra_file_path, accession, debug_lock)
-        append_to_checkpoint(accession, checkpoint_file, checkpoint_lock)
+        try:
+            ok = sra_route(accession, fastq_dir, metadata_dir, combined_meta, debug_lock, checkpoint_lock, threads, mem)
+            if not ok:
+                msg = f"[sra_route] SRA route failed for {accession}"
+                log_debug_message(debug_lock, msg)
+                raise RuntimeError(msg)
+        except Exception as e:
+            log_debug_message(debug_lock, f"[sra_route] Exception: {e}")
+            raise
+    
+        try:
+            compress_fastqs(fastq_dir, accession, debug_lock)
+        except Exception as e:
+            log_debug_message(debug_lock, f"[compress_fastqs] Exception: {e}")
+            raise
+    
+        try:
+            gz_pattern = os.path.join(fastq_dir, f"{accession}*.fastq.gz")
+            found_gz = glob.glob(gz_pattern)
+            if not found_gz:
+                msg = f"[glob] No FASTQ files found after compressing {accession}"
+                log_debug_message(debug_lock, msg)
+                raise RuntimeError(msg)
+        except Exception as e:
+            log_debug_message(debug_lock, f"[glob] Exception: {e}")
+            raise
+    
+        try:
+            for gz_file in found_gz:
+                if not is_valid_gzip(gz_file):
+                    msg = f"[is_valid_gzip] Invalid gzip file: {gz_file}"
+                    log_debug_message(debug_lock, msg)
+                    raise RuntimeError(msg)
+        except Exception as e:
+            log_debug_message(debug_lock, f"[is_valid_gzip] Exception: {e}")
+            raise
+    
+        try:
+            classify_fastq_by_read_type(accession, fastq_dir, debug_lock)
+        except Exception as e:
+            log_debug_message(debug_lock, f"[classify_fastq_by_read_type] Exception: {e}")
+            raise
+    
+        try:
+            cleanup_invalid_fastqs(fastq_dir, accession)
+        except Exception as e:
+            log_debug_message(debug_lock, f"[cleanup_invalid_fastqs] Exception: {e}")
+            raise
+    
+        try:
+            sra_file_path = os.path.join(fastq_dir, f"{accession}.sra")
+            remove_file_safely(sra_file_path, accession, debug_lock)
+        except Exception as e:
+            log_debug_message(debug_lock, f"[remove_file_safely] Exception: {e}")
+            raise
+    
+        try:
+            append_to_checkpoint(accession, checkpoint_file, checkpoint_lock)
+        except Exception as e:
+            log_debug_message(debug_lock, f"[append_to_checkpoint] Exception: {e}")
+            raise
+    
         print(f"Success: {accession}")
+    
     except Exception as e:
-        log_debug_message(debug_lock, f"ERROR: {accession} Processing failed: {e}")
+        log_debug_message(debug_lock, f"[FAILURE] Accession {accession} processing failed: {e}")
         sys.exit(1)
