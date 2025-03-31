@@ -103,17 +103,15 @@ Packages required: biopython
 3. run binary file execute_slurmmultijob.sh passing in the arguments below as an example:
 
 ```bash
-./execute_slurmmultijob.sh \
-  -i run_accessions.txt \
-  -o completed_accessions.txt \
-  -m 20 \
-  -p fastq_ \
-  -C "python download_fastq.py" \
-  --api-key "your-ncbi-api-key" \
-  --email "you@example.com" \
-  --export "WORKDIR=$(pwd); CHECKPOINT_FILE=$(pwd)/completed_accessions.txt; CHECKPOINT_LOCK_FILE=$(pwd)/checkpoint.lock; DEBUG_LOCK=$(pwd)/debug.lock; TOKEN_FILE=$(pwd)/.job_tokens; TOKEN_LOCK_FILE=$(pwd)/.job_tokens.lock; COMBINED_METADATA=$(pwd)/combined_metadata.tsv"
-  --dynamic-resources
-
+sbatch execute_slurmmultijob.sh \
+          -i run_accessions.txt \  
+          -o completed_accessions.txt \
+          -m 30 \
+          -p fastq_ \
+          -C "python download_fastq.py" \
+          --api-key "your-ncbi-api-key" \
+          --email "you@example.com" \
+          --export "WORKDIR=$(pwd);"
 ```
 
 4. Alternatively, if you want/have access to the raw fastq files. I've created a web scraper that works with the same output from obtainstudyaccessions.sh. First create a conda environment:
