@@ -11,6 +11,9 @@ import fcntl
 import psutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+# For retries
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 ##########################
 # Locking & Logging Helpers
 ##########################
@@ -76,12 +79,18 @@ def remove_file_safely(path, debug_file, debug_lock):
             log_debug_message(f"[ERROR] remove_file_safely({path}): {e}", debug_file, debug_lock)
 
 ##########################
-# Core Download & Metadata
+# Command Runner with Retry
 ##########################
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(RuntimeError)
+)
 def run_command(cmd_list, err_msg, debug_file, debug_lock):
     """
     Run a shell command with check=True. On failure, log stderr and raise RuntimeError.
+    We retry up to 3 times, with exponential backoff, using tenacity.
     """
     try:
         result = subprocess.run(cmd_list, check=True, text=True, stderr=subprocess.PIPE)
@@ -89,7 +98,12 @@ def run_command(cmd_list, err_msg, debug_file, debug_lock):
     except subprocess.CalledProcessError as e:
         msg = f"{err_msg}:\n{e.stderr}"
         log_debug_message(msg, debug_file, debug_lock)
+        # Raise a RuntimeError so tenacity sees it and retries.
         raise RuntimeError(msg) from e
+
+##########################
+# FASTQ Steps
+##########################
 
 def compress_fastqs(accession, fastq_dir, debug_file, debug_lock):
     """Gzip or pigz all .fastq files for this accession."""
@@ -181,12 +195,18 @@ def classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock):
         log_debug_message(f"[classify] Error for {accession}: {e}",
                           debug_file, debug_lock)
 
+##########################
+# Metadata Fetch
+##########################
+
 def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug_lock):
     """
     Uses esearch/efetch to get run-info CSV, merges it into a combined TSV file
-    with exclusive lock on the debug lock file (to keep it simple).
+    with exclusive lock on the debug lock (for simplicity).
     """
     csv_path = os.path.join(metadata_dir, f"{accession}-run-info.csv")
+    # If user has set EMAIL or NCBI_API_KEY in environment, esearch will pick that up
+    # Or we can pass -email explicitly. For EDirect, environment "EMAIL" is typically enough.
     cmd = f'esearch -db sra -query "{accession}" | efetch -format runinfo > "{csv_path}"'
     ret = subprocess.call(cmd, shell=True)
     if ret != 0 or not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0:
@@ -227,6 +247,10 @@ def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug
     except Exception as e:
         log_debug_message(f"[metadata] Error merging runinfo for {accession}: {e}",
                           debug_file, debug_lock)
+
+##########################
+# SRA Download Route
+##########################
 
 def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta):
     """
@@ -296,13 +320,13 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
     return True
 
 ##########################
-# The Per-Accession Worker
+# Worker Function
 ##########################
 
 def process_accession(accession, args):
     """
     Process one accession:
-      - skip if it fails the sra route
+      - run sra_download_route
       - compress and classify fastqs
       - remove .sra
       - if success => append to completed
@@ -357,41 +381,49 @@ def process_accession(accession, args):
         return msg
 
 ##########################
-# Main: read set of accessions,
-# skip already completed,
-# run concurrency in Python
+# Main
 ##########################
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Download multiple SRA accessions in parallel.")
-    parser.add_argument("--accessions-file", required=True,
-                        help="Path to file containing run accessions, one per line.")
-    parser.add_argument("--workdir", required=True,
-                        help="Working directory for outputs, e.g. fastq_data, metadata, logs.")
-    parser.add_argument("--debug-file", required=True,
-                        help="Path to a shared debug log file.")
-    parser.add_argument("--debug-lock", required=True,
-                        help="Lock file for the debug log.")
-    parser.add_argument("--completed-file", required=True,
-                        help="Path to file listing completed accessions.")
-    parser.add_argument("--completed-lock", required=True,
-                        help="Lock file for the completed-file.")
-    parser.add_argument("--failed-file", required=True,
-                        help="Path to file listing failed accessions.")
-    parser.add_argument("--failed-lock", required=True,
-                        help="Lock file for the failed-file.")
-    parser.add_argument("--combined-metadata", required=True,
-                        help="Path to the combined metadata TSV for runinfo merges.")
+    parser.add_argument("--accessions-file", default="run_accessions.txt",
+                        help="File of run accessions, one per line (default: run_accessions.txt)")
+    parser.add_argument("--workdir", default=".",
+                        help="Working directory for outputs/logs (default: current dir)")
+    parser.add_argument("--debug-file", default="debug.log",
+                        help="Path to a shared debug log file (default: debug.log)")
+    parser.add_argument("--debug-lock", default="debug.lock",
+                        help="Lock file for the debug log (default: debug.lock)")
+    parser.add_argument("--completed-file", default="completed.txt",
+                        help="File listing completed accessions (default: completed.txt)")
+    parser.add_argument("--completed-lock", default="completed.lock",
+                        help="Lock file for the completed-file (default: completed.lock)")
+    parser.add_argument("--failed-file", default="failed.txt",
+                        help="File listing failed accessions (default: failed.txt)")
+    parser.add_argument("--failed-lock", default="failed.lock",
+                        help="Lock file for the failed-file (default: failed.lock)")
+    parser.add_argument("--combined-metadata", default="combined_metadata.tsv",
+                        help="Path to the combined metadata TSV (default: combined_metadata.tsv)")
     parser.add_argument("--num-workers", type=int, default=4,
-                        help="Number of parallel workers. Default=4.")
+                        help="Number of parallel workers (default: 4)")
+    parser.add_argument("--api-key", default=None,
+                        help="NCBI API key (optional). If provided, exported as NCBI_API_KEY.")
+    parser.add_argument("--email", default=None,
+                        help="Email address for EDirect (optional). If provided, exported as EMAIL.")
     return parser.parse_args()
 
 def main():
     args = parse_args()
 
-    # 1) Read all run accessions into a set
+    # If the user provided an API key or email, export them for EDirect / sra-toolkit
+    if args.api_key:
+        os.environ["NCBI_API_KEY"] = args.api_key
+    if args.email:
+        os.environ["EMAIL"] = args.email
+
+    # 1) Read all run accessions into a set (so duplicates are skipped)
     if not os.path.isfile(args.accessions_file):
-        sys.stderr.write(f"[ERROR] --accessions-file does not exist: {args.accessions_file}\n")
+        sys.stderr.write(f"[ERROR] --accessions-file not found: {args.accessions_file}\n")
         sys.exit(1)
     with open(args.accessions_file, "r") as f:
         all_accs = {line.strip() for line in f if line.strip()}
@@ -420,7 +452,8 @@ def main():
     results = []
     with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
         future_map = {}
-        for acc in sorted(to_download):  # sorted optional, just for consistent order
+        # sorted() is optional, just to maintain consistent order
+        for acc in sorted(to_download):
             fut = executor.submit(process_accession, acc, args)
             future_map[fut] = acc
 
@@ -428,10 +461,9 @@ def main():
             acc = future_map[fut]
             try:
                 res = fut.result()
-                print(res)  # e.g. [OK] or [FAIL] for that accession
+                print(res)  # e.g. "[OK] SRR1234" or "[FAIL] SRR9999 => reason"
             except Exception as e:
-                # This shouldn't happen since exceptions are handled in process_accession,
-                # but in case something else goes wrong:
+                # Should be rare if process_accession handles exceptions
                 print(f"[FATAL] Worker error for {acc}: {e}", file=sys.stderr)
 
     print("[INFO] All done.")
