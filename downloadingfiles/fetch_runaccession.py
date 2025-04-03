@@ -88,7 +88,7 @@ def get_run_accessions_geo(accession, email, api_key):
     runs = []
 
     try:
-        handle = safe_entrez_request(Entrez.esearch, db="gds", term=accession)
+        handle = safe_entrez_request(Entrez.esearch, db="gds", term=accession, retmax=30000)
         record = Entrez.read(handle)
         handle.close()
         id_list = record.get("IdList", [])
