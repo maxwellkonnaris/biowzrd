@@ -50,35 +50,55 @@ def get_run_accessions_ncbi(accession, email, api_key):
         Entrez.api_key = api_key
 
     try:
-        handle = safe_entrez_request(Entrez.esearch, db="sra", term=accession)
+        handle = safe_entrez_request(
+            Entrez.esearch,
+            db="sra",
+            term=f"{accession}[BioProject]",
+            retmax=10000  # fetch all
+        )
         record = Entrez.read(handle)
         handle.close()
         id_list = record.get("IdList", [])
         if not id_list:
             return []
 
-        handle = safe_entrez_request(Entrez.efetch, db="sra", id=",".join(id_list),
-                                     rettype="runinfo", retmode="text")
-        text = handle.read()
-        handle.close()
+        runs = []
+        batch_size = 200
+        for i in range(0, len(id_list), batch_size):
+            batch_ids = id_list[i:i + batch_size]
+            handle = safe_entrez_request(
+                Entrez.efetch,
+                db="sra",
+                id=",".join(batch_ids),
+                rettype="runinfo",
+                retmode="text"
+            )
+            text = handle.read()
+            handle.close()
 
-        if isinstance(text, bytes):
-            text = text.decode("utf-8")
-        lines = text.strip().split("\n")
-        if len(lines) < 2:
-            return []
+            if isinstance(text, bytes):
+                text = text.decode("utf-8")
+            lines = text.strip().split("\n")
+            if len(lines) < 2:
+                continue
 
-        header = lines[0].split(",")
-        try:
-            run_index = header.index("Run")
-        except ValueError:
-            run_index = 0
-        runs = [line.split(",")[run_index].strip() for line in lines[1:] if len(line.split(",")) > run_index]
+            header = lines[0].split(",")
+            try:
+                run_index = header.index("Run")
+            except ValueError:
+                run_index = 0
+
+            for line in lines[1:]:
+                cols = line.split(",")
+                if len(cols) > run_index:
+                    runs.append(cols[run_index].strip())
+
         return list(set(runs))
 
     except Exception as e:
         print(f"Error using Bio.Entrez for accession {accession}: {e}")
         return []
+
 
 def get_run_accessions_geo(accession, email, api_key):
     Entrez.email = email
