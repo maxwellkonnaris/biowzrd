@@ -183,7 +183,9 @@ def fetch_runs_ena(accession):
 def process_accession(accession, email, api_key):
     accession = accession.strip()
     if accession.startswith("PRJNA") or accession.startswith("SRP"):
-        return get_run_accessions_ncbi(accession, email, api_key)
+        runs_ncbi = get_run_accessions_ncbi(accession, email, api_key)
+        runs_ena = fetch_runs_ena(accession)
+        return list(set(runs_ncbi + runs_ena))
     elif accession.startswith("GSE"):
         return get_run_accessions_geo(accession, email, api_key)
     elif accession.startswith("PRJEB") or accession.startswith("ERP") or accession.startswith("EGAS"):
@@ -191,7 +193,7 @@ def process_accession(accession, email, api_key):
     else:
         print(f"Unknown accession prefix for {accession}. Skipping.")
         return []
-
+        
 def read_accessions(input_file):
     accessions = []
     try:
