@@ -18,7 +18,7 @@ try:
 except ImportError:
     SRAweb = None
 
-def safe_entrez_request(func, *args, max_retries=5, **kwargs):
+def safe_entrez_request(func, *args, max_retries=2, **kwargs):
     for attempt in range(max_retries):
         try:
             handle = func(*args, **kwargs)
@@ -32,7 +32,7 @@ def safe_entrez_request(func, *args, max_retries=5, **kwargs):
                 raise e
     raise RuntimeError(f"Entrez request failed after {max_retries} retries.")
 
-def safe_requests_get(url, params=None, max_retries=5, timeout=30):
+def safe_requests_get(url, params=None, max_retries=2, timeout=30):
     for attempt in range(max_retries):
         try:
             r = requests.get(url, params=params, timeout=timeout)
@@ -54,7 +54,7 @@ def get_run_accessions_ncbi(accession, email, api_key):
             Entrez.esearch,
             db="sra",
             term=f"{accession}[BioProject]",
-            retmax=10000  # fetch all
+            retmax=100000  # fetch all
         )
         record = Entrez.read(handle)
         handle.close()
@@ -147,7 +147,7 @@ def get_run_accessions_geo(accession, email, api_key):
 
     if not runs and SRAweb is not None:
         db = SRAweb()
-        for attempt in range(5):
+        for attempt in range(2):
             try:
                 print(f"Falling back to pysradb for GEO accession {accession} (attempt {attempt + 1})")
                 df = db.sra_metadata(geo=accession, detailed=True)
