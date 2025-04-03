@@ -74,7 +74,7 @@ def get_run_accessions_ncbi(accession, email, api_key):
         except ValueError:
             run_index = 0
         runs = [line.split(",")[run_index].strip() for line in lines[1:] if len(line.split(",")) > run_index]
-        return runs
+        return list(set(runs))
 
     except Exception as e:
         print(f"Error using Bio.Entrez for accession {accession}: {e}")
@@ -126,20 +126,20 @@ def get_run_accessions_geo(accession, email, api_key):
         print(f"Entrez failed for GEO accession {accession}: {e}")
 
     if not runs and SRAweb is not None:
+        db = SRAweb()
         for attempt in range(5):
             try:
                 print(f"Falling back to pysradb for GEO accession {accession} (attempt {attempt + 1})")
-                db = SRAweb()
                 df = db.sra_metadata(geo=accession, detailed=True)
                 if not df.empty and "run_accession" in df.columns:
-                    runs = df["run_accession"].dropna().unique().tolist()
+                    runs.extend(df["run_accession"].dropna().unique().tolist())
                 break
             except Exception as e:
                 wait_time = 2 ** attempt
                 print(f"pysradb error: {e}. Retrying in {wait_time}s...")
                 time.sleep(wait_time)
 
-    return runs
+    return list(set(runs))
 
 def fetch_runs_ena(accession):
     url = "https://www.ebi.ac.uk/ena/portal/api/filereport"
@@ -153,7 +153,7 @@ def fetch_runs_ena(accession):
         r = safe_requests_get(url, params=params)
         lines = r.text.strip().split("\n")
         if len(lines) > 1:
-            return [line.strip() for line in lines[1:] if line.strip()]
+            return list(set([line.strip() for line in lines[1:] if line.strip()]))
         else:
             return []
     except Exception as e:
@@ -201,20 +201,27 @@ def main():
     email = args.email if args.email else input("Enter your email (required for NCBI queries): ").strip()
     api_key = args.api_key if args.api_key else input("Enter your NCBI API key (press enter if none): ").strip()
 
+    if not email:
+        print("Error: Email is required for NCBI queries.")
+        sys.exit(1)
+
     accessions = read_accessions(args.input_file)
     results = []
     failed = []
     runs_only = []
+    seen_runs = set()
 
     for accession in accessions:
         print(f"\n🔍 Processing: {accession}")
         try:
             run_list = process_accession(accession, email, api_key)
-            if run_list:
-                for run in run_list:
+            for run in run_list:
+                if run not in seen_runs:
                     results.append((accession, run))
                     runs_only.append(run)
-            else:
+                    seen_runs.add(run)
+        
+            if not run_list:
                 results.append((accession, "No run accessions found"))
                 failed.append((accession, "No run accessions found"))
         except Exception as e:
@@ -225,7 +232,7 @@ def main():
         time.sleep(0.5)
 
     try:
-        with open(args.output_file, "w", newline="") as csvfile:
+        with open(args.output_file, "w", newline="", encoding="utf-8-sig") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(["Project Accession", "Run Accession"])
             writer.writerows(results)
