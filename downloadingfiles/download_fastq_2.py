@@ -9,9 +9,8 @@ import glob
 import gzip
 import fcntl
 import psutil
+import atexit 
 from concurrent.futures import ProcessPoolExecutor, as_completed
-
-# For retries
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 ##########################
@@ -83,7 +82,7 @@ def remove_file_safely(path, debug_file, debug_lock):
 ##########################
 
 @retry(
-    stop=stop_after_attempt(3),
+    stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type(RuntimeError)
 )
@@ -412,8 +411,24 @@ def parse_args():
                         help="Email address for EDirect (optional). If provided, exported as EMAIL.")
     return parser.parse_args()
 
+def cleanup_locks(args):
+    """Remove lock files on exit."""
+    lock_files = [args.completed_lock, args.debug_lock, args.failed_lock]
+    for lock_file in lock_files:
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+                # Since this runs on exit, we can't use log_debug_message reliably
+                # (file descriptors might be closed), so print to stderr instead
+                sys.stderr.write(f"[INFO] Removed lock file: {lock_file}\n")
+            except Exception as e:
+                sys.stderr.write(f"[WARN] Failed to remove lock file {lock_file}: {e}\n")
+
 def main():
     args = parse_args()
+
+    # Register cleanup function to run on exit
+    atexit.register(cleanup_locks, args)
 
     # If the user provided an API key or email, export them for EDirect / sra-toolkit
     if args.api_key:
@@ -449,7 +464,6 @@ def main():
     os.makedirs(os.path.dirname(args.debug_file) or args.workdir, exist_ok=True)
 
     # 5) Concurrency: use a ProcessPoolExecutor
-    results = []
     with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
         future_map = {}
         # sorted() is optional, just to maintain consistent order
@@ -462,11 +476,15 @@ def main():
             try:
                 res = fut.result()
                 print(res)  # e.g. "[OK] SRR1234" or "[FAIL] SRR9999 => reason"
+                log_debug_message(res, args.debug_file, args.debug_lock)
             except Exception as e:
                 # Should be rare if process_accession handles exceptions
-                print(f"[FATAL] Worker error for {acc}: {e}", file=sys.stderr)
+                msg = f"[FATAL] Worker error for {acc}: {e}"
+                print(msg, file=sys.stderr)
+                log_debug_message(msg, args.debug_file, args.debug_lock)
 
     print("[INFO] All done.")
 
 if __name__ == "__main__":
     main()
+
