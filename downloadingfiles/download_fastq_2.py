@@ -433,19 +433,48 @@ def final_validation(args):
     bio_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
     fastq_dir = os.path.join(args.workdir, "fastq_data")
 
-    bio_files = {re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1) for f in Path(bio_dir).glob("*.fastq.gz") if re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name)}
+    bio_files = {
+        re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1)
+        for f in Path(bio_dir).glob("*.fastq.gz")
+        if re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name)
+    }
     missing = expected - bio_files
 
+    retry_these = []
     for acc in missing:
-        if not glob.glob(os.path.join(fastq_dir, f"{acc}*")) and not os.path.exists(os.path.join(fastq_dir, f"{acc}.sra")):
+        sra_file = os.path.join(fastq_dir, f"{acc}.sra")
+        fastqs = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
+
+        if not fastqs and not os.path.exists(sra_file):
             log_debug_message(f"[final_validation] {acc} completely missing", args.debug_file, args.debug_lock)
-            append_line_with_lock(acc, args.failed_file, args.failed_lock)
+            retry_these.append(acc)
 
     if not missing:
         log_debug_message("[final_validation] All accessions accounted for in biological data", args.debug_file, args.debug_lock)
     else:
         log_debug_message(f"[final_validation] {len(missing)} accessions still missing after all checks", args.debug_file, args.debug_lock)
 
+    if retry_these:
+        log_debug_message(f"[final_validation] Reprocessing {len(retry_these)} completely missing accessions", args.debug_file, args.debug_lock)
+        for acc in retry_these:
+            try:
+                result = process_accession(acc, args)
+                print(result)
+                log_debug_message(f"[final_validation] Retry result: {result}", args.debug_file, args.debug_lock)
+            except Exception as e:
+                msg = f"[final_validation] Retry failed for {acc}: {e}"
+                print(msg)
+                log_debug_message(msg, args.debug_file, args.debug_lock)
+                append_line_with_lock(acc, args.failed_file, args.failed_lock)
+
+
+def write_sorted_unique_completed(completed_file):
+    if os.path.isfile(completed_file):
+        with open(completed_file, "r") as f:
+            entries = sorted(set(line.strip() for line in f if line.strip()))
+        with open(completed_file, "w") as f:
+            for line in entries:
+                f.write(line + "\n")
 ##########################
 # Main
 ##########################
@@ -537,6 +566,7 @@ def main():
     print("[INFO] Running post-processing checks...")
     check_and_sort_fastqs(args)
     final_validation(args)
+    write_sorted_unique_completed(args.completed_file)
     print("[INFO] All done.")
 
 if __name__ == "__main__":
