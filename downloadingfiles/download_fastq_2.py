@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
 import time
-import argparse
-import subprocess
-import shutil
 import glob
 import gzip
 import fcntl
+import shutil
 import psutil
-import atexit 
+import atexit
+import argparse
+import subprocess
+from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -18,18 +20,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 ##########################
 
 def flock_exclusive(fd):
-    """Acquire an exclusive (write) lock on an open file descriptor."""
     fcntl.flock(fd, fcntl.LOCK_EX)
 
 def flock_release(fd):
-    """Release a lock on an open file descriptor."""
     fcntl.flock(fd, fcntl.LOCK_UN)
 
 def append_line_with_lock(line, out_file, lock_file):
-    """
-    Append one line to 'out_file' using an exclusive lock,
-    so multiple processes do not overwrite each other.
-    """
     try:
         with open(lock_file, "a+") as lk:
             flock_exclusive(lk)
@@ -40,9 +36,6 @@ def append_line_with_lock(line, out_file, lock_file):
         sys.stderr.write(f"[ERROR] Could not append '{line}' to {out_file}: {e}\n")
 
 def log_debug_message(msg, debug_file, debug_lock):
-    """
-    Write a debug message to 'debug_file' with an exclusive lock.
-    """
     try:
         with open(debug_lock, "a+") as lk:
             flock_exclusive(lk)
@@ -57,11 +50,9 @@ def log_debug_message(msg, debug_file, debug_lock):
 ##########################
 
 def is_valid_fastq(path, min_size_bytes=1024):
-    """Check if file exists and is at least min_size_bytes in size."""
     return os.path.isfile(path) and os.path.getsize(path) >= min_size_bytes
 
 def is_valid_gzip(path):
-    """Check if gzip file can be read (at least 1 byte)."""
     try:
         with gzip.open(path, "rb") as f:
             f.read(1)
@@ -70,12 +61,25 @@ def is_valid_gzip(path):
         return False
 
 def remove_file_safely(path, debug_file, debug_lock):
-    """Remove file if it exists, log any error."""
     if os.path.exists(path):
         try:
             os.remove(path)
         except Exception as e:
             log_debug_message(f"[ERROR] remove_file_safely({path}): {e}", debug_file, debug_lock)
+
+def get_read_lengths(fastq_gz):
+    """Extract read lengths from a .fastq.gz file."""
+    lengths = set()
+    try:
+        with gzip.open(fastq_gz, "rt") as f:
+            for i, line in enumerate(f):
+                if i % 4 == 1:  # Sequence line in FASTQ
+                    lengths.add(len(line.strip()))
+                if i >= 400:  # Check first 100 reads (4 lines per read)
+                    break
+        return lengths
+    except Exception as e:
+        return None
 
 ##########################
 # Command Runner with Retry
@@ -87,17 +91,12 @@ def remove_file_safely(path, debug_file, debug_lock):
     retry=retry_if_exception_type(RuntimeError)
 )
 def run_command(cmd_list, err_msg, debug_file, debug_lock):
-    """
-    Run a shell command with check=True. On failure, log stderr and raise RuntimeError.
-    We retry up to 3 times, with exponential backoff, using tenacity.
-    """
     try:
         result = subprocess.run(cmd_list, check=True, text=True, stderr=subprocess.PIPE)
         return result.stdout
     except subprocess.CalledProcessError as e:
         msg = f"{err_msg}:\n{e.stderr}"
         log_debug_message(msg, debug_file, debug_lock)
-        # Raise a RuntimeError so tenacity sees it and retries.
         raise RuntimeError(msg) from e
 
 ##########################
@@ -105,40 +104,32 @@ def run_command(cmd_list, err_msg, debug_file, debug_lock):
 ##########################
 
 def compress_fastqs(accession, fastq_dir, debug_file, debug_lock):
-    """Gzip or pigz all .fastq files for this accession."""
     pattern = os.path.join(fastq_dir, f"{accession}*.fastq")
     fastq_files = glob.glob(pattern)
     compressor = shutil.which("pigz") or shutil.which("gzip")
     if not compressor:
-        raise RuntimeError("No gzip or pigz found on system!")
+        raise RuntimeError("No pigz or gzip found on system!")
 
     for fq in fastq_files:
         if not fq.endswith(".gz"):
             cmd = [compressor]
             if "pigz" in compressor:
-                cmd.extend(["-p", "4"])  # e.g. 4 threads
+                cmd.extend(["-p", "4"])
             cmd.append(fq)
             run_command(cmd, f"[compress_fastqs] {accession} compression failed on {fq}",
                         debug_file, debug_lock)
 
 def cleanup_invalid_fastqs(accession, fastq_dir, debug_file, debug_lock):
-    """Remove any .fastq.gz that appear invalid or too small."""
     gz_files = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz"))
     for gz in gz_files:
         if not is_valid_fastq(gz) or not is_valid_gzip(gz):
-            log_debug_message(f"[WARN] Removing invalid FASTQ: {gz}",
-                              debug_file, debug_lock)
+            log_debug_message(f"[WARN] Removing invalid FASTQ: {gz}", debug_file, debug_lock)
             try:
                 os.remove(gz)
             except Exception as e:
-                log_debug_message(f"[ERROR] while removing {gz}: {e}",
-                                  debug_file, debug_lock)
+                log_debug_message(f"[ERROR] while removing {gz}: {e}", debug_file, debug_lock)
 
 def classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock):
-    """
-    Runs 'vdb-dump <accession> -C READ_TYPE' to figure out BIOLOGICAL vs
-    TECHNICAL reads, then moves them to subfolders.
-    """
     vdb_dump = shutil.which("vdb-dump")
     if not vdb_dump:
         log_debug_message(f"[classify] vdb-dump not found; skipping for {accession}.",
@@ -153,7 +144,6 @@ def classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock):
             log_debug_message(f"[classify] No READ_TYPE info for {accession}.", debug_file, debug_lock)
             return
 
-        # e.g. "READ_TYPE: BIOLOGICAL, BIOLOGICAL" => ["BIOLOGICAL", "BIOLOGICAL"]
         types_part = line.split(":", 1)[1].strip()
         read_types = [t.strip() for t in types_part.split(",")]
 
@@ -171,7 +161,6 @@ def classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock):
                 src_path = src_suffixed
                 gz_filename = gz_suffixed
             elif i == 0:
-                # Single-end might be unsuffixed
                 gz_unsuffixed = f"{accession}.fastq.gz"
                 src_unsuffixed = os.path.join(fastq_dir, gz_unsuffixed)
                 if os.path.exists(src_unsuffixed):
@@ -183,137 +172,98 @@ def classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock):
 
             dest_dir = bio_dir if "BIOLOGICAL" in read_type else tech_dir
             dest_path = os.path.join(dest_dir, gz_filename)
-            log_debug_message(f"[classify] Move {src_path} -> {dest_path}",
-                              debug_file, debug_lock)
+            log_debug_message(f"[classify] Move {src_path} -> {dest_path}", debug_file, debug_lock)
             shutil.move(src_path, dest_path)
 
     except subprocess.CalledProcessError as e:
-        log_debug_message(f"[classify] vdb-dump failed for {accession}:\n{e.stderr}",
-                          debug_file, debug_lock)
+        log_debug_message(f"[classify] vdb-dump failed for {accession}:\n{e.stderr}", debug_file, debug_lock)
     except Exception as e:
-        log_debug_message(f"[classify] Error for {accession}: {e}",
-                          debug_file, debug_lock)
+        log_debug_message(f"[classify] Error for {accession}: {e}", debug_file, debug_lock)
 
 ##########################
 # Metadata Fetch
 ##########################
 
 def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug_lock):
-    """
-    Uses esearch/efetch to get run-info CSV, merges it into a combined TSV file
-    with exclusive lock on the debug lock (for simplicity).
-    """
     csv_path = os.path.join(metadata_dir, f"{accession}-run-info.csv")
-    # If user has set EMAIL or NCBI_API_KEY in environment, esearch will pick that up
-    # Or we can pass -email explicitly. For EDirect, environment "EMAIL" is typically enough.
     cmd = f'esearch -db sra -query "{accession}" | efetch -format runinfo > "{csv_path}"'
     ret = subprocess.call(cmd, shell=True)
     if ret != 0 or not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0:
-        # Not fatal, but log it
         log_debug_message(f"[metadata] Failed to fetch runinfo for {accession} (ret={ret})",
                           debug_file, debug_lock)
         return
 
-    # Convert CSV -> TSV
     tsv_path = csv_path.replace(".csv", ".tsv")
     try:
         with open(csv_path, "r") as inf, open(tsv_path, "w") as outf:
             for line in inf:
                 outf.write(line.replace(",", "\t"))
 
-        # Append to combined file
         os.makedirs(os.path.dirname(combined_meta), exist_ok=True)
         with open(debug_lock, "a+") as lk:
             flock_exclusive(lk)
-            # If combined file doesn't exist, copy the header
             if not os.path.isfile(combined_meta):
                 with open(tsv_path, "r") as t_in:
                     header_line = t_in.readline()
                 with open(combined_meta, "w") as cm:
                     cm.write(header_line)
-            # Now append rows except header
             with open(tsv_path, "r") as t_in, open(combined_meta, "a") as cm:
                 _ = t_in.readline()  # skip header
                 for row in t_in:
                     cm.write(row)
-
             flock_release(lk)
 
-        # Cleanup CSV/TSV
         remove_file_safely(csv_path, debug_file, debug_lock)
         remove_file_safely(tsv_path, debug_file, debug_lock)
 
     except Exception as e:
-        log_debug_message(f"[metadata] Error merging runinfo for {accession}: {e}",
-                          debug_file, debug_lock)
+        log_debug_message(f"[metadata] Error merging runinfo for {accession}: {e}", debug_file, debug_lock)
 
 ##########################
 # SRA Download Route
 ##########################
 
 def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta):
-    """
-    1) prefetch .sra
-    2) vdb-validate
-    3) fasterq-dump (with adaptive memory)
-    4) fetch SRA metadata
-    5) ensure we got .fastq
-    Returns True if success, False if error
-    """
     fastq_dir = os.path.join(workdir, "fastq_data")
     metadata_dir = os.path.join(workdir, "metadata")
 
-    # Step 0: check memory at runtime
     mem_bytes = psutil.virtual_memory().available
     mem_gb = int(mem_bytes / (1024**3))
     mem_str = f"{mem_gb}G"
 
     sra_file = os.path.join(fastq_dir, f"{accession}.sra")
 
-    # 1) prefetch
     try:
         run_command(["prefetch", accession, "--max-size", "200G", "--output-file", sra_file],
-                    f"[sra_download_route] prefetch failed {accession}",
-                    debug_file, debug_lock)
+                    f"[sra_download_route] prefetch failed {accession}", debug_file, debug_lock)
     except RuntimeError:
         return False
 
-    # 2) vdb-validate
     try:
-        subprocess.run(["vdb-validate", sra_file], check=True,
-                       capture_output=True, text=True)
+        subprocess.run(["vdb-validate", sra_file], check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         log_debug_message(f"[sra_download_route] vdb-validate failed {accession}:\n{e.stderr}",
                           debug_file, debug_lock)
         return False
 
-    # 3) fasterq-dump
     try:
         run_command([
-            "fasterq-dump", sra_file,
-            "--outdir", fastq_dir,
-            "--threads", str(os.cpu_count()),
-            "--mem", mem_str,
-            "--split-files",
-            "--include-technical"
-        ], f"[sra_download_route] fasterq-dump failed {accession}",
-           debug_file, debug_lock)
+            "fasterq-dump", sra_file, "--outdir", fastq_dir,
+            "--threads", str(os.cpu_count()), "--mem", mem_str,
+            "--split-files", "--include-technical"
+        ], f"[sra_download_route] fasterq-dump failed {accession}", debug_file, debug_lock)
     except RuntimeError:
         return False
 
-    # 4) fetch metadata
     fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug_lock)
 
-    # 5) check if we got .fastq
     fastqs = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq"))
     if not fastqs:
         log_debug_message(f"[sra_download_route] No FASTQs for {accession}", debug_file, debug_lock)
         return False
-    # minimal size check
     for fq in fastqs:
         if not is_valid_fastq(fq, 1024):
-            log_debug_message(f"[sra_download_route] Invalid or tiny FASTQ: {fq}",
-                              debug_file, debug_lock)
+            log_debug_message(f"[sra_download_route] Invalid or tiny FASTQ: {fq}", debug_file, debug_lock)
             return False
 
     return True
@@ -323,14 +273,6 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
 ##########################
 
 def process_accession(accession, args):
-    """
-    Process one accession:
-      - run sra_download_route
-      - compress and classify fastqs
-      - remove .sra
-      - if success => append to completed
-      - if fail => append to failed
-    """
     debug_lock = args.debug_lock
     debug_file = args.debug_file
     completed_file = args.completed_file
@@ -340,15 +282,12 @@ def process_accession(accession, args):
     workdir = args.workdir
 
     try:
-        # 1) Download from SRA
         ok = sra_download_route(accession, workdir, debug_file, debug_lock, args.combined_metadata)
         if not ok:
             raise RuntimeError(f"[process_accession] SRA route failed for {accession}")
 
-        # 2) Compress
         compress_fastqs(accession, os.path.join(workdir, "fastq_data"), debug_file, debug_lock)
 
-        # 3) Validate GZ
         gz_files = glob.glob(os.path.join(workdir, "fastq_data", f"{accession}*.fastq.gz"))
         if not gz_files:
             raise RuntimeError(f"[process_accession] No .gz after compression for {accession}")
@@ -356,28 +295,156 @@ def process_accession(accession, args):
             if not is_valid_gzip(gz):
                 raise RuntimeError(f"[process_accession] Invalid gzip file: {gz}")
 
-        # 4) Classify
-        classify_fastq_by_read_type(accession, os.path.join(workdir, "fastq_data"),
-                                    debug_file, debug_lock)
+        classify_fastq_by_read_type(accession, os.path.join(workdir, "fastq_data"), debug_file, debug_lock)
+        cleanup_invalid_fastqs(accession, os.path.join(workdir, "fastq_data"), debug_file, debug_lock)
+        remove_file_safely(os.path.join(workdir, "fastq_data", f"{accession}.sra"), debug_file, debug_lock)
 
-        # 5) Cleanup invalid
-        cleanup_invalid_fastqs(accession, os.path.join(workdir, "fastq_data"),
-                               debug_file, debug_lock)
-
-        # 6) Remove .sra
-        remove_file_safely(os.path.join(workdir, "fastq_data", f"{accession}.sra"),
-                           debug_file, debug_lock)
-
-        # All success => append to completed
         append_line_with_lock(accession, completed_file, completed_lock)
         return f"[OK] {accession}"
 
     except Exception as e:
-        # On any error => log debug, append to failed
         msg = f"[FAIL] {accession} => {str(e)}"
         log_debug_message(msg, debug_file, debug_lock)
         append_line_with_lock(accession, failed_file, failed_lock)
         return msg
+
+##########################
+# Post-Processing Checks
+##########################
+
+def validate_accessions_file(accessions_file, debug_file, debug_lock):
+    """Validate the content of the accessions file."""
+    if not os.path.isfile(accessions_file):
+        log_debug_message(f"[validate_accessions_file] File not found: {accessions_file}", debug_file, debug_lock)
+        return set()
+    
+    accession_pattern = re.compile(r"^[ESDR]{1}RR\d+$")  # Basic SRA accession pattern
+    valid_accessions = set()
+    with open(accessions_file, "r") as f:
+        for i, line in enumerate(f, 1):
+            acc = line.strip()
+            if not acc:
+                log_debug_message(f"[validate_accessions_file] Empty line at {i}", debug_file, debug_lock)
+                continue
+            if not accession_pattern.match(acc):
+                log_debug_message(f"[validate_accessions_file] Invalid accession at line {i}: {acc}", debug_file, debug_lock)
+                continue
+            valid_accessions.add(acc)
+    return valid_accessions
+
+def check_and_sort_fastqs(args):
+    """Check fastq_biologicaldata, validate files, and sort missing/incomplete ones."""
+    fastq_dir = os.path.join(args.workdir, "fastq_data")
+    bio_dir = os.path.join(fastq_dir, "fastq_biologicaldata")
+    tech_dir = os.path.join(fastq_dir, "fastq_technicaldata")
+    os.makedirs(bio_dir, exist_ok=True)
+    os.makedirs(tech_dir, exist_ok=True)
+
+    expected = validate_accessions_file(args.accessions_file, args.debug_file, args.debug_lock)
+    if not expected:
+        log_debug_message("[check_and_sort_fastqs] No valid accessions to check", args.debug_file, args.debug_lock)
+        return
+
+    # Check biological directory
+    bio_files = {re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1) for f in Path(bio_dir).glob("*.fastq.gz") if re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name)}
+    missing = expected - bio_files
+
+    if missing:
+        log_debug_message(f"[check_and_sort_fastqs] Missing {len(missing)} accessions in biological data: {', '.join(sorted(missing))}", args.debug_file, args.debug_lock)
+
+    # Check fastq_data for missing files
+    for acc in missing:
+        gz_files = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
+        sra_file = os.path.join(fastq_dir, f"{acc}.sra")
+
+        if gz_files:
+            all_valid = True
+            for gz in gz_files:
+                if not (is_valid_fastq(gz) and is_valid_gzip(gz)):
+                    all_valid = False
+                    log_debug_message(f"[check_and_sort_fastqs] Incomplete/invalid file: {gz}", args.debug_file, args.debug_lock)
+                    remove_file_safely(gz, args.debug_file, args.debug_lock)
+
+            if all_valid:
+                lengths = set()
+                for gz in gz_files:
+                    lens = get_read_lengths(gz)
+                    if lens:
+                        lengths.update(lens)
+                    else:
+                        all_valid = False
+                        log_debug_message(f"[check_and_sort_fastqs] Could not read lengths from {gz}", args.debug_file, args.debug_lock)
+                        break
+
+                dest_dir = bio_dir if len(lengths) > 1 else tech_dir
+                for gz in gz_files:
+                    shutil.move(gz, os.path.join(dest_dir, os.path.basename(gz)))
+                    log_debug_message(f"[check_and_sort_fastqs] Moved {gz} to {dest_dir}", args.debug_file, args.debug_lock)
+                continue
+
+        # If checks fail and .sra exists, reprocess
+        if os.path.exists(sra_file):
+            try:
+                subprocess.run(["vdb-validate", sra_file], check=True, capture_output=True, text=True)
+                log_debug_message(f"[check_and_sort_fastqs] Validated {sra_file}", args.debug_file, args.debug_lock)
+
+                # Clean up existing fastq files
+                for pattern in [f"{acc}*.fastq", f"{acc}*.fastq.gz"]:
+                    for f in glob.glob(os.path.join(fastq_dir, pattern)):
+                        remove_file_safely(f, args.debug_file, args.debug_lock)
+
+                # Re-run fasterq-dump
+                mem_bytes = psutil.virtual_memory().available
+                mem_str = f"{int(mem_bytes / (1024**3))}G"
+                run_command([
+                    "fasterq-dump", sra_file, "--outdir", fastq_dir,
+                    "--threads", str(os.cpu_count()), "--mem", mem_str,
+                    "--split-files", "--include-technical"
+                ], f"[check_and_sort_fastqs] fasterq-dump failed for {acc}", args.debug_file, args.debug_lock)
+
+                # Compress
+                compress_fastqs(acc, fastq_dir, args.debug_file, args.debug_lock)
+
+                # Verify and sort
+                gz_files = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
+                if gz_files and all(is_valid_gzip(gz) for gz in gz_files):
+                    lengths = set()
+                    for gz in gz_files:
+                        lens = get_read_lengths(gz)
+                        if lens:
+                            lengths.update(lens)
+                    dest_dir = bio_dir if len(lengths) > 1 else tech_dir
+                    for gz in gz_files:
+                        shutil.move(gz, os.path.join(dest_dir, os.path.basename(gz)))
+                        log_debug_message(f"[check_and_sort_fastqs] Moved {gz} to {dest_dir}", args.debug_file, args.debug_lock)
+                    remove_file_safely(sra_file, args.debug_file, args.debug_lock)
+                else:
+                    append_line_with_lock(acc, args.failed_file, args.failed_lock)
+            except Exception as e:
+                log_debug_message(f"[check_and_sort_fastqs] Failed to reprocess {acc}: {e}", args.debug_file, args.debug_lock)
+                append_line_with_lock(acc, args.failed_file, args.failed_lock)
+        else:
+            log_debug_message(f"[check_and_sort_fastqs] No .sra or valid .fastq.gz for {acc}", args.debug_file, args.debug_lock)
+            append_line_with_lock(acc, args.failed_file, args.failed_lock)
+
+def final_validation(args):
+    """Final check of run_accessions vs fastq_biologicaldata, log completely missing files."""
+    expected = validate_accessions_file(args.accessions_file, args.debug_file, args.debug_lock)
+    bio_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
+    fastq_dir = os.path.join(args.workdir, "fastq_data")
+
+    bio_files = {re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1) for f in Path(bio_dir).glob("*.fastq.gz") if re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name)}
+    missing = expected - bio_files
+
+    for acc in missing:
+        if not glob.glob(os.path.join(fastq_dir, f"{acc}*")) and not os.path.exists(os.path.join(fastq_dir, f"{acc}.sra")):
+            log_debug_message(f"[final_validation] {acc} completely missing", args.debug_file, args.debug_lock)
+            append_line_with_lock(acc, args.failed_file, args.failed_lock)
+
+    if not missing:
+        log_debug_message("[final_validation] All accessions accounted for in biological data", args.debug_file, args.debug_lock)
+    else:
+        log_debug_message(f"[final_validation] {len(missing)} accessions still missing after all checks", args.debug_file, args.debug_lock)
 
 ##########################
 # Main
@@ -412,79 +479,65 @@ def parse_args():
     return parser.parse_args()
 
 def cleanup_locks(args):
-    """Remove lock files on exit."""
     lock_files = [args.completed_lock, args.debug_lock, args.failed_lock]
     for lock_file in lock_files:
         if os.path.exists(lock_file):
             try:
                 os.remove(lock_file)
-                # Since this runs on exit, we can't use log_debug_message reliably
-                # (file descriptors might be closed), so print to stderr instead
                 sys.stderr.write(f"[INFO] Removed lock file: {lock_file}\n")
             except Exception as e:
                 sys.stderr.write(f"[WARN] Failed to remove lock file {lock_file}: {e}\n")
 
 def main():
     args = parse_args()
-
-    # Register cleanup function to run on exit
     atexit.register(cleanup_locks, args)
 
-    # If the user provided an API key or email, export them for EDirect / sra-toolkit
     if args.api_key:
         os.environ["NCBI_API_KEY"] = args.api_key
     if args.email:
         os.environ["EMAIL"] = args.email
 
-    # 1) Read all run accessions into a set (so duplicates are skipped)
-    if not os.path.isfile(args.accessions_file):
-        sys.stderr.write(f"[ERROR] --accessions-file not found: {args.accessions_file}\n")
+    # Validate accessions file
+    all_accs = validate_accessions_file(args.accessions_file, args.debug_file, args.debug_lock)
+    if not all_accs:
+        sys.stderr.write(f"[ERROR] No valid accessions in {args.accessions_file}\n")
         sys.exit(1)
-    with open(args.accessions_file, "r") as f:
-        all_accs = {line.strip() for line in f if line.strip()}
 
-    # 2) Read 'completed' file into a set => skip these
+    # Read completed accessions
     done_accs = set()
     if os.path.isfile(args.completed_file):
         with open(args.completed_file, "r") as cf:
             done_accs = {line.strip() for line in cf if line.strip()}
 
-    # 3) Find accessions we still need
     to_download = all_accs - done_accs
     if not to_download:
         print("[INFO] All accessions are already completed. Nothing to do.")
-        sys.exit(0)
+    else:
+        print(f"[INFO] Found {len(all_accs)} total, {len(done_accs)} completed, "
+              f"so {len(to_download)} remaining.")
 
-    print(f"[INFO] Found {len(all_accs)} total, {len(done_accs)} completed, "
-          f"so {len(to_download)} remaining.")
+        os.makedirs(os.path.join(args.workdir, "fastq_data"), exist_ok=True)
+        os.makedirs(os.path.join(args.workdir, "metadata"), exist_ok=True)
+        os.makedirs(os.path.dirname(args.debug_file) or args.workdir, exist_ok=True)
 
-    # 4) Make sure directories exist
-    os.makedirs(os.path.join(args.workdir, "fastq_data"), exist_ok=True)
-    os.makedirs(os.path.join(args.workdir, "metadata"), exist_ok=True)
-    os.makedirs(os.path.dirname(args.debug_file) or args.workdir, exist_ok=True)
+        with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+            future_map = {executor.submit(process_accession, acc, args): acc for acc in sorted(to_download)}
+            for fut in as_completed(future_map):
+                acc = future_map[fut]
+                try:
+                    res = fut.result()
+                    print(res)
+                    log_debug_message(res, args.debug_file, args.debug_lock)
+                except Exception as e:
+                    msg = f"[FATAL] Worker error for {acc}: {e}"
+                    print(msg, file=sys.stderr)
+                    log_debug_message(msg, args.debug_file, args.debug_lock)
 
-    # 5) Concurrency: use a ProcessPoolExecutor
-    with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
-        future_map = {}
-        # sorted() is optional, just to maintain consistent order
-        for acc in sorted(to_download):
-            fut = executor.submit(process_accession, acc, args)
-            future_map[fut] = acc
-
-        for fut in as_completed(future_map):
-            acc = future_map[fut]
-            try:
-                res = fut.result()
-                print(res)  # e.g. "[OK] SRR1234" or "[FAIL] SRR9999 => reason"
-                log_debug_message(res, args.debug_file, args.debug_lock)
-            except Exception as e:
-                # Should be rare if process_accession handles exceptions
-                msg = f"[FATAL] Worker error for {acc}: {e}"
-                print(msg, file=sys.stderr)
-                log_debug_message(msg, args.debug_file, args.debug_lock)
-
+    # Post-processing
+    print("[INFO] Running post-processing checks...")
+    check_and_sort_fastqs(args)
+    final_validation(args)
     print("[INFO] All done.")
 
 if __name__ == "__main__":
     main()
-
