@@ -8,6 +8,7 @@ import gzip
 import fcntl
 import shutil
 import psutil
+import random
 import atexit
 import argparse
 import subprocess
@@ -272,16 +273,17 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
 # Worker Function
 ##########################
 
-def process_accession(accession, args):
-    debug_lock = args.debug_lock
-    debug_file = args.debug_file
+def process_accession(accession, args, final_retry=False):
+    debug_lock     = args.debug_lock
+    debug_file     = args.debug_file
     completed_file = args.completed_file
     completed_lock = args.completed_lock
-    failed_file = args.failed_file
-    failed_lock = args.failed_lock
-    workdir = args.workdir
+    failed_file    = args.failed_file
+    failed_lock    = args.failed_lock
+    workdir        = args.workdir
 
     try:
+        # Same logic you already have...
         ok = sra_download_route(accession, workdir, debug_file, debug_lock, args.combined_metadata)
         if not ok:
             raise RuntimeError(f"[process_accession] SRA route failed for {accession}")
@@ -299,14 +301,18 @@ def process_accession(accession, args):
         cleanup_invalid_fastqs(accession, os.path.join(workdir, "fastq_data"), debug_file, debug_lock)
         remove_file_safely(os.path.join(workdir, "fastq_data", f"{accession}.sra"), debug_file, debug_lock)
 
+        # If everything’s OK, append to the completed file
         append_line_with_lock(accession, completed_file, completed_lock)
         return f"[OK] {accession}"
 
     except Exception as e:
         msg = f"[FAIL] {accession} => {str(e)}"
         log_debug_message(msg, debug_file, debug_lock)
-        append_line_with_lock(accession, failed_file, failed_lock)
+        # Only record the failure immediately if this is NOT a final retry
+        if not final_retry:
+            append_line_with_lock(accession, failed_file, failed_lock)
         return msg
+
 
 ##########################
 # Post-Processing Checks
@@ -433,7 +439,7 @@ def final_validation(args):
     bio_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
     fastq_dir = os.path.join(args.workdir, "fastq_data")
 
-    # Determine which accessions exist in fastq_biologicaldata
+    # Accessions in bio_dir
     bio_files = {
         re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1)
         for f in Path(bio_dir).glob("*.fastq.gz")
@@ -445,34 +451,58 @@ def final_validation(args):
     for acc in missing:
         sra_file = os.path.join(fastq_dir, f"{acc}.sra")
         fastqs = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
-
         if not fastqs and not os.path.exists(sra_file):
-            log_debug_message(f"[final_validation] {acc} completely missing", args.debug_file, args.debug_lock)
+            log_debug_message(f"[final_validation] {acc} completely missing. Will retry.", 
+                              args.debug_file, args.debug_lock)
             retry_these.append(acc)
 
     if not missing:
-        log_debug_message("[final_validation] All accessions accounted for in biological data", args.debug_file, args.debug_lock)
+        log_debug_message("[final_validation] All accessions accounted for in biological data", 
+                          args.debug_file, args.debug_lock)
+        return
     else:
-        log_debug_message(f"[final_validation] {len(missing)} accessions still missing after all checks", args.debug_file, args.debug_lock)
+        log_debug_message(f"[final_validation] {len(missing)} accessions are missing. "
+                          f"Retrying {len(retry_these)} of them.", 
+                          args.debug_file, args.debug_lock)
 
-    if retry_these:
-        log_debug_message(f"[final_validation] Reprocessing {len(retry_these)} completely missing accessions", args.debug_file, args.debug_lock)
-        
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
-            future_map = {executor.submit(process_accession, acc, args): acc for acc in retry_these}
-            for fut in as_completed(future_map):
-                acc = future_map[fut]
-                try:
-                    result = fut.result()
-                    print(result)
-                    log_debug_message(f"[final_validation] Retry result: {result}", args.debug_file, args.debug_lock)
-                except Exception as e:
-                    msg = f"[final_validation] Retry failed for {acc}: {e}"
-                    print(msg)
-                    log_debug_message(msg, args.debug_file, args.debug_lock)
+    if not retry_these:
+        return
+
+    # Remove these from failed.txt so we only record final failures
+    if os.path.exists(args.failed_file):
+        with open(args.failed_file, "r") as f:
+            old_failures = {line.strip() for line in f if line.strip()}
+        # Remove the ones we're about to retry
+        updated_failures = old_failures - set(retry_these)
+        with open(args.failed_file, "w") as f:
+            for acc_fail in sorted(updated_failures):
+                f.write(acc_fail + "\n")
+
+    # Retry in parallel with random sleeps to avoid server hammering
+    with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+        future_map = {}
+        for acc in retry_these:
+            # Random wait to spread out each job’s start (5-30 seconds here, adjust as you like)
+            time.sleep(random.uniform(5, 30))
+
+            fut = executor.submit(process_accession, acc, args, True)  # final_retry=True
+            future_map[fut] = acc
+
+        for fut in as_completed(future_map):
+            acc = future_map[fut]
+            try:
+                result = fut.result()
+                if "[FAIL]" in result:
+                    # If it failed even in the final retry, now we mark it in failed.txt
                     append_line_with_lock(acc, args.failed_file, args.failed_lock)
-
+                log_debug_message(f"[final_validation] Retry result for {acc}: {result}", 
+                                  args.debug_file, args.debug_lock)
+            except Exception as e:
+                # If the worker itself had an error
+                msg = f"[final_validation] Retry crashed for {acc}: {e}"
+                log_debug_message(msg, args.debug_file, args.debug_lock)
+                append_line_with_lock(acc, args.failed_file, args.failed_lock)
+                
 def write_sorted_unique_completed(completed_file):
     if os.path.isfile(completed_file):
         with open(completed_file, "r") as f:
