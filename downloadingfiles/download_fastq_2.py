@@ -433,6 +433,7 @@ def final_validation(args):
     bio_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
     fastq_dir = os.path.join(args.workdir, "fastq_data")
 
+    # Determine which accessions exist in fastq_biologicaldata
     bio_files = {
         re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1)
         for f in Path(bio_dir).glob("*.fastq.gz")
@@ -456,17 +457,21 @@ def final_validation(args):
 
     if retry_these:
         log_debug_message(f"[final_validation] Reprocessing {len(retry_these)} completely missing accessions", args.debug_file, args.debug_lock)
-        for acc in retry_these:
-            try:
-                result = process_accession(acc, args)
-                print(result)
-                log_debug_message(f"[final_validation] Retry result: {result}", args.debug_file, args.debug_lock)
-            except Exception as e:
-                msg = f"[final_validation] Retry failed for {acc}: {e}"
-                print(msg)
-                log_debug_message(msg, args.debug_file, args.debug_lock)
-                append_line_with_lock(acc, args.failed_file, args.failed_lock)
-
+        
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+            future_map = {executor.submit(process_accession, acc, args): acc for acc in retry_these}
+            for fut in as_completed(future_map):
+                acc = future_map[fut]
+                try:
+                    result = fut.result()
+                    print(result)
+                    log_debug_message(f"[final_validation] Retry result: {result}", args.debug_file, args.debug_lock)
+                except Exception as e:
+                    msg = f"[final_validation] Retry failed for {acc}: {e}"
+                    print(msg)
+                    log_debug_message(msg, args.debug_file, args.debug_lock)
+                    append_line_with_lock(acc, args.failed_file, args.failed_lock)
 
 def write_sorted_unique_completed(completed_file):
     if os.path.isfile(completed_file):
@@ -523,32 +528,52 @@ def main():
 
     if args.api_key:
         os.environ["NCBI_API_KEY"] = args.api_key
+        log_debug_message("[main] Set NCBI_API_KEY environment variable.", args.debug_file, args.debug_lock)
+
     if args.email:
         os.environ["EMAIL"] = args.email
+        log_debug_message(f"[main] Set EMAIL environment variable to {args.email}.", args.debug_file, args.debug_lock)
 
-    # Validate accessions file
+    # Step 1: Validate accessions file
+    log_debug_message("[main] Validating accessions file...", args.debug_file, args.debug_lock)
     all_accs = validate_accessions_file(args.accessions_file, args.debug_file, args.debug_lock)
     if not all_accs:
-        sys.stderr.write(f"[ERROR] No valid accessions in {args.accessions_file}\n")
+        msg = f"[ERROR] No valid accessions in {args.accessions_file}"
+        sys.stderr.write(msg + "\n")
+        log_debug_message(msg, args.debug_file, args.debug_lock)
         sys.exit(1)
 
-    # Read completed accessions
+    log_debug_message(f"[main] Found {len(all_accs)} valid accessions in {args.accessions_file}.", 
+                      args.debug_file, args.debug_lock)
+
+    # Step 2: Read completed accessions
     done_accs = set()
     if os.path.isfile(args.completed_file):
         with open(args.completed_file, "r") as cf:
             done_accs = {line.strip() for line in cf if line.strip()}
+    log_debug_message(f"[main] Found {len(done_accs)} previously completed accessions.", 
+                      args.debug_file, args.debug_lock)
 
     to_download = all_accs - done_accs
+    log_debug_message(f"[main] {len(to_download)} accessions remain to be processed.", 
+                      args.debug_file, args.debug_lock)
+
     if not to_download:
         print("[INFO] All accessions are already completed. Nothing to do.")
+        log_debug_message("[main] All accessions are already completed. Exiting early.", 
+                          args.debug_file, args.debug_lock)
     else:
         print(f"[INFO] Found {len(all_accs)} total, {len(done_accs)} completed, "
               f"so {len(to_download)} remaining.")
+        log_debug_message(f"[main] Launching parallel download for {len(to_download)} accessions "
+                          f"using {args.num_workers} workers.", args.debug_file, args.debug_lock)
 
+        # Ensure work directories exist
         os.makedirs(os.path.join(args.workdir, "fastq_data"), exist_ok=True)
         os.makedirs(os.path.join(args.workdir, "metadata"), exist_ok=True)
         os.makedirs(os.path.dirname(args.debug_file) or args.workdir, exist_ok=True)
 
+        # Step 3: Parallel processing
         with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
             future_map = {executor.submit(process_accession, acc, args): acc for acc in sorted(to_download)}
             for fut in as_completed(future_map):
@@ -562,12 +587,19 @@ def main():
                     print(msg, file=sys.stderr)
                     log_debug_message(msg, args.debug_file, args.debug_lock)
 
-    # Post-processing
-    print("[INFO] Running post-processing checks...")
+    # Step 4: Post-processing
+    log_debug_message("[main] Post-processing: Checking and sorting FASTQs...", args.debug_file, args.debug_lock)
     check_and_sort_fastqs(args)
+
+    log_debug_message("[main] Post-processing: Final validation of downloaded files...", args.debug_file, args.debug_lock)
     final_validation(args)
+
+    log_debug_message("[main] Writing sorted list of unique completed accessions...", args.debug_file, args.debug_lock)
     write_sorted_unique_completed(args.completed_file)
+
+    log_debug_message("[main] Pipeline finished successfully.", args.debug_file, args.debug_lock)
     print("[INFO] All done.")
+
 
 if __name__ == "__main__":
     main()
