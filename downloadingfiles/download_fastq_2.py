@@ -10,6 +10,7 @@ import shutil
 import psutil
 import random
 import atexit
+import signal
 import argparse
 import subprocess
 from pathlib import Path
@@ -496,7 +497,7 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
                 else:
                     append_line_with_lock(acc, args.failed_file, args.failed_lock)
             except Exception as e:
-                log_debug_message(f"[check_and_sort_fastqs] Failed to reprocess {acc}: {e}", args.debug_file, args.debug_lock)
+                log_debug_message(f"[check_and_sort_fastqs] Failed to reprocess {accession}: {e}", args.debug_file, args.debug_lock)
                 append_line_with_lock(acc, args.failed_file, args.failed_lock)
         else:
             log_debug_message(f"[check_and_sort_fastqs] No .sra or valid .fastq.gz for {acc}", args.debug_file, args.debug_lock)
@@ -615,9 +616,23 @@ def cleanup_locks(args):
             except Exception as e:
                 sys.stderr.write(f"[WARN] Failed to remove lock file {lock_file}: {e}\n")
 
+def cleanup_temp_dir(tmp_dir):
+    if tmp_dir and os.path.exists(tmp_dir):
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            sys.stderr.write(f"[INFO] Cleaned up temporary directory: {tmp_dir}\n")
+        except Exception as e:
+            sys.stderr.write(f"[WARN] Failed to clean up temporary directory {tmp_dir}: {e}\n")
+
 def main():
     args = parse_args()
     atexit.register(cleanup_locks, args)
+    if args.tmp_dir:
+        atexit.register(cleanup_temp_dir, args.tmp_dir)
+    
+    # Handle common termination signals
+    signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(1))  # Ctrl+C
+    signal.signal(signal.SIGTERM, lambda sig, frame: sys.exit(1)) # Termination
 
     if args.api_key:
         os.environ["NCBI_API_KEY"] = args.api_key
@@ -681,9 +696,28 @@ def main():
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             future_map = {}
-            for acc in sorted(to_download):
-                time.sleep(random.uniform(0.1, 1.0))
-                fut = executor.submit(process_accession, acc, args, n_threads_per_worker, args.tmp_dir)
+            stagger_delay = 2.0  # Base delay in seconds between process starts
+            for i, acc in enumerate(sorted(to_download)):
+                # Calculate staggered delay: base_delay + small random jitter
+                initial_delay = stagger_delay * i + random.uniform(0, 1.0)
+                log_debug_message(
+                    f"[main] Scheduling {acc} with initial delay of {initial_delay:.2f}s",
+                    args.debug_file, args.debug_lock
+                )
+                
+                # Submit with a delayed start using a wrapper function
+                def delayed_process(acc, delay, *args):
+                    time.sleep(delay)
+                    return process_accession(acc, *args)
+                    
+                fut = executor.submit(
+                    delayed_process,
+                    acc,
+                    initial_delay,
+                    args,
+                    n_threads_per_worker,
+                    args.tmp_dir
+                )
                 future_map[fut] = acc
 
             for fut in as_completed(future_map):
