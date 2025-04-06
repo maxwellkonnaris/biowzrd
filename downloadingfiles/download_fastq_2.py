@@ -129,14 +129,14 @@ def cleanup_invalid_fastqs(accession, fastq_dir, debug_file, debug_lock):
             except Exception as e:
                 log_debug_message(f"[ERROR] while removing {gz}: {e}", debug_file, debug_lock)
 
-def classify_fastq_by_read_type(accession, tmp_fastq_dir, final_fastq_dir, debug_file, debug_lock):
+def classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock):
     vdb_dump = shutil.which("vdb-dump")
     if not vdb_dump:
         log_debug_message(f"[classify] vdb-dump not found; defaulting to biological for {accession}.",
                           debug_file, debug_lock)
-        bio_dir = os.path.join(final_fastq_dir, "fastq_biologicaldata")
+        bio_dir = os.path.join(fastq_dir, "fastq_biologicaldata")
         os.makedirs(bio_dir, exist_ok=True)
-        for gz in glob.glob(os.path.join(tmp_fastq_dir, f"{accession}*.fastq.gz")):
+        for gz in glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz")):
             dest_path = os.path.join(bio_dir, os.path.basename(gz))
             shutil.move(gz, dest_path)
             log_debug_message(f"[classify] Moved {gz} -> {dest_path} (default biological)", debug_file, debug_lock)
@@ -148,9 +148,9 @@ def classify_fastq_by_read_type(accession, tmp_fastq_dir, final_fastq_dir, debug
         line = result.stdout.strip()
         if "READ_TYPE:" not in line:
             log_debug_message(f"[classify] No READ_TYPE info for {accession}; defaulting to biological.", debug_file, debug_lock)
-            bio_dir = os.path.join(final_fastq_dir, "fastq_biologicaldata")
+            bio_dir = os.path.join(fastq_dir, "fastq_biologicaldata")
             os.makedirs(bio_dir, exist_ok=True)
-            for gz in glob.glob(os.path.join(tmp_fastq_dir, f"{accession}*.fastq.gz")):
+            for gz in glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz")):
                 dest_path = os.path.join(bio_dir, os.path.basename(gz))
                 shutil.move(gz, dest_path)
                 log_debug_message(f"[classify] Moved {gz} -> {dest_path} (default biological)", debug_file, debug_lock)
@@ -159,14 +159,14 @@ def classify_fastq_by_read_type(accession, tmp_fastq_dir, final_fastq_dir, debug
         types_part = line.split(":", 1)[1].strip()
         read_types = [t.strip() for t in types_part.split(",")]
 
-        bio_dir = os.path.join(final_fastq_dir, "fastq_biologicaldata")
-        tech_dir = os.path.join(final_fastq_dir, "fastq_technicaldata")
+        bio_dir = os.path.join(fastq_dir, "fastq_biologicaldata")
+        tech_dir = os.path.join(fastq_dir, "fastq_technicaldata")
         os.makedirs(bio_dir, exist_ok=True)
         os.makedirs(tech_dir, exist_ok=True)
 
         for i, read_type in enumerate(read_types):
             gz_suffixed = f"{accession}_{i+1}.fastq.gz"
-            src_suffixed = os.path.join(tmp_fastq_dir, gz_suffixed)
+            src_suffixed = os.path.join(fastq_dir, gz_suffixed)
 
             src_path = None
             if os.path.exists(src_suffixed):
@@ -174,7 +174,7 @@ def classify_fastq_by_read_type(accession, tmp_fastq_dir, final_fastq_dir, debug
                 gz_filename = gz_suffixed
             elif i == 0:
                 gz_unsuffixed = f"{accession}.fastq.gz"
-                src_unsuffixed = os.path.join(tmp_fastq_dir, gz_unsuffixed)
+                src_unsuffixed = os.path.join(fastq_dir, gz_unsuffixed)
                 if os.path.exists(src_unsuffixed):
                     src_path = src_unsuffixed
                     gz_filename = gz_unsuffixed
@@ -189,17 +189,17 @@ def classify_fastq_by_read_type(accession, tmp_fastq_dir, final_fastq_dir, debug
 
     except subprocess.CalledProcessError as e:
         log_debug_message(f"[classify] vdb-dump failed for {accession}:\n{e.stderr}; defaulting to biological.", debug_file, debug_lock)
-        bio_dir = os.path.join(final_fastq_dir, "fastq_biologicaldata")
+        bio_dir = os.path.join(fastq_dir, "fastq_biologicaldata")
         os.makedirs(bio_dir, exist_ok=True)
-        for gz in glob.glob(os.path.join(tmp_fastq_dir, f"{accession}*.fastq.gz")):
+        for gz in glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz")):
             dest_path = os.path.join(bio_dir, os.path.basename(gz))
             shutil.move(gz, dest_path)
             log_debug_message(f"[classify] Moved {gz} -> {dest_path} (default biological)", debug_file, debug_lock)
     except Exception as e:
         log_debug_message(f"[classify] Error for {accession}: {e}; defaulting to biological.", debug_file, debug_lock)
-        bio_dir = os.path.join(final_fastq_dir, "fastq_biologicaldata")
+        bio_dir = os.path.join(fastq_dir, "fastq_biologicaldata")
         os.makedirs(bio_dir, exist_ok=True)
-        for gz in glob.glob(os.path.join(tmp_fastq_dir, f"{accession}*.fastq.gz")):
+        for gz in glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz")):
             dest_path = os.path.join(bio_dir, os.path.basename(gz))
             shutil.move(gz, dest_path)
             log_debug_message(f"[classify] Moved {gz} -> {dest_path} (default biological)", debug_file, debug_lock)
@@ -224,17 +224,15 @@ def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug
                 outf.write(line.replace(",", "\t"))
 
         os.makedirs(os.path.dirname(combined_meta), exist_ok=True)
+        with open(tsv_path, "r") as t_in:
+            lines = t_in.readlines()
         with open(debug_lock, "a+") as lk:
             flock_exclusive(lk)
             if not os.path.isfile(combined_meta):
-                with open(tsv_path, "r") as t_in:
-                    header_line = t_in.readline()
                 with open(combined_meta, "w") as cm:
-                    cm.write(header_line)
-            with open(tsv_path, "r") as t_in, open(combined_meta, "a") as cm:
-                _ = t_in.readline()
-                for row in t_in:
-                    cm.write(row)
+                    cm.write(lines[0])  # Header
+            with open(combined_meta, "a") as cm:
+                cm.writelines(lines[1:])  # Data rows
             flock_release(lk)
 
         remove_file_safely(csv_path, debug_file, debug_lock)
@@ -244,13 +242,13 @@ def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug
         log_debug_message(f"[metadata] Error merging runinfo for {accession}: {e}", debug_file, debug_lock)
 
 ##########################
-# SRA Download Route with /tmp
+# SRA Download Route with Custom tmp_dir
 ##########################
 
-def sra_download_route(accession, workdir, tmp_dir, debug_file, debug_lock, combined_meta, n_threads_per_worker):
+def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta, n_threads_per_worker, tmp_dir=None):
     fastq_dir = os.path.join(workdir, "fastq_data")
     metadata_dir = os.path.join(workdir, "metadata")
-    tmp_fastq_dir = os.path.join(tmp_dir, f"fastq_{accession}")
+    tmp_fastq_dir = os.path.join(tmp_dir or fastq_dir, f"tmp/fastq_{accession}")
     os.makedirs(tmp_fastq_dir, exist_ok=True)
 
     mem_bytes = psutil.virtual_memory().available // n_threads_per_worker
@@ -260,7 +258,7 @@ def sra_download_route(accession, workdir, tmp_dir, debug_file, debug_lock, comb
     sra_file = os.path.join(tmp_fastq_dir, f"{accession}.sra")
 
     try:
-        run_command(["prefetch", accession, "--max-size", "200G", "--output-file", sra_file],
+        run_command(["prefetch", accession, "--max-size", "200G", "--temp-location", tmp_dir or fastq_dir, "--output-file", sra_file],
                     f"[sra_download_route] prefetch failed {accession}", debug_file, debug_lock)
     except RuntimeError:
         shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
@@ -276,8 +274,11 @@ def sra_download_route(accession, workdir, tmp_dir, debug_file, debug_lock, comb
 
     try:
         run_command([
-            "fasterq-dump", sra_file, "--outdir", tmp_fastq_dir,
-            "--threads", str(n_threads_per_worker), "--mem", mem_str,
+            "fasterq-dump", sra_file, 
+            "--temp", tmp_dir or tmp_fastq_dir,
+            "--outdir", fastq_dir,
+            "--threads", str(n_threads_per_worker), 
+            "--mem", mem_str,
             "--split-files", "--include-technical"
         ], f"[sra_download_route] fasterq-dump failed {accession}", debug_file, debug_lock)
     except RuntimeError:
@@ -286,7 +287,7 @@ def sra_download_route(accession, workdir, tmp_dir, debug_file, debug_lock, comb
 
     fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug_lock)
 
-    fastqs = glob.glob(os.path.join(tmp_fastq_dir, f"{accession}*.fastq"))
+    fastqs = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq"))
     if not fastqs:
         log_debug_message(f"[sra_download_route] No FASTQs for {accession}", debug_file, debug_lock)
         shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
@@ -305,18 +306,16 @@ def sra_download_route(accession, workdir, tmp_dir, debug_file, debug_lock, comb
         cmd.append(fq)
         run_command(cmd, f"[sra_download_route] Compression failed for {fq}", debug_file, debug_lock)
 
-    classify_fastq_by_read_type(accession, tmp_fastq_dir, fastq_dir, debug_file, debug_lock)
-
     shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
     return True
 
 ##########################
-# GSA Download Route with /tmp
+# GSA Download Route with Custom tmp_dir
 ##########################
 
-def gsa_download_route(accession, workdir, tmp_dir, debug_file, debug_lock):
+def gsa_download_route(accession, workdir, debug_file, debug_lock):
     fastq_dir = os.path.join(workdir, "fastq_data")
-    tmp_fastq_dir = os.path.join(tmp_dir, f"fastq_{accession}")
+    tmp_fastq_dir = os.path.join(fastq_dir, f"tmp/fastq_{accession}")
     os.makedirs(tmp_fastq_dir, exist_ok=True)
 
     iseq = shutil.which("iseq")
@@ -350,7 +349,7 @@ def gsa_download_route(accession, workdir, tmp_dir, debug_file, debug_lock):
         cmd.append(fq)
         run_command(cmd, f"[gsa_download_route] Compression failed for {fq}", debug_file, debug_lock)
 
-    classify_fastq_by_read_type(accession, tmp_fastq_dir, fastq_dir, debug_file, debug_lock)
+    classify_fastq_by_read_type(accession, tmp_fastq_dir, debug_file, debug_lock)
 
     shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
     return True
@@ -359,7 +358,7 @@ def gsa_download_route(accession, workdir, tmp_dir, debug_file, debug_lock):
 # Updated Worker Function
 ##########################
 
-def process_accession(accession, args, n_threads_per_worker, tmp_dir, final_retry=False):
+def process_accession(accession, args, n_threads_per_worker, tmp_dir=None, final_retry=False):
     debug_lock     = args.debug_lock
     debug_file     = args.debug_file
     completed_file = args.completed_file
@@ -373,15 +372,16 @@ def process_accession(accession, args, n_threads_per_worker, tmp_dir, final_retr
         is_gsa = accession.startswith("C") or accession.startswith("GSA")
         ok = False
         if is_gsa:
-            ok = gsa_download_route(accession, workdir, tmp_dir, debug_file, debug_lock)
+            ok = gsa_download_route(accession, workdir, debug_file, debug_lock)
         else:
-            ok = sra_download_route(accession, workdir, tmp_dir, debug_file, debug_lock, combined_meta, n_threads_per_worker)
+            ok = sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta, n_threads_per_worker, tmp_dir)
 
         if not ok:
             raise RuntimeError(f"[process_accession] Download route failed for {accession}")
 
         fastq_dir = os.path.join(workdir, "fastq_data")
         cleanup_invalid_fastqs(accession, fastq_dir, debug_file, debug_lock)
+        classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock)
 
         append_line_with_lock(accession, completed_file, completed_lock)
         return f"[OK] {accession}"
@@ -435,6 +435,7 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
         log_debug_message(f"[check_and_sort_fastqs] Missing {len(missing)} accessions in biological data: {', '.join(sorted(missing))}", args.debug_file, args.debug_lock)
 
     for acc in missing:
+        tmp_fastq_dir = os.path.join(args.tmp_dir or fastq_dir, f"tmp/fastq_{acc}")
         gz_files = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
         sra_file = os.path.join(fastq_dir, f"{acc}.sra")
 
@@ -475,9 +476,13 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
                 mem_bytes = psutil.virtual_memory().available
                 mem_str = f"{int(mem_bytes / (1024**3))}G"
                 run_command([
-                    "fasterq-dump", sra_file, "--outdir", fastq_dir,
-                    "--threads", str(n_threads_per_worker), "--mem", mem_str,
-                    "--split-files", "--include-technical"
+                    "fasterq-dump", sra_file, 
+                    "--temp", args.tmp_dir or tmp_fastq_dir,
+                    "--outdir", fastq_dir,
+                    "--threads", str(n_threads_per_worker), 
+                    "--mem", mem_str,
+                    "--split-files", 
+                    "--include-technical"
                 ], f"[check_and_sort_fastqs] fasterq-dump failed for {acc}", args.debug_file, args.debug_lock)
 
                 compress_fastqs(acc, fastq_dir, args.debug_file, args.debug_lock)
@@ -582,8 +587,6 @@ def parse_args():
                         help="File of run accessions, one per line (default: run_accessions.txt)")
     parser.add_argument("--workdir", default=".",
                         help="Working directory for outputs/logs (default: current dir)")
-    parser.add_argument("--tmp-dir", default="/tmp",
-                        help="Temporary directory for intermediate files (default: /tmp)")
     parser.add_argument("--debug-file", default="debug.log",
                         help="Path to a shared debug log file (default: debug.log)")
     parser.add_argument("--debug-lock", default="debug.lock",
@@ -604,6 +607,8 @@ def parse_args():
                         help="NCBI API key (optional). If provided, exported as NCBI_API_KEY.")
     parser.add_argument("--email", default=None,
                         help="Email address for EDirect (optional). If provided, exported as EMAIL.")
+    parser.add_argument("--tmp-dir", default=None,
+                        help="Directory for temporary files (default: within workdir/fastq_data)")
     return parser.parse_args()
 
 def cleanup_locks(args):
@@ -658,7 +663,6 @@ def main():
         print(f"[INFO] Found {len(all_accs)} total, {len(done_accs)} completed, "
               f"so {len(to_download)} remaining.")
         
-        # Dynamically allocate num_workers with minimum threads
         total_cores = os.cpu_count() or 4
         min_threads_per_worker = 4
         max_workers_cap = 64
@@ -678,7 +682,8 @@ def main():
         os.makedirs(os.path.join(args.workdir, "fastq_data"), exist_ok=True)
         os.makedirs(os.path.join(args.workdir, "metadata"), exist_ok=True)
         os.makedirs(os.path.dirname(args.debug_file) or args.workdir, exist_ok=True)
-        os.makedirs(args.tmp_dir, exist_ok=True)
+        if args.tmp_dir:
+            os.makedirs(args.tmp_dir, exist_ok=True)
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             future_map = {}
