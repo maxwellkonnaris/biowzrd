@@ -594,7 +594,7 @@ def parse_args():
     parser.add_argument("--failed-lock", default="failed.lock",
                         help="Lock file for the failed-file (default: failed.lock)")
     parser.add_argument("--combined-metadata", default="combined_metadata.tsv",
-                        help="Path to the combined metadata TSV (default: combined_metadata.tsv)"
+                        help="Path to the combined metadata TSV (default: combined_metadata.tsv)")
     parser.add_argument("--num-workers", type=int, default=None,
                         help="Number of parallel workers (default: dynamic, based on CPU and tasks, max 64)")
     parser.add_argument("--api-key", default=None,
