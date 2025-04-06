@@ -242,7 +242,7 @@ def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug
         log_debug_message(f"[metadata] Error merging runinfo for {accession}: {e}", debug_file, debug_lock)
 
 ##########################
-# SRA Download Route with Custom tmp_dir
+# SRA Download Route with Custom tmp_dir and New Flags
 ##########################
 
 def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta, n_threads_per_worker, tmp_dir=None):
@@ -258,17 +258,14 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
     sra_file = os.path.join(tmp_fastq_dir, f"{accession}.sra")
 
     try:
-        run_command(["prefetch", accession, "--max-size", "200G", "--temp-location", tmp_dir or fastq_dir, "--output-file", sra_file],
-                    f"[sra_download_route] prefetch failed {accession}", debug_file, debug_lock)
+        run_command([
+            "prefetch", accession, 
+            "--max-size", "200G", 
+            "-r", "yes",  # Resume partial downloads
+            "-C", "yes",  # Verify after download
+            "--output-file", sra_file
+        ], f"[sra_download_route] prefetch failed {accession}", debug_file, debug_lock)
     except RuntimeError:
-        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
-        return False
-
-    try:
-        subprocess.run(["vdb-validate", sra_file], check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        log_debug_message(f"[sra_download_route] vdb-validate failed {accession}:\n{e.stderr}",
-                          debug_file, debug_lock)
         shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
         return False
 
@@ -466,9 +463,6 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
 
         if os.path.exists(sra_file):
             try:
-                subprocess.run(["vdb-validate", sra_file], check=True, capture_output=True, text=True)
-                log_debug_message(f"[check_and_sort_fastqs] Validated {sra_file}", args.debug_file, args.debug_lock)
-
                 for pattern in [f"{acc}*.fastq", f"{acc}*.fastq.gz"]:
                     for f in glob.glob(os.path.join(fastq_dir, pattern)):
                         remove_file_safely(f, args.debug_file, args.debug_lock)
@@ -600,7 +594,7 @@ def parse_args():
     parser.add_argument("--failed-lock", default="failed.lock",
                         help="Lock file for the failed-file (default: failed.lock)")
     parser.add_argument("--combined-metadata", default="combined_metadata.tsv",
-                        help="Path to the combined metadata TSV (default: combined_metadata.tsv)")
+                        help="Path to the combined metadata TSV (default: combined_metadata.tsv)"
     parser.add_argument("--num-workers", type=int, default=None,
                         help="Number of parallel workers (default: dynamic, based on CPU and tasks, max 64)")
     parser.add_argument("--api-key", default=None,
