@@ -115,7 +115,7 @@ def compress_fastqs(accession, fastq_dir, debug_file, debug_lock):
         if not fq.endswith(".gz"):
             cmd = [compressor]
             if "pigz" in compressor:
-                cmd.extend(["-p", "4"])
+                cmd.extend(["-p", "8"])  # Use 8 threads for pigz
             cmd.append(fq)
             run_command(cmd, f"[compress_fastqs] {accession} compression failed on {fq}",
                         debug_file, debug_lock)
@@ -221,23 +221,26 @@ def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug
         log_debug_message(f"[metadata] Error merging runinfo for {accession}: {e}", debug_file, debug_lock)
 
 ##########################
-# SRA Download Route
+# SRA Download Route with /tmp
 ##########################
 
-def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta):
+def sra_download_route(accession, workdir, tmp_dir, debug_file, debug_lock, combined_meta, n_threads_per_worker):
     fastq_dir = os.path.join(workdir, "fastq_data")
     metadata_dir = os.path.join(workdir, "metadata")
+    tmp_fastq_dir = os.path.join(tmp_dir, f"fastq_{accession}")
+    os.makedirs(tmp_fastq_dir, exist_ok=True)
 
-    mem_bytes = psutil.virtual_memory().available
-    mem_gb = int(mem_bytes / (1024**3))
+    mem_bytes = psutil.virtual_memory().available // n_threads_per_worker
+    mem_gb = max(1, int(mem_bytes / (1024**3)))
     mem_str = f"{mem_gb}G"
 
-    sra_file = os.path.join(fastq_dir, f"{accession}.sra")
+    sra_file = os.path.join(tmp_fastq_dir, f"{accession}.sra")
 
     try:
         run_command(["prefetch", accession, "--max-size", "200G", "--output-file", sra_file],
                     f"[sra_download_route] prefetch failed {accession}", debug_file, debug_lock)
     except RuntimeError:
+        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
         return False
 
     try:
@@ -245,35 +248,97 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
     except subprocess.CalledProcessError as e:
         log_debug_message(f"[sra_download_route] vdb-validate failed {accession}:\n{e.stderr}",
                           debug_file, debug_lock)
+        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
         return False
 
     try:
         run_command([
-            "fasterq-dump", sra_file, "--outdir", fastq_dir,
-            "--threads", str(os.cpu_count()), "--mem", mem_str,
+            "fasterq-dump", sra_file, "--outdir", tmp_fastq_dir,
+            "--threads", str(n_threads_per_worker), "--mem", mem_str,
             "--split-files", "--include-technical"
         ], f"[sra_download_route] fasterq-dump failed {accession}", debug_file, debug_lock)
     except RuntimeError:
+        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
         return False
 
     fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug_lock)
 
-    fastqs = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq"))
+    fastqs = glob.glob(os.path.join(tmp_fastq_dir, f"{accession}*.fastq"))
     if not fastqs:
         log_debug_message(f"[sra_download_route] No FASTQs for {accession}", debug_file, debug_lock)
+        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
         return False
     for fq in fastqs:
         if not is_valid_fastq(fq, 1024):
             log_debug_message(f"[sra_download_route] Invalid or tiny FASTQ: {fq}", debug_file, debug_lock)
+            shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
             return False
 
+    compressor = shutil.which("pigz") or shutil.which("gzip")
+    if not compressor:
+        raise RuntimeError("No pigz or gzip found on system!")
+    for fq in fastqs:
+        cmd = [compressor, "-p", "8"] if "pigz" in compressor else [compressor]
+        cmd.append(fq)
+        run_command(cmd, f"[sra_download_route] Compression failed for {fq}", debug_file, debug_lock)
+        gz_file = f"{fq}.gz"
+        dest_gz = os.path.join(fastq_dir, os.path.basename(gz_file))
+        shutil.move(gz_file, dest_gz)
+
+    shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
     return True
 
 ##########################
-# Worker Function
+# GSA Download Route with /tmp
 ##########################
 
-def process_accession(accession, args, final_retry=False):
+def gsa_download_route(accession, workdir, tmp_dir, debug_file, debug_lock):
+    fastq_dir = os.path.join(workdir, "fastq_data")
+    tmp_fastq_dir = os.path.join(tmp_dir, f"fastq_{accession}")
+    os.makedirs(tmp_fastq_dir, exist_ok=True)
+
+    iseq = shutil.which("iseq")
+    if not iseq:
+        log_debug_message(f"[gsa_download_route] 'iseq' not found in PATH for {accession}", debug_file, debug_lock)
+        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
+        return False
+
+    try:
+        run_command([
+            iseq, "-i", accession, "-o", tmp_fastq_dir, "-a"
+        ], f"[gsa_download_route] iseq failed for {accession}", debug_file, debug_lock)
+    except RuntimeError:
+        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
+        return False
+
+    fastqs = glob.glob(os.path.join(tmp_fastq_dir, f"{accession}*.fastq"))
+    if not fastqs:
+        log_debug_message(f"[gsa_download_route] No FASTQs found after iseq for {accession}", debug_file, debug_lock)
+        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
+        return False
+    for fq in fastqs:
+        if not is_valid_fastq(fq):
+            log_debug_message(f"[gsa_download_route] Invalid FASTQ found: {fq}", debug_file, debug_lock)
+            shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
+            return False
+
+    compressor = shutil.which("pigz") or shutil.which("gzip")
+    for fq in fastqs:
+        cmd = [compressor, "-p", "8"] if "pigz" in compressor else [compressor]
+        cmd.append(fq)
+        run_command(cmd, f"[gsa_download_route] Compression failed for {fq}", debug_file, debug_lock)
+        gz_file = f"{fq}.gz"
+        dest_gz = os.path.join(fastq_dir, os.path.basename(gz_file))
+        shutil.move(gz_file, dest_gz)
+
+    shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
+    return True
+
+##########################
+# Updated Worker Function
+##########################
+
+def process_accession(accession, args, n_threads_per_worker, tmp_dir, final_retry=False):
     debug_lock     = args.debug_lock
     debug_file     = args.debug_file
     completed_file = args.completed_file
@@ -281,38 +346,32 @@ def process_accession(accession, args, final_retry=False):
     failed_file    = args.failed_file
     failed_lock    = args.failed_lock
     workdir        = args.workdir
+    combined_meta  = args.combined_metadata
 
     try:
-        # Same logic you already have...
-        ok = sra_download_route(accession, workdir, debug_file, debug_lock, args.combined_metadata)
+        is_gsa = accession.startswith("C") or accession.startswith("GSA")
+        ok = False
+        if is_gsa:
+            ok = gsa_download_route(accession, workdir, tmp_dir, debug_file, debug_lock)
+        else:
+            ok = sra_download_route(accession, workdir, tmp_dir, debug_file, debug_lock, combined_meta, n_threads_per_worker)
+
         if not ok:
-            raise RuntimeError(f"[process_accession] SRA route failed for {accession}")
+            raise RuntimeError(f"[process_accession] Download route failed for {accession}")
 
-        compress_fastqs(accession, os.path.join(workdir, "fastq_data"), debug_file, debug_lock)
+        fastq_dir = os.path.join(workdir, "fastq_data")
+        classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock)
+        cleanup_invalid_fastqs(accession, fastq_dir, debug_file, debug_lock)
 
-        gz_files = glob.glob(os.path.join(workdir, "fastq_data", f"{accession}*.fastq.gz"))
-        if not gz_files:
-            raise RuntimeError(f"[process_accession] No .gz after compression for {accession}")
-        for gz in gz_files:
-            if not is_valid_gzip(gz):
-                raise RuntimeError(f"[process_accession] Invalid gzip file: {gz}")
-
-        classify_fastq_by_read_type(accession, os.path.join(workdir, "fastq_data"), debug_file, debug_lock)
-        cleanup_invalid_fastqs(accession, os.path.join(workdir, "fastq_data"), debug_file, debug_lock)
-        remove_file_safely(os.path.join(workdir, "fastq_data", f"{accession}.sra"), debug_file, debug_lock)
-
-        # If everything’s OK, append to the completed file
         append_line_with_lock(accession, completed_file, completed_lock)
         return f"[OK] {accession}"
 
     except Exception as e:
         msg = f"[FAIL] {accession} => {str(e)}"
         log_debug_message(msg, debug_file, debug_lock)
-        # Only record the failure immediately if this is NOT a final retry
         if not final_retry:
             append_line_with_lock(accession, failed_file, failed_lock)
         return msg
-
 
 ##########################
 # Post-Processing Checks
@@ -338,7 +397,7 @@ def validate_accessions_file(accessions_file, debug_file, debug_lock):
             valid_accessions.add(acc)
     return valid_accessions
 
-def check_and_sort_fastqs(args):
+def check_and_sort_fastqs(args, n_threads_per_worker):
     """Check fastq_biologicaldata, validate files, and sort missing/incomplete ones."""
     fastq_dir = os.path.join(args.workdir, "fastq_data")
     bio_dir = os.path.join(fastq_dir, "fastq_biologicaldata")
@@ -351,14 +410,12 @@ def check_and_sort_fastqs(args):
         log_debug_message("[check_and_sort_fastqs] No valid accessions to check", args.debug_file, args.debug_lock)
         return
 
-    # Check biological directory
     bio_files = {re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1) for f in Path(bio_dir).glob("*.fastq.gz") if re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name)}
     missing = expected - bio_files
 
     if missing:
         log_debug_message(f"[check_and_sort_fastqs] Missing {len(missing)} accessions in biological data: {', '.join(sorted(missing))}", args.debug_file, args.debug_lock)
 
-    # Check fastq_data for missing files
     for acc in missing:
         gz_files = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
         sra_file = os.path.join(fastq_dir, f"{acc}.sra")
@@ -388,30 +445,25 @@ def check_and_sort_fastqs(args):
                     log_debug_message(f"[check_and_sort_fastqs] Moved {gz} to {dest_dir}", args.debug_file, args.debug_lock)
                 continue
 
-        # If checks fail and .sra exists, reprocess
         if os.path.exists(sra_file):
             try:
                 subprocess.run(["vdb-validate", sra_file], check=True, capture_output=True, text=True)
                 log_debug_message(f"[check_and_sort_fastqs] Validated {sra_file}", args.debug_file, args.debug_lock)
 
-                # Clean up existing fastq files
                 for pattern in [f"{acc}*.fastq", f"{acc}*.fastq.gz"]:
                     for f in glob.glob(os.path.join(fastq_dir, pattern)):
                         remove_file_safely(f, args.debug_file, args.debug_lock)
 
-                # Re-run fasterq-dump
                 mem_bytes = psutil.virtual_memory().available
                 mem_str = f"{int(mem_bytes / (1024**3))}G"
                 run_command([
                     "fasterq-dump", sra_file, "--outdir", fastq_dir,
-                    "--threads", str(os.cpu_count()), "--mem", mem_str,
+                    "--threads", str(n_threads_per_worker), "--mem", mem_str,
                     "--split-files", "--include-technical"
                 ], f"[check_and_sort_fastqs] fasterq-dump failed for {acc}", args.debug_file, args.debug_lock)
 
-                # Compress
                 compress_fastqs(acc, fastq_dir, args.debug_file, args.debug_lock)
 
-                # Verify and sort
                 gz_files = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
                 if gz_files and all(is_valid_gzip(gz) for gz in gz_files):
                     lengths = set()
@@ -433,13 +485,12 @@ def check_and_sort_fastqs(args):
             log_debug_message(f"[check_and_sort_fastqs] No .sra or valid .fastq.gz for {acc}", args.debug_file, args.debug_lock)
             append_line_with_lock(acc, args.failed_file, args.failed_lock)
 
-def final_validation(args):
+def final_validation(args, n_threads_per_worker):
     """Final check of run_accessions vs fastq_biologicaldata, log completely missing files."""
     expected = validate_accessions_file(args.accessions_file, args.debug_file, args.debug_lock)
     bio_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
     fastq_dir = os.path.join(args.workdir, "fastq_data")
 
-    # Accessions in bio_dir
     bio_files = {
         re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1)
         for f in Path(bio_dir).glob("*.fastq.gz")
@@ -468,24 +519,19 @@ def final_validation(args):
     if not retry_these:
         return
 
-    # Remove these from failed.txt so we only record final failures
     if os.path.exists(args.failed_file):
         with open(args.failed_file, "r") as f:
             old_failures = {line.strip() for line in f if line.strip()}
-        # Remove the ones we're about to retry
         updated_failures = old_failures - set(retry_these)
         with open(args.failed_file, "w") as f:
             for acc_fail in sorted(updated_failures):
                 f.write(acc_fail + "\n")
 
-    # Retry in parallel with random sleeps to avoid server hammering
-    with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+    with ProcessPoolExecutor(max_workers=min(os.cpu_count() or 4, len(retry_these))) as executor:
         future_map = {}
         for acc in retry_these:
-            # Random wait to spread out each job’s start (5-30 seconds here, adjust as you like)
             time.sleep(random.uniform(5, 30))
-
-            fut = executor.submit(process_accession, acc, args, True)  # final_retry=True
+            fut = executor.submit(process_accession, acc, args, n_threads_per_worker, args.tmp_dir, True)
             future_map[fut] = acc
 
         for fut in as_completed(future_map):
@@ -493,16 +539,14 @@ def final_validation(args):
             try:
                 result = fut.result()
                 if "[FAIL]" in result:
-                    # If it failed even in the final retry, now we mark it in failed.txt
                     append_line_with_lock(acc, args.failed_file, args.failed_lock)
                 log_debug_message(f"[final_validation] Retry result for {acc}: {result}", 
                                   args.debug_file, args.debug_lock)
             except Exception as e:
-                # If the worker itself had an error
                 msg = f"[final_validation] Retry crashed for {acc}: {e}"
                 log_debug_message(msg, args.debug_file, args.debug_lock)
                 append_line_with_lock(acc, args.failed_file, args.failed_lock)
-                
+
 def write_sorted_unique_completed(completed_file):
     if os.path.isfile(completed_file):
         with open(completed_file, "r") as f:
@@ -510,16 +554,19 @@ def write_sorted_unique_completed(completed_file):
         with open(completed_file, "w") as f:
             for line in entries:
                 f.write(line + "\n")
+
 ##########################
-# Main
+# Main with Dynamic Workers
 ##########################
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Download multiple SRA accessions in parallel.")
+    parser = argparse.ArgumentParser(description="Download multiple SRA accessions in parallel with dynamic workers.")
     parser.add_argument("--accessions-file", default="run_accessions.txt",
                         help="File of run accessions, one per line (default: run_accessions.txt)")
     parser.add_argument("--workdir", default=".",
                         help="Working directory for outputs/logs (default: current dir)")
+    parser.add_argument("--tmp-dir", default="/tmp",
+                        help="Temporary directory for intermediate files (default: /tmp)")
     parser.add_argument("--debug-file", default="debug.log",
                         help="Path to a shared debug log file (default: debug.log)")
     parser.add_argument("--debug-lock", default="debug.lock",
@@ -534,8 +581,8 @@ def parse_args():
                         help="Lock file for the failed-file (default: failed.lock)")
     parser.add_argument("--combined-metadata", default="combined_metadata.tsv",
                         help="Path to the combined metadata TSV (default: combined_metadata.tsv)")
-    parser.add_argument("--num-workers", type=int, default=4,
-                        help="Number of parallel workers (default: 4)")
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="Number of parallel workers (default: dynamic, based on CPU and tasks, max 64)")
     parser.add_argument("--api-key", default=None,
                         help="NCBI API key (optional). If provided, exported as NCBI_API_KEY.")
     parser.add_argument("--email", default=None,
@@ -595,17 +642,37 @@ def main():
     else:
         print(f"[INFO] Found {len(all_accs)} total, {len(done_accs)} completed, "
               f"so {len(to_download)} remaining.")
-        log_debug_message(f"[main] Launching parallel download for {len(to_download)} accessions "
-                          f"using {args.num_workers} workers.", args.debug_file, args.debug_lock)
+        
+        # Dynamically allocate num_workers
+        total_cores = os.cpu_count() or 4
+        max_workers_cap = 64  # Reasonable upper limit to avoid system overload
+        if args.num_workers is None:
+            num_workers = min(total_cores, len(to_download), max_workers_cap)
+        else:
+            num_workers = min(args.num_workers, max_workers_cap)  # Respect user input but cap it
+        n_threads_per_worker = max(1, total_cores // num_workers)
+        log_debug_message(f"[main] Dynamically allocated {num_workers} workers with {n_threads_per_worker} threads each "
+                          f"(total cores: {total_cores}, tasks: {len(to_download)}).",
+                          args.debug_file, args.debug_lock)
 
-        # Ensure work directories exist
+        log_debug_message(f"[main] Launching parallel download for {len(to_download)} accessions "
+                          f"using {num_workers} workers.", args.debug_file, args.debug_lock)
+
+        # Ensure directories exist
         os.makedirs(os.path.join(args.workdir, "fastq_data"), exist_ok=True)
         os.makedirs(os.path.join(args.workdir, "metadata"), exist_ok=True)
         os.makedirs(os.path.dirname(args.debug_file) or args.workdir, exist_ok=True)
+        os.makedirs(args.tmp_dir, exist_ok=True)
 
         # Step 3: Parallel processing
-        with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
-            future_map = {executor.submit(process_accession, acc, args): acc for acc in sorted(to_download)}
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            future_map = {}
+            for acc in sorted(to_download):
+                # Small stagger to reduce initial I/O contention
+                time.sleep(random.uniform(0.1, 1.0))
+                fut = executor.submit(process_accession, acc, args, n_threads_per_worker, args.tmp_dir)
+                future_map[fut] = acc
+
             for fut in as_completed(future_map):
                 acc = future_map[fut]
                 try:
@@ -616,20 +683,20 @@ def main():
                     msg = f"[FATAL] Worker error for {acc}: {e}"
                     print(msg, file=sys.stderr)
                     log_debug_message(msg, args.debug_file, args.debug_lock)
+                    append_line_with_lock(acc, args.failed_file, args.failed_lock)
 
     # Step 4: Post-processing
     log_debug_message("[main] Post-processing: Checking and sorting FASTQs...", args.debug_file, args.debug_lock)
-    check_and_sort_fastqs(args)
+    check_and_sort_fastqs(args, n_threads_per_worker)
 
     log_debug_message("[main] Post-processing: Final validation of downloaded files...", args.debug_file, args.debug_lock)
-    final_validation(args)
+    final_validation(args, n_threads_per_worker)
 
     log_debug_message("[main] Writing sorted list of unique completed accessions...", args.debug_file, args.debug_lock)
     write_sorted_unique_completed(args.completed_file)
 
     log_debug_message("[main] Pipeline finished successfully.", args.debug_file, args.debug_lock)
     print("[INFO] All done.")
-
 
 if __name__ == "__main__":
     main()
