@@ -325,7 +325,6 @@ cut -f2 exported_gg2_taxonomy/taxonomy.tsv | tail -n +2 > example_taxa.txt
 ```
 
 5. Begin to prune the tree as so:
-6. 
 ```bash
 
 python pruningtree.py \
