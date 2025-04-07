@@ -497,7 +497,7 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
                 else:
                     append_line_with_lock(acc, args.failed_file, args.failed_lock)
             except Exception as e:
-                log_debug_message(f"[check_and_sort_fastqs] Failed to reprocess {accession}: {e}", args.debug_file, args.debug_lock)
+                log_debug_message(f"[check_and_sort_fastqs] Failed to reprocess {acc}: {e}", args.debug_file, args.debug_lock)
                 append_line_with_lock(acc, args.failed_file, args.failed_lock)
         else:
             log_debug_message(f"[check_and_sort_fastqs] No .sra or valid .fastq.gz for {acc}", args.debug_file, args.debug_lock)
@@ -515,6 +515,20 @@ def final_validation(args, n_threads_per_worker):
     }
     missing = expected - bio_files
 
+    # Check for files in fastq_biologicaldata that are not in the original accessions
+    notinaccessions_file = os.path.join(args.workdir, "notinaccessions.txt")
+    unexpected = bio_files - expected
+    if unexpected:
+        log_debug_message(f"[final_validation] Found {len(unexpected)} files in fastq_biologicaldata not in {args.accessions_file}: {', '.join(sorted(unexpected))}", 
+                          args.debug_file, args.debug_lock)
+        with open(notinaccessions_file, "w") as f:
+            for acc in sorted(unexpected):
+                f.write(f"{acc}\n")
+        log_debug_message(f"[final_validation] Wrote unexpected accessions to {notinaccessions_file}", 
+                          args.debug_file, args.debug_lock)
+    elif os.path.exists(notinaccessions_file):
+        os.remove(notinaccessions_file)  # Clean up if no unexpected files
+
     retry_these = []
     for acc in missing:
         sra_file = os.path.join(fastq_dir, f"{acc}.sra")
@@ -525,11 +539,10 @@ def final_validation(args, n_threads_per_worker):
             retry_these.append(acc)
 
     if not missing:
-        log_debug_message("[final_validation] All accessions accounted for in biological data", 
+        log_debug_message("[final_validation] All expected accessions accounted for in biological data", 
                           args.debug_file, args.debug_lock)
-        return
     else:
-        log_debug_message(f"[final_validation] {len(missing)} accessions are missing. "
+        log_debug_message(f"[final_validation] {len(missing)} expected accessions are missing. "
                           f"Retrying {len(retry_these)} of them.", 
                           args.debug_file, args.debug_lock)
 
