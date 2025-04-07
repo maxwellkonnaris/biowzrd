@@ -1,0 +1,19 @@
+name: gg2-env
+channels:
+  - qiime2/label/r2024.2
+  - conda-forge
+  - bioconda
+  - defaults
+  - etetoolkit
+dependencies:
+  - python=3.8
+  - ete3
+  - wget
+  - pip
+  - q2cli=2024.2
+  - qiime2=2024.2
+  - matplotlib
+  - pandas
+  - scikit-learn
+  - vsearch
+  - blast
