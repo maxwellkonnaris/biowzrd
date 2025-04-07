@@ -282,7 +282,7 @@ grep -oP '\)[^\),:]+' 2024.09.phylogeny.asv.nwk | head -n 20
 ```
 3. Next, You will need a txt file of the specified taxa youre interested in. If you have an ASV,Sequences file, we classify the sequences into the taxa labels based on the tree tips. e.g. example_taxa.txt
 
-https://github.com/biocore/q2-greengenes2
+https://github.com/biocore/q2-greengenes2 -- you will need to download the 2024.09.taxonomy.asv.tsv.qza file to convert your ASVs
 
 | Example Databases   | Description                                       | Tip Label Pattern                           |
 |------------|---------------------------------------------------|---------------------------------------------|
