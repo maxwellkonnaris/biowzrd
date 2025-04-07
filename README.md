@@ -278,8 +278,17 @@ grep -oP '\)[^\),:]+' 2024.09.phylogeny.asv.nwk | head -n 20
 # In this case we have quoted node names, and the tips are classified taxa labels instead of ASVs or OTUs. Likely from a taxonomic database like SILVA or RDP etc.
 # So if we have an ASV, Sequence file we convert it to classified taxa and supply as the example_taxa.txt
 ```
-3. Next, You will need a txt file of the specified taxa youre interested in. e.g. example_taxa.txt
-4. Begin to prune the tree as so:
+3. Next, You will need a txt file of the specified taxa youre interested in. If you have an ASV,Sequences file, we classify the sequences into the taxa labels based on the tree tips. e.g. example_taxa.txt
+```markdown
+| Example Databases   | Description                                       | Tip Label Pattern                           |
+|------------|---------------------------------------------------|---------------------------------------------|
+| Greengenes | Classic 16S rRNA reference, old (last updated 2013) | `k__Bacteria; p__...`                        |
+| SILVA      | 16S/18S focused, highly curated                  | Similar to Greengenes, sometimes tab-delimited |
+| GTDB       | Genome-resolved taxonomy (WGS)                   | `d__Bacteria; p__... s__XXXX sp[accession]`  |
+| Our example      | GTDB-based Greengenes 2024 release        | `'s__GWA2-33-14 sp001820215'` etc.           |
+```
+
+5. Begin to prune the tree as so:
 ```bash
 python pruningtree.py \
   --tree 2024.09.phylogeny.asv.nwk \
