@@ -34,7 +34,7 @@ def main(args):
         tree.show()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="MK's script for Dharmik's phylogenetic tree bias -- newick format in ETE Toolkit.")
+    parser = argparse.ArgumentParser(description="phylogenetic tree -- newick format in ETE Toolkit.")
     parser.add_argument("--tree", required=True, help="Path -- Newick tree")
     parser.add_argument("--out", required=True, help="Output path for (pruned) Newick tree")
     parser.add_argument("--prune_to", help="Path to text file with taxa to retain (one per line)")
