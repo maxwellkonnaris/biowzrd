@@ -396,7 +396,7 @@ def process_accession(accession, args, n_threads_per_worker, tmp_dir=None, final
         cleanup_invalid_fastqs(accession, fastq_dir, debug_file, debug_lock)
         classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock)
 
-        append_line_with_lock(accession, completed_file, completed_lock)
+        append_line_with_lock(accession, completed_file, completed_lock)  # Append as it completes
         return f"[OK] {accession}"
 
     except Exception as e:
@@ -539,26 +539,33 @@ def final_validation(args, n_threads_per_worker):
         with open(args.completed_file, "r") as cf:
             completed = {line.strip() for line in cf if line.strip()}
 
+    # Log counts for clarity
+    log_debug_message(f"[final_validation] Expected: {len(expected)}, Bio files: {len(bio_files)}, Completed: {len(completed)}",
+                      args.debug_file, args.debug_lock)
+
     missing = expected - bio_files
-    incomplete = bio_files - completed  # Files in bio_dir but not completed
-    notinaccessions_file = os.path.join(args.workdir, "notinaccessions.txt")
+    incomplete = bio_files - completed
+    notinaccessions_file = os.path.abspath(os.path.join(args.workdir, "notinaccessions.txt"))
     unexpected = bio_files - expected
 
+    log_debug_message(f"[final_validation] Checked for unexpected files: {len(unexpected)} found ({', '.join(sorted(unexpected)) if unexpected else 'none'})",
+                      args.debug_file, args.debug_lock)
+    
     if unexpected:
-        log_debug_message(f"[final_validation] Found {len(unexpected)} files in fastq_biologicaldata not in {args.accessions_file}: {', '.join(sorted(unexpected))}", 
+        log_debug_message(f"[final_validation] Writing {len(unexpected)} unexpected accessions to {notinaccessions_file}",
                           args.debug_file, args.debug_lock)
         with open(notinaccessions_file, "w") as f:
             for acc in sorted(unexpected):
                 f.write(f"{acc}\n")
-        log_debug_message(f"[final_validation] Wrote unexpected accessions to {notinaccessions_file}", 
-                          args.debug_file, args.debug_lock)
         if args.clean_unexpected:
             for acc in unexpected:
                 for f in glob.glob(os.path.join(bio_dir, f"{acc}*.fastq.gz")):
                     remove_file_safely(f, args.debug_file, args.debug_lock)
-                log_debug_message(f"[final_validation] Removed unexpected file(s) for {acc}", 
+                log_debug_message(f"[final_validation] Removed unexpected file(s) for {acc}",
                                   args.debug_file, args.debug_lock)
     elif os.path.exists(notinaccessions_file):
+        log_debug_message(f"[final_validation] No unexpected files; removing stale {notinaccessions_file}",
+                          args.debug_file, args.debug_lock)
         os.remove(notinaccessions_file)
 
     retry_these = []
@@ -566,30 +573,29 @@ def final_validation(args, n_threads_per_worker):
         sra_file = os.path.join(fastq_dir, f"{acc}.sra")
         fastqs = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
         if not fastqs and not os.path.exists(sra_file):
-            log_debug_message(f"[final_validation] {acc} completely missing. Will retry.", 
+            log_debug_message(f"[final_validation] {acc} completely missing. Will retry.",
                               args.debug_file, args.debug_lock)
             retry_these.append(acc)
 
-    # Handle incomplete files (in bio_dir but not completed)
     if incomplete:
-        log_debug_message(f"[final_validation] Found {len(incomplete)} incomplete files in fastq_biologicaldata not in completed.txt: {', '.join(sorted(incomplete))}", 
+        log_debug_message(f"[final_validation] Found {len(incomplete)} incomplete files in fastq_biologicaldata not in completed.txt: {', '.join(sorted(incomplete))}",
                           args.debug_file, args.debug_lock)
         for acc in incomplete:
             for f in glob.glob(os.path.join(bio_dir, f"{acc}*.fastq.gz")):
                 remove_file_safely(f, args.debug_file, args.debug_lock)
-            log_debug_message(f"[final_validation] Removed incomplete file(s) for {acc} to redownload", 
+            log_debug_message(f"[final_validation] Removed incomplete file(s) for {acc} to redownload",
                               args.debug_file, args.debug_lock)
             retry_these.append(acc)
 
     if not missing and not incomplete:
-        log_debug_message("[final_validation] All expected accessions accounted for in biological data and completed.txt", 
+        log_debug_message("[final_validation] All expected accessions accounted for in biological data and completed.txt",
                           args.debug_file, args.debug_lock)
     else:
-        log_debug_message(f"[final_validation] {len(missing)} expected accessions missing, {len(incomplete)} incomplete. Retrying {len(retry_these)} of them.", 
+        log_debug_message(f"[final_validation] {len(missing)} expected accessions missing, {len(incomplete)} incomplete. Retrying {len(retry_these)} of them.",
                           args.debug_file, args.debug_lock)
 
     if not retry_these:
-        return
+        return bio_files  # Return bio_files for final update
 
     if os.path.exists(args.failed_file):
         with open(args.failed_file, "r") as f:
@@ -612,20 +618,32 @@ def final_validation(args, n_threads_per_worker):
                 result = fut.result()
                 if "[FAIL]" in result:
                     append_line_with_lock(acc, args.failed_file, args.failed_lock)
-                log_debug_message(f"[final_validation] Retry result for {acc}: {result}", 
+                log_debug_message(f"[final_validation] Retry result for {acc}: {result}",
                                   args.debug_file, args.debug_lock)
             except Exception as e:
                 msg = f"[final_validation] Retry crashed for {acc}: {e}"
                 log_debug_message(msg, args.debug_file, args.debug_lock)
                 append_line_with_lock(acc, args.failed_file, args.failed_lock)
 
-def write_sorted_unique_completed(completed_file):
-    if os.path.isfile(completed_file):
-        with open(completed_file, "r") as f:
-            entries = sorted(set(line.strip() for line in f if line.strip()))
+    # Recalculate bio_files after retries
+    bio_files = {
+        re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1)
+        for f in Path(bio_dir).glob("*.fastq.gz")
+        if re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name)
+    }
+    return bio_files
+
+def write_sorted_unique_completed(completed_file, bio_files, debug_file, debug_lock):
+    if bio_files:
         with open(completed_file, "w") as f:
-            for line in entries:
-                f.write(line + "\n")
+            for acc in sorted(bio_files):
+                f.write(f"{acc}\n")
+        log_debug_message(f"[write_sorted_unique_completed] Updated {completed_file} with {len(bio_files)} accessions from fastq_biologicaldata",
+                          debug_file, debug_lock)
+    elif os.path.exists(completed_file):
+        os.remove(completed_file)
+        log_debug_message(f"[write_sorted_unique_completed] No bio files; removed {completed_file}",
+                          debug_file, debug_lock)
 
 ##########################
 # Cleanup Functions
@@ -684,8 +702,8 @@ def parse_args():
                         help="Path to a shared debug log file (default: debug.log)")
     parser.add_argument("--debug-lock", default="debug.lock",
                         help="Lock file for the debug log (default: debug.lock)")
-    parser.add_argument("--completed-file", default="completed.txt",
-                        help="File listing completed accessions (default: completed.txt)")
+    parser.add_argument("--completed-file", default="completed_accessions.txt",
+                        help="File listing completed accessions (default: completed_accessions.txt)")
     parser.add_argument("--completed-lock", default="completed.lock",
                         help="Lock file for the completed-file (default: completed.lock)")
     parser.add_argument("--failed-file", default="failed.txt",
@@ -734,22 +752,34 @@ def main():
     log_debug_message(f"[main] Found {len(all_accs)} valid accessions in {args.accessions_file}.", 
                       args.debug_file, args.debug_lock)
 
-    # Validate and clean completed.txt
+    # Validate completed.txt against fastq_biologicaldata at start
+    bio_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
+    bio_files = {
+        re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1)
+        for f in Path(bio_dir).glob("*.fastq.gz")
+        if re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name)
+    }
     done_accs = set()
     if os.path.isfile(args.completed_file):
         with open(args.completed_file, "r") as cf:
             raw_done = {line.strip() for line in cf if line.strip()}
-        done_accs = raw_done & all_accs  # Only keep those in run_accessions.txt
+        # Only keep completed accessions that exist in bio_files and run_accessions.txt
+        done_accs = raw_done & all_accs & bio_files
         unexpected_done = raw_done - all_accs
+        missing_files = (raw_done & all_accs) - bio_files
         if unexpected_done:
-            log_debug_message(f"[main] Found {len(unexpected_done)} completed accessions not in {args.accessions_file}: {', '.join(sorted(unexpected_done))}", 
+            log_debug_message(f"[main] Found {len(unexpected_done)} completed accessions not in {args.accessions_file}: {', '.join(sorted(unexpected_done))}",
                               args.debug_file, args.debug_lock)
+        if missing_files:
+            log_debug_message(f"[main] Found {len(missing_files)} completed accessions missing from fastq_biologicaldata: {', '.join(sorted(missing_files))}",
+                              args.debug_file, args.debug_lock)
+        if unexpected_done or missing_files:
             with open(args.completed_file, "w") as cf:
                 for acc in sorted(done_accs):
                     cf.write(f"{acc}\n")
-            log_debug_message(f"[main] Updated {args.completed_file} to remove {len(unexpected_done)} unexpected entries", 
+            log_debug_message(f"[main] Updated {args.completed_file} to {len(done_accs)} entries after removing {len(unexpected_done)} unexpected and {len(missing_files)} missing files",
                               args.debug_file, args.debug_lock)
-        log_debug_message(f"[main] Found {len(done_accs)} previously completed accessions matching {args.accessions_file}.", 
+        log_debug_message(f"[main] Found {len(done_accs)} previously completed accessions matching {args.accessions_file} and fastq_biologicaldata.",
                           args.debug_file, args.debug_lock)
 
     to_download = all_accs - done_accs
@@ -822,10 +852,11 @@ def main():
     check_and_sort_fastqs(args, n_threads_per_worker)
 
     log_debug_message("[main] Post-processing: Final validation of downloaded files...", args.debug_file, args.debug_lock)
-    final_validation(args, n_threads_per_worker)
+    final_bio_files = final_validation(args, n_threads_per_worker)
 
-    log_debug_message("[main] Writing sorted list of unique completed accessions...", args.debug_file, args.debug_lock)
-    write_sorted_unique_completed(args.completed_file)
+    log_debug_message("[main] Writing sorted list of unique completed accessions based on fastq_biologicaldata...", 
+                      args.debug_file, args.debug_lock)
+    write_sorted_unique_completed(args.completed_file, final_bio_files, args.debug_file, args.debug_lock)
 
     log_debug_message("[main] Cleaning up all temporary files...", args.debug_file, args.debug_lock)
     cleanup_all_temps(args.workdir, args.debug_file, args.debug_lock)
