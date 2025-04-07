@@ -113,7 +113,7 @@ def compress_fastqs(accession, fastq_dir, debug_file, debug_lock):
 
     for fq in fastq_files:
         if not fq.endswith(".gz"):
-            cmd =seguridad [compressor]
+            cmd = [compressor]
             if "pigz" in compressor:
                 cmd.extend(["-p", "8"])
             cmd.append(fq)
@@ -255,7 +255,6 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
 
     sra_file = os.path.join(tmp_fastq_dir, f"{accession}.sra")
 
-    # Clean up any existing .fastq files in fastq_dir to avoid conflicts
     for pattern in [f"{accession}*.fastq", f"{accession}*.fastq.gz"]:
         for f in glob.glob(os.path.join(fastq_dir, pattern)):
             remove_file_safely(f, debug_file, debug_lock)
@@ -264,8 +263,8 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
         run_command([
             "prefetch", accession, 
             "--max-size", "200G", 
-            "-r", "yes",  # Resume partial downloads
-            "-C", "yes",  # Verify after download
+            "-r", "yes", 
+            "-C", "yes", 
             "--output-file", sra_file
         ], f"[sra_download_route] prefetch failed {accession}", debug_file, debug_lock)
     except RuntimeError:
@@ -280,7 +279,7 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
             "--threads", str(n_threads_per_worker), 
             "--mem", mem_str,
             "--split-files", "--include-technical",
-            "--force"  # Force overwrite of existing files
+            "--force"
         ], f"[sra_download_route] fasterq-dump failed {accession}", debug_file, debug_lock)
     except RuntimeError:
         shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
@@ -360,7 +359,7 @@ def gsa_download_route(accession, workdir, debug_file, debug_lock):
 ##########################
 
 def process_accession(accession, args, n_threads_per_worker, tmp_dir=None, final_retry=False, initial_delay=0):
-    time.sleep(initial_delay)  # Apply delay here instead of in a nested function
+    time.sleep(initial_delay)
 
     debug_lock     = args.debug_lock
     debug_file     = args.debug_file
@@ -486,7 +485,7 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
                     "--force"
                 ], f"[check_and_sort_fastqs] fasterq-dump failed for {acc}", args.debug_file, args.debug_lock)
 
-                compress_fastqs(acc, fastq_dir, args.debug_file, args.debug_lock)
+                compress_fastqs(acc, fastq_dir, args.debug_file, debug_lock)
 
                 gz_files = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
                 if gz_files and all(is_valid_gzip(gz) for gz in gz_files):
@@ -513,6 +512,11 @@ def final_validation(args, n_threads_per_worker):
     expected = validate_accessions_file(args.accessions_file, args.debug_file, args.debug_lock)
     bio_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
     fastq_dir = os.path.join(args.workdir, "fastq_data")
+
+    # Clean up any leftover .fastq files in fastq_dir
+    for fq in glob.glob(os.path.join(fastq_dir, "*.fastq")):
+        log_debug_message(f"[final_validation] Removing leftover FASTQ: {fq}", args.debug_file, args.debug_lock)
+        remove_file_safely(fq, args.debug_file, args.debug_lock)
 
     bio_files = {
         re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name).group(1)
@@ -591,6 +595,50 @@ def write_sorted_unique_completed(completed_file):
                 f.write(line + "\n")
 
 ##########################
+# Cleanup Functions
+##########################
+
+def cleanup_locks(args):
+    lock_files = [args.completed_lock, args.debug_lock, args.failed_lock]
+    for lock_file in lock_files:
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+                sys.stderr.write(f"[INFO] Removed lock file: {lock_file}\n")
+            except Exception as e:
+                sys.stderr.write(f"[WARN] Failed to remove lock file {lock_file}: {e}\n")
+
+def cleanup_temp_dir(tmp_dir):
+    if tmp_dir and os.path.exists(tmp_dir):
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            sys.stderr.write(f"[INFO] Cleaned up temporary directory: {tmp_dir}\n")
+        except Exception as e:
+            sys.stderr.write(f"[WARN] Failed to clean up temporary directory {tmp_dir}: {e}\n")
+
+def cleanup_all_temps(workdir, debug_file, debug_lock):
+    fastq_dir = os.path.join(workdir, "fastq_data")
+    tmp_dir = os.path.join(fastq_dir, "tmp")
+    if os.path.exists(tmp_dir):
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            log_debug_message(f"[cleanup_all_temps] Removed {tmp_dir}", debug_file, debug_lock)
+        except Exception as e:
+            log_debug_message(f"[cleanup_all_temps] Failed to remove {tmp_dir}: {e}", debug_file, debug_lock)
+
+    # Clean up any stray .sra or .fastq files in fastq_dir
+    for pattern in ["*.sra", "*.fastq"]:
+        for f in glob.glob(os.path.join(fastq_dir, pattern)):
+            remove_file_safely(f, debug_file, debug_lock)
+
+def signal_handler(sig, frame, args):
+    sys.stderr.write(f"[INFO] Received signal {sig}, cleaning up...\n")
+    cleanup_locks(args)
+    cleanup_temp_dir(args.tmp_dir)
+    cleanup_all_temps(args.workdir, args.debug_file, args.debug_lock)
+    sys.exit(1)
+
+##########################
 # Main with Dynamic Workers
 ##########################
 
@@ -624,32 +672,15 @@ def parse_args():
                         help="Directory for temporary files (default: within workdir/fastq_data)")
     return parser.parse_args()
 
-def cleanup_locks(args):
-    lock_files = [args.completed_lock, args.debug_lock, args.failed_lock]
-    for lock_file in lock_files:
-        if os.path.exists(lock_file):
-            try:
-                os.remove(lock_file)
-                sys.stderr.write(f"[INFO] Removed lock file: {lock_file}\n")
-            except Exception as e:
-                sys.stderr.write(f"[WARN] Failed to remove lock file {lock_file}: {e}\n")
-
-def cleanup_temp_dir(tmp_dir):
-    if tmp_dir and os.path.exists(tmp_dir):
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            sys.stderr.write(f"[INFO] Cleaned up temporary directory: {tmp_dir}\n")
-        except Exception as e:
-            sys.stderr.write(f"[WARN] Failed to clean up temporary directory {tmp_dir}: {e}\n")
-
 def main():
     args = parse_args()
     atexit.register(cleanup_locks, args)
     if args.tmp_dir:
         atexit.register(cleanup_temp_dir, args.tmp_dir)
     
-    signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(1))  # Ctrl+C
-    signal.signal(signal.SIGTERM, lambda sig, frame: sys.exit(1)) # Termination
+    # Enhanced signal handling
+    signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, args))
+    signal.signal(signal.SIGTERM, lambda sig, frame: signal_handler(sig, frame, args))
 
     if args.api_key:
         os.environ["NCBI_API_KEY"] = args.api_key
@@ -713,7 +744,7 @@ def main():
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             future_map = {}
-            stagger_delay = 2.0  # Base delay in seconds between process starts
+            stagger_delay = 2.0
             for i, acc in enumerate(sorted(to_download)):
                 initial_delay = stagger_delay * i + random.uniform(0, 1.0)
                 log_debug_message(
@@ -751,6 +782,9 @@ def main():
 
     log_debug_message("[main] Writing sorted list of unique completed accessions...", args.debug_file, args.debug_lock)
     write_sorted_unique_completed(args.completed_file)
+
+    log_debug_message("[main] Cleaning up all temporary files...", args.debug_file, args.debug_lock)
+    cleanup_all_temps(args.workdir, args.debug_file, args.debug_lock)
 
     log_debug_message("[main] Pipeline finished successfully.", args.debug_file, args.debug_lock)
     print("[INFO] All done.")
