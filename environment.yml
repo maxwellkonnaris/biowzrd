@@ -33,6 +33,7 @@ dependencies:
   - pigz
   - psutil
   - tenacity
+  - parallel
   - r-base
   - r-ggplot2
   - r-dplyr
