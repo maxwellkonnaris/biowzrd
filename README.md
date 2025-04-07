@@ -282,6 +282,8 @@ grep -oP '\)[^\),:]+' 2024.09.phylogeny.asv.nwk | head -n 20
 ```
 3. Next, You will need a txt file of the specified taxa youre interested in. If you have an ASV,Sequences file, we classify the sequences into the taxa labels based on the tree tips. e.g. example_taxa.txt
 
+https://github.com/biocore/q2-greengenes2
+
 | Example Databases   | Description                                       | Tip Label Pattern                           |
 |------------|---------------------------------------------------|---------------------------------------------|
 | Greengenes | Classic 16S rRNA reference, old (last updated 2013) | `k__Bacteria; p__...`                        |
@@ -290,8 +292,15 @@ grep -oP '\)[^\),:]+' 2024.09.phylogeny.asv.nwk | head -n 20
 | Our example      | GTDB-based Greengenes 2024 release        | `'s__GWA2-33-14 sp001820215'` etc.           |
 
 ```bash
+
+qiime tools import \
+  --input-path asv_sequences.fasta \
+  --output-path rep-seqs.qza \
+  --type 'FeatureData[Sequence]'
+
+
 qiime greengenes2 taxonomy-from-features \
-  --i-reference-taxonomy 2024.09.taxonomy.asv.qza \
+  --i-reference-taxonomy 2024.09.taxonomy.asv.tsv.qza \
   --i-reads rep-seqs.qza \
   --o-classification gg2-taxonomy.qza
 
@@ -306,21 +315,26 @@ qiime greengenes2 taxonomy-from-features \
 | `--i-reference (tree)`  | `.nwk.qza` or `.qza`   | `Tree` or `Taxonomy`      | `2024.09.phylogeny.asv.nwk.qza` |
 
 ```bash
+
 qiime tools export \
   --input-path gg2-taxonomy.qza \
   --output-path exported_gg2_taxonomy
 
 cut -f2 exported_gg2_taxonomy/taxonomy.tsv | tail -n +2 > example_taxa.txt
+
 ```
 
 5. Begin to prune the tree as so:
+6. 
 ```bash
+
 python pruningtree.py \
   --tree 2024.09.phylogeny.asv.nwk \
   --out pruned_tree.asv.nwk \
   --prune_to example_taxa.txt \
   --format 1 \
   --quoted_node_names
+
 ```
 
 ## Plotting (plotting/):
