@@ -260,11 +260,11 @@ https://www.ebi.ac.uk/metagenomics/api/v1/studies/MGYS00006745
 ```
 
 ## Phylogenetic Analysis (phylogenetics/)
-Packages Required: ete
+Packages Required: ete3, qiime
 1. Create a conda environment with the required tools
 ```bash
-conda create -n etetoolkit -c etetoolkit ete3 python=3.8
-conda activate etetoolkit
+conda env create -f gg2-env.yml
+conda activate gg2-env
 ```
 2. If you have a newick tree then we want to prune the tree. However, we need to understand the format of your newick tree first. So we look at the format of our tree tips. This can be used as the format and quoted names input parameters for our pruning.
   - if you do not have a newick tree, an example can be downloaded at https://greengenes2.ucsd.edu/
