@@ -259,6 +259,33 @@ awk -F',' 'NR>1 && NF > 1 && !seen[$1]++ && $1 ~ /^[A-Za-z0-9_-]+$/ {print $5}' 
 https://www.ebi.ac.uk/metagenomics/api/v1/studies/MGYS00006745 
 ```
 
+## Phylogenetic Analysis (phylogenetics/)
+Packages Required: ete
+1. Create a conda environment with the required tools
+```bash
+conda create -n etetoolkit -c etetoolkit ete3 python=3.8
+conda activate etetoolkit
+```
+2. If you have a newick tree then we want to prune the tree. However, we need to understand the format of your newick tree first. So we look at the format of our tree tips. This can be used as the format and quoted names input parameters for our pruning.
+  - if you do not have a newick tree, an example can be downloaded at https://greengenes2.ucsd.edu/
+```bash
+head -c 1000 2024.09.phylogeny.asv.nwk
+
+#OR
+
+grep -oP '\)[^\),:]+' 2024.09.phylogeny.asv.nwk | head -n 20
+```
+3. Next, You will need a txt file of the specified taxa youre interested in. e.g. example_asv_taxa.txt
+4. Begin to prune the tree as so:
+```bash
+python pruningtree.py \
+  --tree 2024.09.phylogeny.asv.nwk \
+  --out pruned_tree.asv.nwk \
+  --prune_to example_asv_taxa.txt \
+  --format 1 \
+  --quoted_node_names
+```
+
 ## Plotting (plotting/):
 
 1. Color palletes: https://www.simplifiedsciencepublishing.com/resources/best-color-palettes-for-scientific-figures-and-data-visualizations
