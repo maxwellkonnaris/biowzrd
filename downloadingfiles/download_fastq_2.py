@@ -51,8 +51,10 @@ def log_debug_message(msg, debug_file, debug_lock):
 # File Validation Helpers
 ##########################
 
-def is_valid_fastq(path, min_size_bytes=1024):
-    return os.path.isfile(path) and os.path.getsize(path) >= min_size_bytes
+def is_valid_fastq(path, min_size_bytes=100):  # Lowered for debugging
+    size = os.path.getsize(path) if os.path.isfile(path) else 0
+    valid = size >= min_size_bytes
+    return valid, size
 
 def is_valid_gzip(path):
     try:
@@ -123,7 +125,7 @@ def compress_fastqs(accession, fastq_dir, debug_file, debug_lock):
 def cleanup_invalid_fastqs(accession, fastq_dir, debug_file, debug_lock):
     gz_files = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz"))
     for gz in gz_files:
-        if not is_valid_fastq(gz) or not is_valid_gzip(gz):
+        if not is_valid_fastq(gz)[0] or not is_valid_gzip(gz):
             log_debug_message(f"[WARN] Removing invalid FASTQ: {gz}", debug_file, debug_lock)
             remove_file_safely(gz, debug_file, debug_lock)
 
@@ -240,7 +242,7 @@ def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug
         log_debug_message(f"[metadata] Error merging runinfo for {accession}: {e}", debug_file, debug_lock)
 
 ##########################
-# SRA Download Route with Custom tmp_dir and New Flags
+# SRA Download Route
 ##########################
 
 def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta, n_threads_per_worker, tmp_dir=None):
@@ -271,6 +273,12 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
         shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
         return False
 
+    if not os.path.isfile(sra_file) or os.path.getsize(sra_file) < 1024:
+        log_debug_message(f"[sra_download_route] Invalid or tiny .sra file for {accession}: {os.path.getsize(sra_file)} bytes", 
+                          debug_file, debug_lock)
+        shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
+        return False
+
     try:
         run_command([
             "fasterq-dump", sra_file, 
@@ -293,8 +301,10 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
         shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
         return False
     for fq in fastqs:
-        if not is_valid_fastq(fq, 1024):
-            log_debug_message(f"[sra_download_route] Invalid or tiny FASTQ: {fq}", debug_file, debug_lock)
+        valid, size = is_valid_fastq(fq)
+        if not valid:
+            log_debug_message(f"[sra_download_route] Invalid or tiny FASTQ: {fq} (size: {size} bytes)", 
+                              debug_file, debug_lock)
             shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
             return False
 
@@ -310,7 +320,7 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
     return True
 
 ##########################
-# GSA Download Route with Custom tmp_dir
+# GSA Download Route
 ##########################
 
 def gsa_download_route(accession, workdir, debug_file, debug_lock):
@@ -338,8 +348,9 @@ def gsa_download_route(accession, workdir, debug_file, debug_lock):
         shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
         return False
     for fq in fastqs:
-        if not is_valid_fastq(fq):
-            log_debug_message(f"[gsa_download_route] Invalid FASTQ found: {fq}", debug_file, debug_lock)
+        valid, size = is_valid_fastq(fq)
+        if not valid:
+            log_debug_message(f"[gsa_download_route] Invalid FASTQ found: {fq} (size: {size} bytes)", debug_file, debug_lock)
             shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
             return False
 
@@ -355,7 +366,7 @@ def gsa_download_route(accession, workdir, debug_file, debug_lock):
     return True
 
 ##########################
-# Updated Worker Function
+# Worker Function
 ##########################
 
 def process_accession(accession, args, n_threads_per_worker, tmp_dir=None, final_retry=False, initial_delay=0):
@@ -444,9 +455,10 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
         if gz_files:
             all_valid = True
             for gz in gz_files:
-                if not (is_valid_fastq(gz) and is_valid_gzip(gz)):
+                valid, size = is_valid_fastq(gz)
+                if not (valid and is_valid_gzip(gz)):
                     all_valid = False
-                    log_debug_message(f"[check_and_sort_fastqs] Incomplete/invalid file: {gz}", args.debug_file, args.debug_lock)
+                    log_debug_message(f"[check_and_sort_fastqs] Incomplete/invalid file: {gz} (size: {size} bytes)", args.debug_file, args.debug_lock)
                     remove_file_safely(gz, args.debug_file, args.debug_lock)
 
             if all_valid:
@@ -513,7 +525,6 @@ def final_validation(args, n_threads_per_worker):
     bio_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
     fastq_dir = os.path.join(args.workdir, "fastq_data")
 
-    # Clean up any leftover .fastq files in fastq_dir
     for fq in glob.glob(os.path.join(fastq_dir, "*.fastq")):
         log_debug_message(f"[final_validation] Removing leftover FASTQ: {fq}", args.debug_file, args.debug_lock)
         remove_file_safely(fq, args.debug_file, args.debug_lock)
@@ -523,10 +534,16 @@ def final_validation(args, n_threads_per_worker):
         for f in Path(bio_dir).glob("*.fastq.gz")
         if re.match(r"(.+?)(?:_\d+)?\.fastq\.gz$", f.name)
     }
-    missing = expected - bio_files
+    completed = set()
+    if os.path.isfile(args.completed_file):
+        with open(args.completed_file, "r") as cf:
+            completed = {line.strip() for line in cf if line.strip()}
 
+    missing = expected - bio_files
+    incomplete = bio_files - completed  # Files in bio_dir but not completed
     notinaccessions_file = os.path.join(args.workdir, "notinaccessions.txt")
     unexpected = bio_files - expected
+
     if unexpected:
         log_debug_message(f"[final_validation] Found {len(unexpected)} files in fastq_biologicaldata not in {args.accessions_file}: {', '.join(sorted(unexpected))}", 
                           args.debug_file, args.debug_lock)
@@ -535,6 +552,12 @@ def final_validation(args, n_threads_per_worker):
                 f.write(f"{acc}\n")
         log_debug_message(f"[final_validation] Wrote unexpected accessions to {notinaccessions_file}", 
                           args.debug_file, args.debug_lock)
+        if args.clean_unexpected:
+            for acc in unexpected:
+                for f in glob.glob(os.path.join(bio_dir, f"{acc}*.fastq.gz")):
+                    remove_file_safely(f, args.debug_file, args.debug_lock)
+                log_debug_message(f"[final_validation] Removed unexpected file(s) for {acc}", 
+                                  args.debug_file, args.debug_lock)
     elif os.path.exists(notinaccessions_file):
         os.remove(notinaccessions_file)
 
@@ -547,12 +570,22 @@ def final_validation(args, n_threads_per_worker):
                               args.debug_file, args.debug_lock)
             retry_these.append(acc)
 
-    if not missing:
-        log_debug_message("[final_validation] All expected accessions accounted for in biological data", 
+    # Handle incomplete files (in bio_dir but not completed)
+    if incomplete:
+        log_debug_message(f"[final_validation] Found {len(incomplete)} incomplete files in fastq_biologicaldata not in completed.txt: {', '.join(sorted(incomplete))}", 
+                          args.debug_file, args.debug_lock)
+        for acc in incomplete:
+            for f in glob.glob(os.path.join(bio_dir, f"{acc}*.fastq.gz")):
+                remove_file_safely(f, args.debug_file, args.debug_lock)
+            log_debug_message(f"[final_validation] Removed incomplete file(s) for {acc} to redownload", 
+                              args.debug_file, args.debug_lock)
+            retry_these.append(acc)
+
+    if not missing and not incomplete:
+        log_debug_message("[final_validation] All expected accessions accounted for in biological data and completed.txt", 
                           args.debug_file, args.debug_lock)
     else:
-        log_debug_message(f"[final_validation] {len(missing)} expected accessions are missing. "
-                          f"Retrying {len(retry_these)} of them.", 
+        log_debug_message(f"[final_validation] {len(missing)} expected accessions missing, {len(incomplete)} incomplete. Retrying {len(retry_these)} of them.", 
                           args.debug_file, args.debug_lock)
 
     if not retry_these:
@@ -626,7 +659,6 @@ def cleanup_all_temps(workdir, debug_file, debug_lock):
         except Exception as e:
             log_debug_message(f"[cleanup_all_temps] Failed to remove {tmp_dir}: {e}", debug_file, debug_lock)
 
-    # Clean up any stray .sra or .fastq files in fastq_dir
     for pattern in ["*.sra", "*.fastq"]:
         for f in glob.glob(os.path.join(fastq_dir, pattern)):
             remove_file_safely(f, debug_file, debug_lock)
@@ -670,6 +702,8 @@ def parse_args():
                         help="Email address for EDirect (optional). If provided, exported as EMAIL.")
     parser.add_argument("--tmp-dir", default=None,
                         help="Directory for temporary files (default: within workdir/fastq_data)")
+    parser.add_argument("--clean-unexpected", action="store_true",
+                        help="Remove files in fastq_biologicaldata not in accessions file")
     return parser.parse_args()
 
 def main():
@@ -678,7 +712,6 @@ def main():
     if args.tmp_dir:
         atexit.register(cleanup_temp_dir, args.tmp_dir)
     
-    # Enhanced signal handling
     signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, args))
     signal.signal(signal.SIGTERM, lambda sig, frame: signal_handler(sig, frame, args))
 
@@ -701,12 +734,23 @@ def main():
     log_debug_message(f"[main] Found {len(all_accs)} valid accessions in {args.accessions_file}.", 
                       args.debug_file, args.debug_lock)
 
+    # Validate and clean completed.txt
     done_accs = set()
     if os.path.isfile(args.completed_file):
         with open(args.completed_file, "r") as cf:
-            done_accs = {line.strip() for line in cf if line.strip()}
-    log_debug_message(f"[main] Found {len(done_accs)} previously completed accessions.", 
-                      args.debug_file, args.debug_lock)
+            raw_done = {line.strip() for line in cf if line.strip()}
+        done_accs = raw_done & all_accs  # Only keep those in run_accessions.txt
+        unexpected_done = raw_done - all_accs
+        if unexpected_done:
+            log_debug_message(f"[main] Found {len(unexpected_done)} completed accessions not in {args.accessions_file}: {', '.join(sorted(unexpected_done))}", 
+                              args.debug_file, args.debug_lock)
+            with open(args.completed_file, "w") as cf:
+                for acc in sorted(done_accs):
+                    cf.write(f"{acc}\n")
+            log_debug_message(f"[main] Updated {args.completed_file} to remove {len(unexpected_done)} unexpected entries", 
+                              args.debug_file, args.debug_lock)
+        log_debug_message(f"[main] Found {len(done_accs)} previously completed accessions matching {args.accessions_file}.", 
+                          args.debug_file, args.debug_lock)
 
     to_download = all_accs - done_accs
     log_debug_message(f"[main] {len(to_download)} accessions remain to be processed.", 
@@ -727,7 +771,7 @@ def main():
             max_workers_by_cores = total_cores // min_threads_per_worker
             num_workers = min(max_workers_by_cores, len(to_download), max_workers_cap)
         else:
-            num_workers = min(args.num_workers, max_workers_cap)
+            num_workers = min(args.num_workers, len(to_download), max_workers_cap)
         n_threads_per_worker = max(min_threads_per_worker, total_cores // num_workers)
         log_debug_message(f"[main] Dynamically allocated {num_workers} workers with {n_threads_per_worker} threads each "
                           f"(total cores: {total_cores}, tasks: {len(to_download)}).",
