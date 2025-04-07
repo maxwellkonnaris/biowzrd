@@ -260,11 +260,13 @@ https://www.ebi.ac.uk/metagenomics/api/v1/studies/MGYS00006745
 ```
 
 ## Phylogenetic Analysis (phylogenetics/)
-Packages Required: ete3, qiime
+Packages Required: ete3, qiime2, q2-greengenes2
 1. Create a conda environment with the required tools
 ```bash
 conda env create -f gg2-env.yml
 conda activate gg2-env
+pip install q2-greengenes2
+qiime dev refresh-cache
 ```
 2. If you have a newick tree then we want to prune the tree. However, we need to understand the format of your newick tree first. So we look at the format of our tree tips. This can be used as the format and quoted names input parameters for our pruning.
   - if you do not have a newick tree, an example can be downloaded at https://greengenes2.ucsd.edu/
@@ -287,25 +289,30 @@ grep -oP '\)[^\),:]+' 2024.09.phylogeny.asv.nwk | head -n 20
 | GTDB       | Genome-resolved taxonomy (WGS)                   | `d__Bacteria; p__... s__XXXX sp[accession]`  |
 | Our example      | GTDB-based Greengenes 2024 release        | `'s__GWA2-33-14 sp001820215'` etc.           |
 
-   - Therefore we can go to https://github.com/ggnet-lab/greengenes2 and look in:
-
-greengenes2/
-├── taxonomy/
-├── trees/
-├── **q2-classifier/**
-
 ```bash
-qiime feature-classifier classify-sklearn \
-  --i-classifier gg2-classifier.qza \
-  --i-reads your-rep-seqs.qza \
-  --o-classification gg2_taxonomy.qza
-
-qiime tools export \
-  --input-path gg2_taxonomy.qza \
-  --output-path exported_gg2_taxonomy
-
+qiime greengenes2 taxonomy-from-features \
+  --i-reference-taxonomy 2024.09.taxonomy.asv.qza \
+  --i-reads rep-seqs.qza \
+  --o-classification gg2-taxonomy.qza
 
 ```
+
+| Parameter               | File Format            | QIIME2 Type              | Example                         |
+|-------------------------|------------------------|---------------------------|----------------------------------|
+| `--i-reads`             | `.qza` from `.fasta`   | `FeatureData[Sequence]`   | `rep-seqs.qza`                  |
+| `--i-reference-taxonomy`| downloaded `.qza`      | `FeatureData[Taxonomy]`   | `2024.09.taxonomy.asv.qza`      |
+| `--o-classification`    | output `.qza`          | `FeatureData[Taxonomy]`   | `gg2-taxonomy.qza`              |
+| `--i-feature-table`     | `.qza` from count table| `FeatureTable[Frequency]` | `table.qza`                     |
+| `--i-reference (tree)`  | `.nwk.qza` or `.qza`   | `Tree` or `Taxonomy`      | `2024.09.phylogeny.asv.nwk.qza` |
+
+```bash
+qiime tools export \
+  --input-path gg2-taxonomy.qza \
+  --output-path exported_gg2_taxonomy
+
+cut -f2 exported_gg2_taxonomy/taxonomy.tsv | tail -n +2 > example_taxa.txt
+```
+
 5. Begin to prune the tree as so:
 ```bash
 python pruningtree.py \
