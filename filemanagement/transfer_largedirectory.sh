@@ -2,26 +2,37 @@
 #SBATCH --job-name=parallel_transfer
 #SBATCH --output=transfer_%j.log
 #SBATCH --error=transfer_%j.err
-#SBATCH --time=72:00:00          # Increased time for robustness
-#SBATCH --account=open
+#SBATCH --time=48:00:00
+#SBATCH --account=one
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=300G               # Increased memory for large transfers
+#SBATCH --mem=300G
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=ALL
 
 # Enable command tracing for debugging
 set -x
 
-# Paths
-SRC_DIR="/storage/home/mak6930/scratch/mlscale/fastq_data"
-DEST_DIR="/storage/home/mak6930/silvermanlab/mlscale/fastq_data"
+# Default paths (used if no arguments provided)
+DEFAULT_SRC_DIR="/storage/home/mak6930/scratch/mlscale/fastq_data"
+DEFAULT_DEST_DIR="/storage/home/mak6930/silvermanlab/mlscale/fastq_data"
+
+# Set paths from arguments or defaults
+SRC_DIR="${1:-$DEFAULT_SRC_DIR}"
+DEST_DIR="${2:-$DEFAULT_DEST_DIR}"
 STATUS_DIR="./transfer_status"
 LOG_FILE="$SLURM_SUBMIT_DIR/transfer_${SLURM_JOB_ID}.log"
 
 # Ensure SLURM_SUBMIT_DIR is set
 SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
+
+# Cleanup function for filelists and temp files
+cleanup() {
+  rm -f "$STATUS_DIR/filelist_part_"* "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt" "$SLURM_SUBMIT_DIR/transfer_chunk.sh"
+  log_message "Cleaned up temporary files in $STATUS_DIR"
+}
+trap cleanup EXIT  # Run cleanup on script exit (success, failure, or interrupt)
 
 # Function to log messages with timestamps
 log_message() {
@@ -40,23 +51,24 @@ fi
 
 # Generate relative file list
 cd "$SRC_DIR" || { log_message "ERROR: Cannot cd to $SRC_DIR"; exit 1; }
-find . -type f -not -name "*.tmp" -not -name "*.swp" > "$SLURM_SUBMIT_DIR/filelist.txt"
-if [ ! -s "$SLURM_SUBMIT_DIR/filelist.txt" ]; then
+find . -type f -not -name "*.tmp" -not -name "*.swp" > "$STATUS_DIR/filelist.txt"
+if [ ! -s "$STATUS_DIR/filelist.txt" ]; then
   log_message "ERROR: No files found in $SRC_DIR"
   exit 1
 fi
 cd "$SLURM_SUBMIT_DIR" || { log_message "ERROR: Cannot cd to $SLURM_SUBMIT_DIR"; exit 1; }
 
-# Split file list into chunks
-TOTAL_FILES=$(wc -l < filelist.txt)
+# Split file list into chunks in STATUS_DIR
+TOTAL_FILES=$(wc -l < "$STATUS_DIR/filelist.txt")
 CHUNK_SIZE=$(( (TOTAL_FILES + SLURM_CPUS_PER_TASK - 1) / SLURM_CPUS_PER_TASK ))
-split -l "$CHUNK_SIZE" filelist.txt filelist_part_ || {
+split -l "$CHUNK_SIZE" "$STATUS_DIR/filelist.txt" "$STATUS_DIR/filelist_part_" || {
   log_message "ERROR: Failed to split filelist.txt"
   exit 1
 }
+rm -f "$STATUS_DIR/filelist.txt"  # Remove original filelist after splitting
 
 # Create chunk transfer script
-cat << 'EOF' > transfer_chunk.sh
+cat << 'EOF' > "$SLURM_SUBMIT_DIR/transfer_chunk.sh"
 #!/bin/bash
 chunk="$1"
 SRC_DIR="$2"
@@ -92,12 +104,12 @@ for attempt in {1..3}; do
 done
 EOF
 
-chmod +x transfer_chunk.sh
+chmod +x "$SLURM_SUBMIT_DIR/transfer_chunk.sh"
 
 # Run in parallel with no tty prompts
 log_message "===== STARTING PARALLEL TRANSFER ====="
 parallel --no-notice --plain --eta --retries 3 -j "$SLURM_CPUS_PER_TASK" \
-  ./transfer_chunk.sh {} "$SRC_DIR" "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" ::: filelist_part_* || {
+  "$SLURM_SUBMIT_DIR/transfer_chunk.sh" {} "$SRC_DIR" "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" ::: "$STATUS_DIR/filelist_part_"* || {
   log_message "ERROR: Parallel transfer failed"
   exit 1
 }
@@ -111,18 +123,15 @@ rsync -avh --progress --checksum "$SRC_DIR/" "$DEST_DIR/" || {
 
 # Validation step
 log_message "===== VALIDATING TRANSFER ====="
-rsync -avh --dry-run --checksum "$SRC_DIR/" "$DEST_DIR/" | tee "$SLURM_SUBMIT_DIR/validation_${SLURM_JOB_ID}.txt"
-if grep -q "would be" "$SLURM_SUBMIT_DIR/validation_${SLURM_JOB_ID}.txt"; then
+rsync -avh --dry-run --checksum "$SRC_DIR/" "$DEST_DIR/" | tee "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt"
+if grep -q "would be" "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt"; then
   log_message "WARNING: Validation found discrepancies"
 else
   log_message "Validation passed: All files match"
 fi
 
-# Summary using wc instead of ls to avoid alias issues
+# Summary using find instead of ls
 log_message "===== JOB COMPLETED ====="
 COMPLETED_CHUNKS=$(find "$STATUS_DIR" -name "*.done" | wc -l)
-TOTAL_CHUNKS=$(find . -name "filelist_part_*" | wc -l)
+TOTAL_CHUNKS=$(find "$STATUS_DIR" -name "filelist_part_*" | wc -l)
 log_message "Chunks completed: $COMPLETED_CHUNKS / $TOTAL_CHUNKS"
-
-# Optional cleanup (uncomment to enable)
-# rm -f filelist.txt filelist_part_* transfer_chunk.sh "$SLURM_SUBMIT_DIR/validation_${SLURM_JOB_ID}.txt"
