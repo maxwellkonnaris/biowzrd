@@ -113,7 +113,7 @@ def compress_fastqs(accession, fastq_dir, debug_file, debug_lock):
 
     for fq in fastq_files:
         if not fq.endswith(".gz"):
-            cmd = [compressor]
+            cmd =seguridad [compressor]
             if "pigz" in compressor:
                 cmd.extend(["-p", "8"])
             cmd.append(fq)
@@ -125,10 +125,7 @@ def cleanup_invalid_fastqs(accession, fastq_dir, debug_file, debug_lock):
     for gz in gz_files:
         if not is_valid_fastq(gz) or not is_valid_gzip(gz):
             log_debug_message(f"[WARN] Removing invalid FASTQ: {gz}", debug_file, debug_lock)
-            try:
-                os.remove(gz)
-            except Exception as e:
-                log_debug_message(f"[ERROR] while removing {gz}: {e}", debug_file, debug_lock)
+            remove_file_safely(gz, debug_file, debug_lock)
 
 def classify_fastq_by_read_type(accession, fastq_dir, debug_file, debug_lock):
     vdb_dump = shutil.which("vdb-dump")
@@ -249,7 +246,7 @@ def fetch_sra_metadata(accession, metadata_dir, combined_meta, debug_file, debug
 def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta, n_threads_per_worker, tmp_dir=None):
     fastq_dir = os.path.join(workdir, "fastq_data")
     metadata_dir = os.path.join(workdir, "metadata")
-    tmp_fastq_dir = os.path.join(tmp_dir or fastq_dir, f"tmp/fastq_{accession}")
+    tmp_fastq_dir = os.path.join(tmp_dir or fastq_dir, f"tmp/fastq_{accession}_{os.getpid()}")
     os.makedirs(tmp_fastq_dir, exist_ok=True)
 
     mem_bytes = psutil.virtual_memory().available // n_threads_per_worker
@@ -257,6 +254,11 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
     mem_str = f"{mem_gb}G"
 
     sra_file = os.path.join(tmp_fastq_dir, f"{accession}.sra")
+
+    # Clean up any existing .fastq files in fastq_dir to avoid conflicts
+    for pattern in [f"{accession}*.fastq", f"{accession}*.fastq.gz"]:
+        for f in glob.glob(os.path.join(fastq_dir, pattern)):
+            remove_file_safely(f, debug_file, debug_lock)
 
     try:
         run_command([
@@ -273,11 +275,12 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
     try:
         run_command([
             "fasterq-dump", sra_file, 
-            "--temp", tmp_dir or tmp_fastq_dir,
+            "--temp", tmp_fastq_dir,
             "--outdir", fastq_dir,
             "--threads", str(n_threads_per_worker), 
             "--mem", mem_str,
-            "--split-files", "--include-technical"
+            "--split-files", "--include-technical",
+            "--force"  # Force overwrite of existing files
         ], f"[sra_download_route] fasterq-dump failed {accession}", debug_file, debug_lock)
     except RuntimeError:
         shutil.rmtree(tmp_fastq_dir, ignore_errors=True)
@@ -313,7 +316,7 @@ def sra_download_route(accession, workdir, debug_file, debug_lock, combined_meta
 
 def gsa_download_route(accession, workdir, debug_file, debug_lock):
     fastq_dir = os.path.join(workdir, "fastq_data")
-    tmp_fastq_dir = os.path.join(fastq_dir, f"tmp/fastq_{accession}")
+    tmp_fastq_dir = os.path.join(fastq_dir, f"tmp/fastq_{accession}_{os.getpid()}")
     os.makedirs(tmp_fastq_dir, exist_ok=True)
 
     iseq = shutil.which("iseq")
@@ -356,7 +359,9 @@ def gsa_download_route(accession, workdir, debug_file, debug_lock):
 # Updated Worker Function
 ##########################
 
-def process_accession(accession, args, n_threads_per_worker, tmp_dir=None, final_retry=False):
+def process_accession(accession, args, n_threads_per_worker, tmp_dir=None, final_retry=False, initial_delay=0):
+    time.sleep(initial_delay)  # Apply delay here instead of in a nested function
+
     debug_lock     = args.debug_lock
     debug_file     = args.debug_file
     completed_file = args.completed_file
@@ -433,7 +438,7 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
         log_debug_message(f"[check_and_sort_fastqs] Missing {len(missing)} accessions in biological data: {', '.join(sorted(missing))}", args.debug_file, args.debug_lock)
 
     for acc in missing:
-        tmp_fastq_dir = os.path.join(args.tmp_dir or fastq_dir, f"tmp/fastq_{acc}")
+        tmp_fastq_dir = os.path.join(args.tmp_dir or fastq_dir, f"tmp/fastq_{acc}_{os.getpid()}")
         gz_files = glob.glob(os.path.join(fastq_dir, f"{acc}*.fastq.gz"))
         sra_file = os.path.join(fastq_dir, f"{acc}.sra")
 
@@ -472,12 +477,13 @@ def check_and_sort_fastqs(args, n_threads_per_worker):
                 mem_str = f"{int(mem_bytes / (1024**3))}G"
                 run_command([
                     "fasterq-dump", sra_file, 
-                    "--temp", args.tmp_dir or tmp_fastq_dir,
+                    "--temp", tmp_fastq_dir,
                     "--outdir", fastq_dir,
                     "--threads", str(n_threads_per_worker), 
                     "--mem", mem_str,
                     "--split-files", 
-                    "--include-technical"
+                    "--include-technical",
+                    "--force"
                 ], f"[check_and_sort_fastqs] fasterq-dump failed for {acc}", args.debug_file, args.debug_lock)
 
                 compress_fastqs(acc, fastq_dir, args.debug_file, args.debug_lock)
@@ -515,7 +521,6 @@ def final_validation(args, n_threads_per_worker):
     }
     missing = expected - bio_files
 
-    # Check for files in fastq_biologicaldata that are not in the original accessions
     notinaccessions_file = os.path.join(args.workdir, "notinaccessions.txt")
     unexpected = bio_files - expected
     if unexpected:
@@ -527,7 +532,7 @@ def final_validation(args, n_threads_per_worker):
         log_debug_message(f"[final_validation] Wrote unexpected accessions to {notinaccessions_file}", 
                           args.debug_file, args.debug_lock)
     elif os.path.exists(notinaccessions_file):
-        os.remove(notinaccessions_file)  # Clean up if no unexpected files
+        os.remove(notinaccessions_file)
 
     retry_these = []
     for acc in missing:
@@ -561,7 +566,7 @@ def final_validation(args, n_threads_per_worker):
         future_map = {}
         for acc in retry_these:
             time.sleep(random.uniform(5, 30))
-            fut = executor.submit(process_accession, acc, args, n_threads_per_worker, args.tmp_dir, True)
+            fut = executor.submit(process_accession, acc, args, n_threads_per_worker, args.tmp_dir, True, 0)
             future_map[fut] = acc
 
         for fut in as_completed(future_map):
@@ -643,7 +648,6 @@ def main():
     if args.tmp_dir:
         atexit.register(cleanup_temp_dir, args.tmp_dir)
     
-    # Handle common termination signals
     signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(1))  # Ctrl+C
     signal.signal(signal.SIGTERM, lambda sig, frame: sys.exit(1)) # Termination
 
@@ -711,25 +715,19 @@ def main():
             future_map = {}
             stagger_delay = 2.0  # Base delay in seconds between process starts
             for i, acc in enumerate(sorted(to_download)):
-                # Calculate staggered delay: base_delay + small random jitter
                 initial_delay = stagger_delay * i + random.uniform(0, 1.0)
                 log_debug_message(
                     f"[main] Scheduling {acc} with initial delay of {initial_delay:.2f}s",
                     args.debug_file, args.debug_lock
                 )
-                
-                # Submit with a delayed start using a wrapper function
-                def delayed_process(acc, delay, *args):
-                    time.sleep(delay)
-                    return process_accession(acc, *args)
-                    
                 fut = executor.submit(
-                    delayed_process,
+                    process_accession,
                     acc,
-                    initial_delay,
                     args,
                     n_threads_per_worker,
-                    args.tmp_dir
+                    args.tmp_dir,
+                    False,
+                    initial_delay
                 )
                 future_map[fut] = acc
 
