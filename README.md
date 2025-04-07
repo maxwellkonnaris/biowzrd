@@ -287,6 +287,25 @@ grep -oP '\)[^\),:]+' 2024.09.phylogeny.asv.nwk | head -n 20
 | GTDB       | Genome-resolved taxonomy (WGS)                   | `d__Bacteria; p__... s__XXXX sp[accession]`  |
 | Our example      | GTDB-based Greengenes 2024 release        | `'s__GWA2-33-14 sp001820215'` etc.           |
 
+   - Therefore we can go to https://github.com/ggnet-lab/greengenes2 and look in:
+
+greengenes2/
+├── taxonomy/
+├── trees/
+├── **q2-classifier/**
+
+```bash
+qiime feature-classifier classify-sklearn \
+  --i-classifier gg2-classifier.qza \
+  --i-reads your-rep-seqs.qza \
+  --o-classification gg2_taxonomy.qza
+
+qiime tools export \
+  --input-path gg2_taxonomy.qza \
+  --output-path exported_gg2_taxonomy
+
+
+```
 5. Begin to prune the tree as so:
 ```bash
 python pruningtree.py \
