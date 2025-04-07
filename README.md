@@ -335,6 +335,17 @@ python pruningtree.py \
   --quoted_node_names
 
 ```
+6. If you wanted to try different pruning and had several converted files, heres an example. Just change the parameters:
+
+```bash
+ls keep_taxa_*.txt | parallel -j 8 '
+  python prune_script.py \
+    --tree full_tree.nwk \
+    --out pruned_{/.}.nwk \
+    --prune_to {} \
+    --format 1 --quoted_node_names
+'
+```
 
 ## Plotting (plotting/):
 
