@@ -274,14 +274,17 @@ head -c 1000 2024.09.phylogeny.asv.nwk
 #OR
 
 grep -oP '\)[^\),:]+' 2024.09.phylogeny.asv.nwk | head -n 20
+
+# In this case we have quoted node names, and the tips are classified taxa labels instead of ASVs or OTUs. Likely from a taxonomic database like SILVA or RDP etc.
+# So if we have an ASV, Sequence file we convert it to classified taxa and supply as the example_taxa.txt
 ```
-3. Next, You will need a txt file of the specified taxa youre interested in. e.g. example_asv_taxa.txt
+3. Next, You will need a txt file of the specified taxa youre interested in. e.g. example_taxa.txt
 4. Begin to prune the tree as so:
 ```bash
 python pruningtree.py \
   --tree 2024.09.phylogeny.asv.nwk \
   --out pruned_tree.asv.nwk \
-  --prune_to example_asv_taxa.txt \
+  --prune_to example_taxa.txt \
   --format 1 \
   --quoted_node_names
 ```
