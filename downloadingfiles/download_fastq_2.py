@@ -817,36 +817,40 @@ def main():
             os.makedirs(args.tmp_dir, exist_ok=True)
 
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            future_map = {}
-            stagger_delay = 2.0
-            for i, acc in enumerate(sorted(to_download)):
-                initial_delay = stagger_delay * i + random.uniform(0, 1.0)
-                log_debug_message(
-                    f"[main] Scheduling {acc} with initial delay of {initial_delay:.2f}s",
-                    args.debug_file, args.debug_lock
-                )
-                fut = executor.submit(
-                    process_accession,
-                    acc,
-                    args,
-                    n_threads_per_worker,
-                    args.tmp_dir,
-                    False,
-                    initial_delay
-                )
-                future_map[fut] = acc
-
-            for fut in as_completed(future_map):
-                acc = future_map[fut]
-                try:
-                    res = fut.result()
-                    print(res)
-                    log_debug_message(res, args.debug_file, args.debug_lock)
-                except Exception as e:
-                    msg = f"[FATAL] Worker error for {acc}: {e}"
-                    print(msg, file=sys.stderr)
-                    log_debug_message(msg, args.debug_file, args.debug_lock)
-                    append_line_with_lock(acc, args.failed_file, args.failed_lock)
+                future_map = {}
+                stagger_delay = 2.0  # Could be args.stagger_delay if made configurable
+                for i, acc in enumerate(sorted(to_download)):
+                    if i < num_workers:
+                        initial_delay = stagger_delay * i
+                    else:
+                        initial_delay = 0
+                    initial_delay += random.uniform(0, 1.0)  # Optional jitter
+                    log_debug_message(
+                        f"[main] Scheduling {acc} with initial delay of {initial_delay:.2f}s",
+                        args.debug_file, args.debug_lock
+                    )
+                    fut = executor.submit(
+                        process_accession,
+                        acc,
+                        args,
+                        n_threads_per_worker,
+                        args.tmp_dir,
+                        False,
+                        initial_delay
+                    )
+                    future_map[fut] = acc
+        
+                for fut in as_completed(future_map):
+                    acc = future_map[fut]
+                    try:
+                        res = fut.result()
+                        print(res)
+                        log_debug_message(res, args.debug_file, args.debug_lock)
+                    except Exception as e:
+                        msg = f"[FATAL] Worker error for {acc}: {e}"
+                        print(msg, file=sys.stderr)
+                        log_debug_message(msg, args.debug_file, args.debug_lock)
+                        append_line_with_lock(acc, args.failed_file, args.failed_lock)
 
     log_debug_message("[main] Post-processing: Checking and sorting FASTQs...", args.debug_file, args.debug_lock)
     check_and_sort_fastqs(args, n_threads_per_worker)
