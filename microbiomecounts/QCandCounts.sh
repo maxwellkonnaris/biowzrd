@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=counts
-#SBATCH --output=counts_%j.out
-#SBATCH --error=counts_%j.err
+#SBATCH --job-name=process_parallel
+#SBATCH --output=process_parallel_%j.out
+#SBATCH --error=process_parallel_%j.err
 #SBATCH --time=48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=300G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
 #SBATCH --account=one
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=END,FAIL
@@ -23,6 +23,13 @@ FAILED_LOCK="$LOCK_DIR/failed.lock"
 DEFAULT_WORKERS=8  # Default number of workers
 DEFAULT_MOTUS_TAX_LEVEL="mOTU"  # Default taxonomic level for mOTUs
 LOG_LEVEL="INFO"  # Adjustable log level: INFO, DEBUG
+TMP_BASE="/tmp"  # Base directory for temporary files
+
+# Cleanup function for lock directory
+cleanup() {
+  rm -rf "$LOCK_DIR"
+}
+trap cleanup EXIT
 
 # Parse command-line arguments
 while getopts ":i:d:w:k:" opt; do
@@ -284,7 +291,7 @@ load_completed() {
   log_debug "Loaded ${#COMPLETED_SAMPLES[@]} completed samples from $COMPLETED_FILE"
 }
 
-# Process a single sample with checkpointing
+# Process a single sample
 process_sample() {
   local BIOPROJECT="$1"
   local RUN_ACCESSION="$2"
@@ -301,21 +308,28 @@ process_sample() {
   local PAIRED_FASTQ="${FASTQ_DIR}/${RUN_ACCESSION}_2.fastq.gz"
   local OUTPUT_DIR="${BIOPROJECT}"
   local LOG_FILE="${OUTPUT_DIR}/processed_files.log"
-  local CHECKPOINT_FILE="${OUTPUT_DIR}/checkpoints_${RUN_ACCESSION}.log"
-  local METAPHLAN_LOG="${OUTPUT_DIR}/${RUN_ACCESSION}_metaphlan_log.txt"
-  local METAPHLAN_PROFILE="${OUTPUT_DIR}/${RUN_ACCESSION}_metaphlan4.txt"
+  local TMP_DIR="${TMP_BASE}/${SLURM_JOB_ID}/${RUN_ACCESSION}"
+  local QC1="${TMP_DIR}/qc_${RUN_ACCESSION}_1.fastq.gz"
+  local QC2="${TMP_DIR}/qc_${RUN_ACCESSION}_2.fastq.gz"
+  local QC="${TMP_DIR}/qc_${RUN_ACCESSION}.fastq.gz"
+  local METAPHLAN_LOG="${TMP_DIR}/${RUN_ACCESSION}_metaphlan_log.txt"
+  local METAPHLAN_BOWTIE="${TMP_DIR}/${RUN_ACCESSION}_meta.bowtie2out.txt"
+  local METAPHLAN_PROFILE="${TMP_DIR}/${RUN_ACCESSION}_metaphlan4.txt"
   local METAPHLAN_COUNTS="${OUTPUT_DIR}/${RUN_ACCESSION}_metaphlan4_counts.txt"
   local MOTUS_PROFILE="${OUTPUT_DIR}/${RUN_ACCESSION}_motus.txt"
-  mkdir -p "$OUTPUT_DIR"
+  local DADA2_ASV="${OUTPUT_DIR}/dada2_results_${RUN_ACCESSION}.rds"
+  local DADA2_TAX="${OUTPUT_DIR}/dada2_taxonomy_${RUN_ACCESSION}.rds"
+  mkdir -p "$OUTPUT_DIR" "$TMP_DIR"
 
-  # Initialize log files
-  touch "$LOG_FILE" "$CHECKPOINT_FILE"
+  # Initialize log file
+  touch "$LOG_FILE"
 
   # Validate input files
   if [[ -f "$INPUT_FASTQ" && -f "$PAIRED_FASTQ" ]]; then
     if ! validate_fastq "$INPUT_FASTQ" || ! validate_fastq "$PAIRED_FASTQ"; then
       log_debug "Invalid FASTQ files for $RUN_ACCESSION: $INPUT_FASTQ or $PAIRED_FASTQ"
       append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"
+      rm -rf "$TMP_DIR"
       return 1
     fi
     if grep -q "$INPUT_FASTQ" "$LOG_FILE" && grep -q "$PAIRED_FASTQ" "$LOG_FILE"; then
@@ -328,6 +342,7 @@ process_sample() {
     if ! validate_fastq "$INPUT_FASTQ"; then
       log_debug "Invalid FASTQ file for $RUN_ACCESSION: $INPUT_FASTQ"
       append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"
+      rm -rf "$TMP_DIR"
       return 1
     fi
     if grep -q "$INPUT_FASTQ" "$LOG_FILE"; then
@@ -338,6 +353,7 @@ process_sample() {
   else
     log_debug "No valid FASTQ files for $RUN_ACCESSION in $FASTQ_DIR"
     append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"
+    rm -rf "$TMP_DIR"
     return 1
   fi
 
@@ -354,65 +370,65 @@ process_sample() {
   fi
   log_debug "Processing $RUN_ACCESSION (Type: $SAMPLE_TYPE, Threads: $CPUS)"
 
-  # Workflow with checkpointing
+  # Workflow
   if [[ "$SAMPLE_TYPE" == "16S" ]]; then
     if [[ -f "$PAIRED_FASTQ" ]]; then
-      local QC1="${OUTPUT_DIR}/qc_${RUN_ACCESSION}_1.fastq.gz"
-      local QC2="${OUTPUT_DIR}/qc_${RUN_ACCESSION}_2.fastq.gz"
-      if ! grep -q "^${RUN_ACCESSION}:FASTP$" "$CHECKPOINT_FILE"; then
+      if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
         run_command "conda run -n dada2 fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER" \
-          "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
-        append_with_lock "${RUN_ACCESSION}:FASTP" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+          "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
       fi
-      if validate_fastq "$QC1" && validate_fastq "$QC2" && ! grep -q "^${RUN_ACCESSION}:DADA2$" "$CHECKPOINT_FILE"; then
-        run_command "conda run -n dada2 Rscript run_dada2.R \"$QC1\" \"$QC2\"" \
-          "[dada2] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
-        append_with_lock "${RUN_ACCESSION}:DADA2" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+      if validate_fastq "$QC1" && validate_fastq "$QC2" && [[ ! -f "$DADA2_ASV" ]]; then
+        # Run DADA2 in TMP_DIR to keep filtered_fastq/ temporary
+        run_command "(cd \"$TMP_DIR\" && conda run -n dada2 Rscript run_dada2.R \"$QC1\" \"$QC2\")" \
+          "[dada2] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
+        # Move DADA2 outputs to OUTPUT_DIR
+        mv "$TMP_DIR/dada2_results_${RUN_ACCESSION}.rds" "$DADA2_ASV" 2>/dev/null || log_debug "No ASV output for $RUN_ACCESSION"
+        mv "$TMP_DIR/dada2_taxonomy_${RUN_ACCESSION}.rds" "$DADA2_TAX" 2>/dev/null || log_debug "No taxonomy output for $RUN_ACCESSION"
       fi
     else
-      local QC="${OUTPUT_DIR}/qc_${RUN_ACCESSION}.fastq.gz"
-      if ! grep -q "^${RUN_ACCESSION}:FASTP$" "$CHECKPOINT_FILE"; then
+      if [[ ! -f "$QC" ]]; then
         run_command "conda run -n dada2 fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
-          "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
-        append_with_lock "${RUN_ACCESSION}:FASTP" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+          "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
       fi
-      if validate_fastq "$QC" && ! grep -q "^${RUN_ACCESSION}:DADA2$" "$CHECKPOINT_FILE"; then
-        run_command "conda run -n dada2 Rscript run_dada2.R \"$QC\"" \
-          "[dada2] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
-        append_with_lock "${RUN_ACCESSION}:DADA2" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+      if validate_fastq "$QC" && [[ ! -f "$DADA2_ASV" ]]; then
+        # Run DADA2 in TMP_DIR
+        run_command "(cd \"$TMP_DIR\" && conda run -n dada2 Rscript run_dada2.R \"$QC\")" \
+          "[dada2] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
+        # Move DADA2 outputs to OUTPUT_DIR
+        mv "$TMP_DIR/dada2_results_${RUN_ACCESSION}.rds" "$DADA2_ASV" 2>/dev/null || log_debug "No ASV output for $RUN_ACCESSION"
+        mv "$TMP_DIR/dada2_taxonomy_${RUN_ACCESSION}.rds" "$DADA2_TAX" 2>/dev/null || log_debug "No taxonomy output for $RUN_ACCESSION"
       fi
     fi
   elif [[ "$SAMPLE_TYPE" == "meta" ]]; then
-    local QC="${OUTPUT_DIR}/qc_${RUN_ACCESSION}.fastq.gz"
-    if ! grep -q "^${RUN_ACCESSION}:FASTP$" "$CHECKPOINT_FILE"; then
+    if [[ ! -f "$QC" ]]; then
       run_command "conda run -n metaphlan fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
-        "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
-      append_with_lock "${RUN_ACCESSION}:FASTP" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+        "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
-    if validate_fastq "$QC" && ! grep -q "^${RUN_ACCESSION}:METAPHLAN$" "$CHECKPOINT_FILE"; then
-      run_command_with_output "conda run -n metaphlan metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"${OUTPUT_DIR}/${RUN_ACCESSION}_meta.bowtie2out.txt\" -o \"$METAPHLAN_PROFILE\"" \
-        "[metaphlan] Failed for $RUN_ACCESSION" "$METAPHLAN_LOG" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
-      append_with_lock "${RUN_ACCESSION}:METAPHLAN" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+    if validate_fastq "$QC" && [[ ! -f "$METAPHLAN_PROFILE" ]]; then
+      run_command_with_output "conda run -n metaphlan metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
+        "[metaphlan] Failed for $RUN_ACCESSION" "$METAPHLAN_LOG" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
-    if validate_fastq "$QC" && ! grep -q "^${RUN_ACCESSION}:METAPHLAN_COUNTS$" "$CHECKPOINT_FILE"; then
+    if validate_fastq "$QC" && [[ -f "$METAPHLAN_PROFILE" && ! -f "$METAPHLAN_COUNTS" ]]; then
       convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS" || \
-        { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
-      append_with_lock "${RUN_ACCESSION}:METAPHLAN_COUNTS" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+        { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
-    if validate_fastq "$QC" && ! grep -q "^${RUN_ACCESSION}:MOTUS$" "$CHECKPOINT_FILE"; then
+    if validate_fastq "$QC" && [[ ! -f "$MOTUS_PROFILE" ]]; then
       run_command "conda run -n motus motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-        "[motus] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
-      append_with_lock "${RUN_ACCESSION}:MOTUS" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+        "[motus] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
   else
     log_debug "Invalid sample type: $SAMPLE_TYPE for $RUN_ACCESSION"
     append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"
+    rm -rf "$TMP_DIR"
     return 1
   fi
 
-  # Mark as complete
+  # Mark as complete only if all steps succeeded
   append_with_lock "${RUN_ACCESSION}:COMPLETE" "$COMPLETED_FILE" "$COMPLETED_LOCK"
   log_debug "Finished processing $RUN_ACCESSION"
+
+  # Clean up temporary directory
+  rm -rf "$TMP_DIR"
 }
 
 # Final validation and merging
@@ -431,9 +447,9 @@ final_validation_and_merge() {
   declare -A ACTUAL_SAMPLES
   for dir in */; do
     if [[ -d "$dir" && "$dir" != "*/" ]]; then
-      for file in "$dir"qc_* "$dir"metaphlan_* "$dir"motus_* "$dir"*_metaphlan4_counts.txt; do
+      for file in "$dir"*_metaphlan4_counts.txt "$dir"*_motus.txt "$dir"*dada2_results*.rds; do
         if [[ -f "$file" ]]; then
-          local accession=$(basename "$file" | sed -E 's/^(qc|metaphlan|motus|metaphlan4_counts)_([^_.]+).*/\2/')
+          local accession=$(basename "$file" | sed -E 's/^(metaphlan4_counts|motus|dada2_results)_([^_.]+).*/\2/')
           ACTUAL_SAMPLES["$accession"]="$dir"
         fi
       done
@@ -470,7 +486,7 @@ final_validation_and_merge() {
 
 # Export functions and variables for GNU Parallel
 export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts merge_profiles final_validation_and_merge
-export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL
+export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID
 
 # Initialize lock files
 touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK"
@@ -487,6 +503,3 @@ final_validation_and_merge
 
 log_info "All processing, validation, and merging complete."
 echo "All processing, validation, and merging complete."
-
-# Clean up lock directory
-rm -rf "$LOCK_DIR"
