@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=process_parallel
-#SBATCH --output=process_parallel_%j.out
-#SBATCH --error=process_parallel_%j.err
+#SBATCH --job-name=counts
+#SBATCH --output=counts_%j.out
+#SBATCH --error=counts_%j.err
 #SBATCH --time=48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=300G
 #SBATCH --account=one
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=END,FAIL
