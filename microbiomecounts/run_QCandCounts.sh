@@ -23,7 +23,8 @@ FAILED_LOCK="$LOCK_DIR/failed.lock"
 DEFAULT_WORKERS=8  # Default number of workers
 DEFAULT_MOTUS_TAX_LEVEL="mOTU"  # Default taxonomic level for mOTUs
 LOG_LEVEL="INFO"  # Adjustable log level: INFO, DEBUG
-TMP_BASE="/tmp"  # Base directory for temporary files
+TMP_BASE="${SCRATCH:-/scratch}"  # Prefer $SCRATCH, fall back to /scratch
+RDP_DATABASE="rdp_train_set_19.fa.gz"
 
 # Cleanup function for lock directory
 cleanup() {
@@ -61,8 +62,8 @@ done
 
 # Validate input file and directories
 if [[ -z "$INPUT_FILE" ]]; then
-  echo "Usage: $0 -i <input.tsv> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>]"
-  echo "  <input.tsv>: Tab-separated file with columns: Bioproject, RunAccession, SequencingType"
+  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>]"
+  echo "  <input>: CSV, TSV, or TXT file with columns: Bioproject,RunAccession,SequencingType"
   echo "  <fastq_directory>: Directory containing FASTQ files (default: $DEFAULT_DIR)"
   echo "  <num_workers>: Number of parallel workers (default: $DEFAULT_WORKERS)"
   echo "  <motus_tax_level>: Taxonomic level for mOTUs (e.g., mOTU, phylum; default: $DEFAULT_MOTUS_TAX_LEVEL)"
@@ -70,22 +71,68 @@ if [[ -z "$INPUT_FILE" ]]; then
 fi
 
 if [[ ! -f "$INPUT_FILE" ]]; then
-  echo "Input file $INPUT_FILE does not exist."
+  echo "Error: Input file $INPUT_FILE does not exist."
   exit 1
 fi
 
+# Validate temporary directory base
+if [[ ! -d "$TMP_BASE" || ! -w "$TMP_BASE" ]]; then
+  echo "Warning: $TMP_BASE not available or not writable, falling back to /tmp"
+  TMP_BASE="/tmp"
+  if [[ ! -d "$TMP_BASE" || ! -w "$TMP_BASE" ]]; then
+    echo "Error: No writable temporary directory base available (/scratch or /tmp)."
+    exit 1
+  fi
+fi
+
+# Detect input file format
 validate_input_file() {
-  local expected_header="Bioproject\tRunAccession\tSequencingType"
-  local actual_header=$(head -n 1 "$INPUT_FILE")
-  if [[ "$actual_header" != "$expected_header" ]]; then
-    echo "Error: Input file $INPUT_FILE has incorrect header. Expected: $expected_header"
+  local file="$1"
+  local first_line
+  first_line=$(head -n 1 "$file")
+  
+  # Check for CSV (comma-separated)
+  if [[ "$first_line" == *"Bioproject,RunAccession,SequencingType"* ]]; then
+    DELIMITER=','
+    EXPECTED_HEADER="Bioproject,RunAccession,SequencingType"
+  # Check for TSV/TXT (tab-separated)
+  elif [[ "$first_line" == $'Bioproject\tRunAccession\tSequencingType'* ]]; then
+    DELIMITER=$'\t'
+    EXPECTED_HEADER="Bioproject\tRunAccession\tSequencingType"
+  else
+    echo "Error: Input file $file has unrecognized format or header. Expected: Bioproject,RunAccession,SequencingType (CSV) or Bioproject<tab>RunAccession<tab>SequencingType (TSV/TXT)"
+    exit 1
+  fi
+
+  if [[ "$first_line" != "$EXPECTED_HEADER" ]]; then
+    echo "Error: Input file $file has incorrect header. Expected: $EXPECTED_HEADER"
     exit 1
   fi
 }
-validate_input_file
+validate_input_file "$INPUT_FILE"
+
+# Check for 16S samples and validate RDP database
+check_rdp_database() {
+  local has_16s=false
+  while IFS="$DELIMITER" read -r bioproject accession sample_type; do
+    if [[ "$sample_type" == "16S" ]]; then
+      has_16s=true
+      break
+    fi
+  done < <(tail -n +2 "$INPUT_FILE")
+  
+  if [[ "$has_16s" == "true" ]]; then
+    if [[ ! -f "$RDP_DATABASE" ]]; then
+      echo "Error: RDP database $RDP_DATABASE not found in current working directory, required for 16S samples."
+      exit 1
+    fi
+    log_info "RDP database $RDP_DATABASE found for 16S samples."
+  fi
+}
+check_rdp_database
 
 if [[ ! -d "$FASTQ_DIR" ]]; then
-  echo "FASTQ directory $FASTQ_DIR does not exist."
+  echo "Error: FASTQ directory $FASTQ_DIR does not exist."
   exit 1
 fi
 
@@ -220,7 +267,7 @@ merge_profiles() {
 
   # Load expected accessions for this Bioproject from input.tsv
   declare -A expected_accessions
-  while IFS=$'\t' read -r proj accession sample_type; do
+  while IFS="$DELIMITER" read -r proj accession sample_type; do
     if [[ "$proj" == "$bioproject" ]]; then
       expected_accessions["$accession"]=1
     fi
@@ -308,7 +355,7 @@ process_sample() {
   local PAIRED_FASTQ="${FASTQ_DIR}/${RUN_ACCESSION}_2.fastq.gz"
   local OUTPUT_DIR="${BIOPROJECT}"
   local LOG_FILE="${OUTPUT_DIR}/processed_files.log"
-  local TMP_DIR="${TMP_BASE}/${SLURM_JOB_ID}/${RUN_ACCESSION}"
+  local TMP_DIR=$(mktemp -d -t "process_${SLURM_JOB_ID}_${RUN_ACCESSION}_XXXXXX" -p "$TMP_BASE")
   local QC1="${TMP_DIR}/qc_${RUN_ACCESSION}_1.fastq.gz"
   local QC2="${TMP_DIR}/qc_${RUN_ACCESSION}_2.fastq.gz"
   local QC="${TMP_DIR}/qc_${RUN_ACCESSION}.fastq.gz"
@@ -319,7 +366,7 @@ process_sample() {
   local MOTUS_PROFILE="${OUTPUT_DIR}/${RUN_ACCESSION}_motus.txt"
   local DADA2_ASV="${OUTPUT_DIR}/dada2_results_${RUN_ACCESSION}.rds"
   local DADA2_TAX="${OUTPUT_DIR}/dada2_taxonomy_${RUN_ACCESSION}.rds"
-  mkdir -p "$OUTPUT_DIR" "$TMP_DIR"
+  mkdir -p "$OUTPUT_DIR"
 
   # Initialize log file
   touch "$LOG_FILE"
@@ -438,7 +485,7 @@ final_validation_and_merge() {
   # Load expected accessions from input.tsv
   declare -A EXPECTED_SAMPLES
   declare -A BIOPROJECTS
-  while IFS=$'\t' read -r bioproject accession sample_type; do
+  while IFS="$DELIMITER" read -r bioproject accession sample_type; do
     EXPECTED_SAMPLES["$accession"]="$bioproject $sample_type"
     BIOPROJECTS["$bioproject"]=1
   done < <(tail -n +2 "$INPUT_FILE")
@@ -486,7 +533,7 @@ final_validation_and_merge() {
 
 # Export functions and variables for GNU Parallel
 export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts merge_profiles final_validation_and_merge
-export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID
+export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID DELIMITER
 
 # Initialize lock files
 touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK"
@@ -496,7 +543,7 @@ load_completed
 
 # Process input file with GNU Parallel
 log_info "Starting initial processing with $NUM_WORKERS workers"
-tail -n +2 "$INPUT_FILE" | parallel --colsep '\t' --jobs "$NUM_WORKERS" process_sample {1} {2} {3}
+tail -n +2 "$INPUT_FILE" | parallel --colsep "$DELIMITER" --jobs "$NUM_WORKERS" process_sample {1} {2} {3}
 
 # Run final validation and merging
 final_validation_and_merge
