@@ -13,20 +13,24 @@
 
 # Default directory for FASTQ files
 DEFAULT_DIR="fastq_data/fastq_biologicaldata/"
+LOCK_DIR=$(mktemp -d)
 DEBUG_FILE="debug.log"
-DEBUG_LOCK="debug.lock"
+DEBUG_LOCK="$LOCK_DIR/debug.lock"
 COMPLETED_FILE="completed_steps.log"
-COMPLETED_LOCK="completed.lock"
+COMPLETED_LOCK="$LOCK_DIR/completed.lock"
 FAILED_FILE="failed.log"
-FAILED_LOCK="failed.lock"
+FAILED_LOCK="$LOCK_DIR/failed.lock"
 DEFAULT_WORKERS=8  # Default number of workers
+DEFAULT_MOTUS_TAX_LEVEL="mOTU"  # Default taxonomic level for mOTUs
+LOG_LEVEL="INFO"  # Adjustable log level: INFO, DEBUG
 
 # Parse command-line arguments
-while getopts ":i:d:w:" opt; do
+while getopts ":i:d:w:k:" opt; do
   case $opt in
     i) INPUT_FILE="$OPTARG" ;;
     d) FASTQ_DIR="$OPTARG" ;;
     w) NUM_WORKERS="$OPTARG" ;;
+    k) MOTUS_TAX_LEVEL="$OPTARG" ;;
     \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
   esac
 done
@@ -34,13 +38,27 @@ done
 # Set defaults
 FASTQ_DIR="${FASTQ_DIR:-$DEFAULT_DIR}"
 NUM_WORKERS="${NUM_WORKERS:-$DEFAULT_WORKERS}"
+MOTUS_TAX_LEVEL="${MOTUS_TAX_LEVEL:-$DEFAULT_MOTUS_TAX_LEVEL}"
+
+# Validate Conda and environments
+if ! command -v conda &>/dev/null; then
+  echo "Error: Conda not found"
+  exit 1
+fi
+for env in dada2 metaphlan motus; do
+  if ! conda env list | grep -q "^$env "; then
+    echo "Error: Conda environment $env not found"
+    exit 1
+  fi
+done
 
 # Validate input file and directories
 if [[ -z "$INPUT_FILE" ]]; then
-  echo "Usage: $0 -i <input.tsv> [-d <fastq_directory>] [-w <num_workers>]"
+  echo "Usage: $0 -i <input.tsv> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>]"
   echo "  <input.tsv>: Tab-separated file with columns: Bioproject, RunAccession, SequencingType"
   echo "  <fastq_directory>: Directory containing FASTQ files (default: $DEFAULT_DIR)"
   echo "  <num_workers>: Number of parallel workers (default: $DEFAULT_WORKERS)"
+  echo "  <motus_tax_level>: Taxonomic level for mOTUs (e.g., mOTU, phylum; default: $DEFAULT_MOTUS_TAX_LEVEL)"
   exit 1
 fi
 
@@ -48,6 +66,16 @@ if [[ ! -f "$INPUT_FILE" ]]; then
   echo "Input file $INPUT_FILE does not exist."
   exit 1
 fi
+
+validate_input_file() {
+  local expected_header="Bioproject\tRunAccession\tSequencingType"
+  local actual_header=$(head -n 1 "$INPUT_FILE")
+  if [[ "$actual_header" != "$expected_header" ]]; then
+    echo "Error: Input file $INPUT_FILE has incorrect header. Expected: $expected_header"
+    exit 1
+  fi
+}
+validate_input_file
 
 if [[ ! -d "$FASTQ_DIR" ]]; then
   echo "FASTQ directory $FASTQ_DIR does not exist."
@@ -62,11 +90,19 @@ if [[ $THREADS_PER_WORKER -lt 1 ]]; then
 fi
 echo "Running with $NUM_WORKERS workers, $THREADS_PER_WORKER threads each (total $SLURM_CPUS_PER_TASK CPUs)"
 
-# Logging function with file locking
+# Logging function with file locking and log level
 log_debug() {
+  [[ "$LOG_LEVEL" == "DEBUG" ]] || return
   local msg="$1"
-  echo "$(date) $msg" >&2
-  flock -x "$DEBUG_LOCK" -c "echo \"$(date) $msg\" >> \"$DEBUG_FILE\"" 2>/dev/null || \
+  echo "$(date) [DEBUG] $msg" >&2
+  flock -x "$DEBUG_LOCK" -c "echo \"$(date) [DEBUG] $msg\" >> \"$DEBUG_FILE\"" 2>/dev/null || \
+    echo "[WARN] Could not log to $DEBUG_FILE: $msg" >&2
+}
+
+log_info() {
+  local msg="$1"
+  echo "$(date) [INFO] $msg" >&2
+  flock -x "$DEBUG_LOCK" -c "echo \"$(date) [INFO] $msg\" >> \"$DEBUG_FILE\"" 2>/dev/null || \
     echo "[WARN] Could not log to $DEBUG_FILE: $msg" >&2
 }
 
@@ -121,6 +157,120 @@ run_command() {
   done
 }
 
+# Run command with retry and capture output
+run_command_with_output() {
+  local cmd="$1"
+  local err_msg="$2"
+  local output_file="$3"
+  local max_attempts=3
+  local attempt=1
+  local wait_time=2
+
+  while (( attempt <= max_attempts )); do
+    if eval "$cmd > \"$output_file\" 2>&1"; then
+      return 0
+    else
+      log_debug "$err_msg (attempt $attempt/$max_attempts)"
+      if (( attempt == max_attempts )); then
+        return 1
+      fi
+      sleep $(( wait_time * attempt ))
+      (( attempt++ ))
+    fi
+  done
+}
+
+# Convert MetaPhlAn profile to counts
+convert_metaphlan_to_counts() {
+  local metaphlan_log="$1"
+  local metaphlan_profile="$2"
+  local output_file="$3"
+  if [[ ! -f "$metaphlan_log" || ! -f "$metaphlan_profile" ]]; then
+    log_debug "[convert_metaphlan_to_counts] Missing files: $metaphlan_log or $metaphlan_profile"
+    return 1
+  fi
+  local mapped_reads=$(grep "Total number of reads mapped" "$metaphlan_log" | awk '{print $6}' | sed 's/(.*//')
+  if [[ -z "$mapped_reads" ]]; then
+    log_debug "[convert_metaphlan_to_counts] Could not find mapped reads in $metaphlan_log"
+    return 1
+  fi
+  awk -v mapped="$mapped_reads" '
+    BEGIN { FS="\t"; OFS="\t"; print "#clade_name\trelative_abundance\tread_count" }
+    /^#/ { next }
+    { count = ($2 * mapped / 100); print $1, $2, count }
+  ' "$metaphlan_profile" > "$output_file"
+  log_debug "[convert_metaphlan_to_counts] Converted $metaphlan_profile to counts in $output_file (total mapped: $mapped_reads)"
+  return 0
+}
+
+# Merge profiles for a Bioproject
+merge_profiles() {
+  local bioproject="$1"
+  local tool="$2"  # "metaphlan" or "motus"
+  local output_dir="$bioproject"
+  local merged_file="${output_dir}/${bioproject}_${tool}_merged.txt"
+  local profile_files
+
+  # Load expected accessions for this Bioproject from input.tsv
+  declare -A expected_accessions
+  while IFS=$'\t' read -r proj accession sample_type; do
+    if [[ "$proj" == "$bioproject" ]]; then
+      expected_accessions["$accession"]=1
+    fi
+  done < <(tail -n +2 "$INPUT_FILE")
+
+  # Find available profile files
+  if [[ "$tool" == "metaphlan" ]]; then
+    profile_files=($(ls "$output_dir"/*_metaphlan4_counts.txt 2>/dev/null))
+  elif [[ "$tool" == "motus" ]]; then
+    profile_files=($(ls "$output_dir"/*_motus.txt 2>/dev/null))
+  fi
+
+  # Check if all expected accessions have completed profiles
+  local all_complete=true
+  for accession in "${!expected_accessions[@]}"; do
+    if [[ -z "${COMPLETED_SAMPLES[$accession]}" ]]; then
+      log_debug "[merge_profiles] $bioproject ($tool): Accession $accession not fully processed"
+      all_complete=false
+      break
+    fi
+    # Verify profile file exists
+    if [[ "$tool" == "metaphlan" && ! -f "$output_dir/${accession}_metaphlan4_counts.txt" ]]; then
+      log_debug "[merge_profiles] $bioproject ($tool): Missing metaphlan profile for $accession"
+      all_complete=false
+      break
+    elif [[ "$tool" == "motus" && ! -f "$output_dir/${accession}_motus.txt" ]]; then
+      log_debug "[merge_profiles] $bioproject ($tool): Missing motus profile for $accession"
+      all_complete=false
+      break
+    fi
+  done
+
+  # Proceed with merging only if all expected profiles are complete
+  if [[ "$all_complete" == "true" && ${#profile_files[@]} -gt 0 ]]; then
+    if [[ ${#profile_files[@]} -gt 1 ]]; then
+      if [[ "$tool" == "metaphlan" ]]; then
+        local input_list="${profile_files[*]}"
+        run_command "conda run -n metaphlan merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
+          "[metaphlan merge] Failed for $bioproject" || return 1
+        log_debug "Merged MetaPhlAn profiles for $bioproject into $merged_file"
+      elif [[ "$tool" == "motus" ]]; then
+        local input_list=$(printf "%s," "${profile_files[@]}" | sed 's/,$//')
+        run_command "conda run -n motus motus merge -i \"$input_list\" -o \"$merged_file\"" \
+          "[motus merge] Failed for $bioproject" || return 1
+        log_debug "Merged mOTUs profiles for $bioproject into $merged_file"
+      fi
+    elif [[ ${#profile_files[@]} -eq 1 ]]; then
+      cp "${profile_files[0]}" "$merged_file"
+      log_debug "Copied single $tool profile for $bioproject to $merged_file"
+    fi
+  else
+    log_debug "[merge_profiles] $bioproject ($tool): Skipping merge due to incomplete or missing profiles"
+    return 1
+  fi
+  return 0
+}
+
 # Load completed samples into an associative array
 declare -A COMPLETED_SAMPLES
 load_completed() {
@@ -152,6 +302,10 @@ process_sample() {
   local OUTPUT_DIR="${BIOPROJECT}"
   local LOG_FILE="${OUTPUT_DIR}/processed_files.log"
   local CHECKPOINT_FILE="${OUTPUT_DIR}/checkpoints_${RUN_ACCESSION}.log"
+  local METAPHLAN_LOG="${OUTPUT_DIR}/${RUN_ACCESSION}_metaphlan_log.txt"
+  local METAPHLAN_PROFILE="${OUTPUT_DIR}/${RUN_ACCESSION}_metaphlan4.txt"
+  local METAPHLAN_COUNTS="${OUTPUT_DIR}/${RUN_ACCESSION}_metaphlan4_counts.txt"
+  local MOTUS_PROFILE="${OUTPUT_DIR}/${RUN_ACCESSION}_motus.txt"
   mkdir -p "$OUTPUT_DIR"
 
   # Initialize log files
@@ -198,7 +352,7 @@ process_sample() {
   else
     MEM="32G"; TIME="48:00:00"
   fi
-  log_debug "Processing $RUN_ACCESSION (Type: $SAMPLE_TYPE, Threads: $CPUS, Mem: $MEM, Size: $FILE_SIZE_GB GB)"
+  log_debug "Processing $RUN_ACCESSION (Type: $SAMPLE_TYPE, Threads: $CPUS)"
 
   # Workflow with checkpointing
   if [[ "$SAMPLE_TYPE" == "16S" ]]; then
@@ -236,12 +390,17 @@ process_sample() {
       append_with_lock "${RUN_ACCESSION}:FASTP" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
     fi
     if validate_fastq "$QC" && ! grep -q "^${RUN_ACCESSION}:METAPHLAN$" "$CHECKPOINT_FILE"; then
-      run_command "conda run -n metaphlan metaphlan \"$QC\" --input_type fastq --output \"${OUTPUT_DIR}/metaphlan_${RUN_ACCESSION}.txt\" -t $THREADS_PER_WORKER" \
-        "[metaphlan] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
+      run_command_with_output "conda run -n metaphlan metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"${OUTPUT_DIR}/${RUN_ACCESSION}_meta.bowtie2out.txt\" -o \"$METAPHLAN_PROFILE\"" \
+        "[metaphlan] Failed for $RUN_ACCESSION" "$METAPHLAN_LOG" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
       append_with_lock "${RUN_ACCESSION}:METAPHLAN" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
     fi
+    if validate_fastq "$QC" && ! grep -q "^${RUN_ACCESSION}:METAPHLAN_COUNTS$" "$CHECKPOINT_FILE"; then
+      convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS" || \
+        { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
+      append_with_lock "${RUN_ACCESSION}:METAPHLAN_COUNTS" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
+    fi
     if validate_fastq "$QC" && ! grep -q "^${RUN_ACCESSION}:MOTUS$" "$CHECKPOINT_FILE"; then
-      run_command "conda run -n motus motus profile -s \"$QC\" -o \"${OUTPUT_DIR}/motus_${RUN_ACCESSION}.txt\" -t $THREADS_PER_WORKER" \
+      run_command "conda run -n motus motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
         "[motus] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; return 1; }
       append_with_lock "${RUN_ACCESSION}:MOTUS" "$CHECKPOINT_FILE" "$COMPLETED_LOCK"
     fi
@@ -256,23 +415,25 @@ process_sample() {
   log_debug "Finished processing $RUN_ACCESSION"
 }
 
-# Final validation and retry of missing samples
-final_validation() {
-  log_debug "Starting final validation"
+# Final validation and merging
+final_validation_and_merge() {
+  log_info "Starting final validation and merging"
 
   # Load expected accessions from input.tsv
   declare -A EXPECTED_SAMPLES
+  declare -A BIOPROJECTS
   while IFS=$'\t' read -r bioproject accession sample_type; do
     EXPECTED_SAMPLES["$accession"]="$bioproject $sample_type"
+    BIOPROJECTS["$bioproject"]=1
   done < <(tail -n +2 "$INPUT_FILE")
 
   # Find actual processed samples
   declare -A ACTUAL_SAMPLES
   for dir in */; do
     if [[ -d "$dir" && "$dir" != "*/" ]]; then
-      for file in "$dir"qc_* "$dir"metaphlan_* "$dir"motus_*; do
+      for file in "$dir"qc_* "$dir"metaphlan_* "$dir"motus_* "$dir"*_metaphlan4_counts.txt; do
         if [[ -f "$file" ]]; then
-          local accession=$(basename "$file" | sed -E 's/^(qc|metaphlan|motus)_([^_.]+).*/\2/')
+          local accession=$(basename "$file" | sed -E 's/^(qc|metaphlan|motus|metaphlan4_counts)_([^_.]+).*/\2/')
           ACTUAL_SAMPLES["$accession"]="$dir"
         fi
       done
@@ -290,19 +451,26 @@ final_validation() {
 
   # Retry missing samples
   if [[ ${#missing[@]} -gt 0 ]]; then
-    log_debug "Retrying ${#missing[@]} missing samples"
+    log_info "Retrying ${#missing[@]} missing samples"
     printf '%s\n' "${missing[@]}" | parallel --jobs "$NUM_WORKERS" process_sample "${EXPECTED_SAMPLES[{1}]}" {1}
+    load_completed  # Reload to include newly completed samples
   else
-    log_debug "No missing samples to retry"
+    log_info "No missing samples to retry"
   fi
 
+  # Merge profiles for each Bioproject
+  for bioproject in "${!BIOPROJECTS[@]}"; do
+    merge_profiles "$bioproject" "metaphlan" || log_debug "Failed to merge MetaPhlAn profiles for $bioproject"
+    merge_profiles "$bioproject" "motus" || log_debug "Failed to merge mOTUs profiles for $bioproject"
+  done
+
   # Log final status
-  log_debug "Final validation complete. Expected: ${#EXPECTED_SAMPLES[@]}, Actual: ${#ACTUAL_SAMPLES[@]}, Completed: ${#COMPLETED_SAMPLES[@]}"
+  log_info "Final validation and merging complete. Expected: ${#EXPECTED_SAMPLES[@]}, Actual: ${#ACTUAL_SAMPLES[@]}, Completed: ${#COMPLETED_SAMPLES[@]}"
 }
 
 # Export functions and variables for GNU Parallel
-export -f process_sample log_debug append_with_lock validate_fastq run_command final_validation
-export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER
+export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts merge_profiles final_validation_and_merge
+export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL
 
 # Initialize lock files
 touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK"
@@ -311,11 +479,14 @@ touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK"
 load_completed
 
 # Process input file with GNU Parallel
-log_debug "Starting initial processing with $NUM_WORKERS workers"
+log_info "Starting initial processing with $NUM_WORKERS workers"
 tail -n +2 "$INPUT_FILE" | parallel --colsep '\t' --jobs "$NUM_WORKERS" process_sample {1} {2} {3}
 
-# Run final validation
-final_validation
+# Run final validation and merging
+final_validation_and_merge
 
-log_debug "All processing and validation complete."
-echo "All processing and validation complete."
+log_info "All processing, validation, and merging complete."
+echo "All processing, validation, and merging complete."
+
+# Clean up lock directory
+rm -rf "$LOCK_DIR"
