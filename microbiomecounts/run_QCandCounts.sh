@@ -24,7 +24,7 @@ DEFAULT_WORKERS=8  # Default number of workers
 DEFAULT_MOTUS_TAX_LEVEL="mOTU"  # Default taxonomic level for mOTUs
 LOG_LEVEL="INFO"  # Adjustable log level: INFO, DEBUG
 TMP_BASE="${SCRATCH:-/scratch}"  # Prefer $SCRATCH, fall back to /scratch
-RDP_DATABASE="rdp_train_set_19.fa.gz"
+RDP_DATABASE="rdp_19_toGenus_trainset.fa.gz"
 
 # Cleanup function for lock directory
 cleanup() {
