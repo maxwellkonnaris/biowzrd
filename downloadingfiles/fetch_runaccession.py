@@ -6,6 +6,11 @@ import time
 import requests
 import re
 import xml.etree.ElementTree as ET
+import json
+import signal
+import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 # Check if Biopython is installed.
 try:
@@ -25,7 +30,48 @@ try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
-    print("Warning: tqdm not installed. Progress bar will be disabled. Install with 'pip install tqdm' for progress display.")
+    print("Warning: tqdm not installed. Progress bar will be disabled in single-threaded mode. Install with 'pip install tqdm'.")
+
+# Global lock for thread-safe operations
+print_lock = Lock()
+checkpoint_lock = Lock()
+
+# Global checkpoint data
+checkpoint_data = {
+    "completed": [],
+    "results": [],  # List of (accession, run) tuples
+    "failed": [],   # List of (accession, reason) tuples
+    "comparison": [],  # List of {accession, expected, found, status}
+    "runs_only": [],   # List of run accessions
+}
+
+def save_checkpoint():
+    """Save checkpoint data to checkpoint.json."""
+    global checkpoint_data
+    with checkpoint_lock:
+        try:
+            with open("checkpoint.json", "w") as f:
+                json.dump(checkpoint_data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving checkpoint: {e}")
+
+def load_checkpoint():
+    """Load checkpoint data from checkpoint.json if it exists."""
+    global checkpoint_data
+    if os.path.exists("checkpoint.json"):
+        try:
+            with open("checkpoint.json", "r") as f:
+                checkpoint_data.update(json.load(f))
+            print(f"Loaded checkpoint: {len(checkpoint_data['completed'])} accessions already processed.")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+
+def signal_handler(sig, frame):
+    """Handle interrupt (Ctrl+C) by saving checkpoint and exiting."""
+    print("\nInterrupt received, saving checkpoint...")
+    save_checkpoint()
+    print("Checkpoint saved to checkpoint.json. Resume by rerunning the script.")
+    sys.exit(0)
 
 def safe_entrez_request(func, *args, max_retries=2, verbose=False, **kwargs):
     """Helper to gracefully retry Entrez calls on HTTP 429 or transient failures."""
@@ -37,7 +83,8 @@ def safe_entrez_request(func, *args, max_retries=2, verbose=False, **kwargs):
             if "HTTP Error 429" in str(e):
                 wait_time = 2 ** attempt
                 if verbose:
-                    print(f"Entrez 429: Retrying in {wait_time}s...")
+                    with print_lock:
+                        print(f"Entrez 429: Retrying in {wait_time}s...")
                 time.sleep(wait_time)
             else:
                 raise e
@@ -54,15 +101,18 @@ def safe_requests_get(url, params=None, max_retries=2, timeout=30, verbose=False
             wait_time = 2 ** attempt
             if e.response.status_code == 400:
                 if verbose:
-                    print(f"Bad request (400) for {url}: {e}. Retrying in {wait_time}s...")
+                    with print_lock:
+                        print(f"Bad request (400) for {url}: {e}. Retrying in {wait_time}s...")
             else:
                 if verbose:
-                    print(f"Request error: {e}. Retrying in {wait_time}s...")
+                    with print_lock:
+                        print(f"Request error: {e}. Retrying in {wait_time}s...")
             time.sleep(wait_time)
         except requests.exceptions.RequestException as e:
             wait_time = 2 ** attempt
             if verbose:
-                print(f"Request error: {e}. Retrying in {wait_time}s...")
+                with print_lock:
+                    print(f"Request error: {e}. Retrying in {wait_time}s...")
             time.sleep(wait_time)
     raise RuntimeError(f"Requests failed after {max_retries} retries.")
 
@@ -84,10 +134,12 @@ def fetch_runs_ena(accession, verbose=False):
     except RuntimeError as e:
         if "400 Client Error" in str(e):
             if verbose:
-                print(f"ENA fetch failed for {accession}: Invalid accession or no runs available.")
+                with print_lock:
+                    print(f"ENA fetch failed for {accession}: Invalid accession or no runs available.")
         else:
             if verbose:
-                print(f"ENA fetch failed for {accession}: {e}")
+                with print_lock:
+                    print(f"ENA fetch failed for {accession}: {e}")
         return []
 
 def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
@@ -99,7 +151,8 @@ def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
     try:
         # Step 1: Search SRA for BioProject
         if verbose:
-            print(f" - Searching SRA for BioProject {accession}...")
+            with print_lock:
+                print(f" - Searching SRA for BioProject {accession}...")
         handle = safe_entrez_request(
             Entrez.esearch,
             db="sra",
@@ -112,7 +165,8 @@ def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
         id_list = record.get("IdList", [])
         if not id_list:
             if verbose:
-                print(f" - No SRA experiments found for {accession}.")
+                with print_lock:
+                    print(f" - No SRA experiments found for {accession}.")
             return [], 0
 
         # Initial estimate of expected runs
@@ -153,7 +207,8 @@ def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
 
         # Step 3: Check XML for SRS and runs using ElementTree
         if verbose:
-            print(f" - Checking XML for SRS and runs in {accession}...")
+            with print_lock:
+                print(f" - Checking XML for SRS and runs in {accession}...")
         srs_ids = []
         xml_runs = []
         for i in range(0, len(id_list), batch_size):
@@ -188,12 +243,14 @@ def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
                             if run_acc and run_acc.startswith(("SRR", "ERR", "DRR")):
                                 xml_runs.append(run_acc)
             except ET.ParseError as e:
-                print(f"XML parsing failed for {accession}: {e}")
+                with print_lock:
+                    print(f"XML parsing failed for {accession}: {e}")
                 continue
 
         if xml_runs:
             if verbose:
-                print(f" - Found runs in XML RUN_SET for {accession}: {', '.join(xml_runs)}")
+                with print_lock:
+                    print(f" - Found runs in XML RUN_SET for {accession}.")
             runs.extend(xml_runs)
             # Update expected runs based on XML RUN_SET
             expected_runs = max(expected_runs, len(set(xml_runs)))
@@ -201,7 +258,8 @@ def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
         # Step 4: Query SRA for runs linked to SRS
         if srs_ids:
             if verbose:
-                print(f" - Found SRS for {accession}: {', '.join(srs_ids)}. Fetching runs...")
+                with print_lock:
+                    print(f" - Found SRS for {accession}. Fetching runs...")
             for srs in srs_ids:
                 handle = safe_entrez_request(
                     Entrez.esearch,
@@ -249,7 +307,8 @@ def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
         return list(set(runs)), expected_runs
 
     except Exception as e:
-        print(f"Error processing NCBI accession {accession}: {e}")
+        with print_lock:
+            print(f"Error processing NCBI accession {accession}: {e}")
         return [], 0
 
 def get_run_accessions_geo(accession, email, api_key, verbose=False):
@@ -295,14 +354,16 @@ def get_run_accessions_geo(accession, email, api_key, verbose=False):
                         if len(cols) > run_index:
                             runs.append(cols[run_index].strip())
     except Exception as e:
-        print(f"Entrez failed for GEO accession {accession}: {e}")
+        with print_lock:
+            print(f"Entrez failed for GEO accession {accession}: {e}")
 
     if not runs and SRAweb is not None:
         db = SRAweb()
         for attempt in range(2):
             try:
                 if verbose:
-                    print(f"Falling back to pysradb for GEO accession {accession} (attempt {attempt + 1})")
+                    with print_lock:
+                        print(f"Falling back to pysradb for GEO accession {accession} (attempt {attempt + 1})")
                 df = db.sra_metadata(geo=accession, detailed=True)
                 if not df.empty and "run_accession" in df.columns:
                     runs.extend(df["run_accession"].dropna().unique().tolist())
@@ -310,7 +371,8 @@ def get_run_accessions_geo(accession, email, api_key, verbose=False):
             except Exception as e:
                 wait_time = 2 ** attempt
                 if verbose:
-                    print(f"pysradb error: {e}. Retrying in {wait_time}s...")
+                    with print_lock:
+                        print(f"pysradb error: {e}. Retrying in {wait_time}s...")
                 time.sleep(wait_time)
 
     return list(set(runs)), 0  # No expected runs estimate for GEO
@@ -370,7 +432,8 @@ def fallback_entrez_accession(accession, email, api_key, verbose=False):
 
         # Check XML for SRS and runs using ElementTree
         if verbose:
-            print(f" - Checking XML for SRS and runs in fallback for {accession}...")
+            with print_lock:
+                print(f" - Checking XML for SRS and runs in fallback for {accession}...")
         srs_ids = []
         xml_runs = []
         for i in range(0, len(id_list), batch_size):
@@ -405,18 +468,21 @@ def fallback_entrez_accession(accession, email, api_key, verbose=False):
                             if run_acc and run_acc.startswith(("SRR", "ERR", "DRR")):
                                 xml_runs.append(run_acc)
             except ET.ParseError as e:
-                print(f"XML parsing failed for {accession}: {e}")
+                with print_lock:
+                    print(f"XML parsing failed for {accession}: {e}")
                 continue
 
         if xml_runs:
             if verbose:
-                print(f" - Found runs in XML RUN_SET for {accession}: {', '.join(xml_runs)}")
+                with print_lock:
+                    print(f" - Found runs in XML RUN_SET for {accession}.")
             runs.extend(xml_runs)
             expected_runs = max(expected_runs, len(set(xml_runs)))
 
         if srs_ids:
             if verbose:
-                print(f" - Found SRS for {accession}: {', '.join(srs_ids)}. Fetching runs...")
+                with print_lock:
+                    print(f" - Found SRS for {accession}. Fetching runs...")
             for srs in srs_ids:
                 handle = safe_entrez_request(
                     Entrez.esearch,
@@ -462,7 +528,8 @@ def fallback_entrez_accession(accession, email, api_key, verbose=False):
         expected_runs = max(expected_runs, len(set(runs)))
         return list(set(runs)), expected_runs
     except Exception as e:
-        print(f"Fallback Entrez failed for {accession}: {e}")
+        with print_lock:
+            print(f"Fallback Entrez failed for {accession}: {e}")
         return [], 0
 
 def process_accession(accession, email, api_key, verbose=False):
@@ -497,10 +564,41 @@ def process_accession(accession, email, api_key, verbose=False):
 
     # Fallback with Entrez [ACCN]
     if verbose:
-        print(f" - No runs found in primary approach for {accession}, trying fallback_entrez_accession...")
+        with print_lock:
+            print(f" - No runs found in primary approach for {accession}, trying fallback_entrez_accession...")
     fallback_runs, fallback_expected = fallback_entrez_accession(accession, email, api_key, verbose=verbose)
     expected_runs = max(expected_runs, fallback_expected)
     return fallback_runs, expected_runs
+
+def process_accession_wrapper(args):
+    """Wrapper for threading: process one accession and return structured result."""
+    accession, email, api_key, verbose = args
+    try:
+        run_list, expected_runs = process_accession(accession, email, api_key, verbose)
+        found_runs = len(run_list)
+        status = "Complete" if found_runs >= expected_runs and expected_runs > 0 else "Incomplete" if expected_runs > 0 else "Unknown"
+        if verbose:
+            with print_lock:
+                print(f" - Expected {expected_runs} runs, found {found_runs} runs: {status}")
+        return {
+            "accession": accession,
+            "runs": run_list,
+            "expected": expected_runs,
+            "found": found_runs,
+            "status": status,
+            "error": None
+        }
+    except Exception as e:
+        with print_lock:
+            print(f"❌ Failed to process {accession}: {e}")
+        return {
+            "accession": accession,
+            "runs": [],
+            "expected": 0,
+            "found": 0,
+            "status": "Failed",
+            "error": str(e)
+        }
 
 def read_accessions(input_file):
     """Read accessions from input file."""
@@ -516,10 +614,87 @@ def read_accessions(input_file):
         sys.exit(1)
     return accessions
 
+def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log_file):
+    """Write all output files."""
+    # Sort results by accession to maintain input order
+    results.sort(key=lambda x: x["accession"])
+
+    # Collect data
+    csv_results = []
+    runs_only = []
+    failed = []
+    comparison = []
+    seen_runs = set()
+
+    for result in results:
+        accession = result["accession"]
+        runs = result["runs"]
+        expected = result["expected"]
+        found = result["found"]
+        status = result["status"]
+        error = result["error"]
+
+        comparison.append({
+            "accession": accession,
+            "expected": expected,
+            "found": found,
+            "status": status
+        })
+
+        if error:
+            failed.append((accession, error))
+        else:
+            for run in runs:
+                if run not in seen_runs:
+                    csv_results.append((accession, run))
+                    runs_only.append(run)
+                    seen_runs.add(run)
+            if not runs and status != "Failed":
+                failed.append((accession, "No run accessions found"))
+
+    # Write CSV
+    try:
+        with open(output_file, "w", newline="", encoding="utf-8-sig") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["Project Accession", "Run Accession"])
+            writer.writerows(csv_results)
+        print(f"✅ Results saved to {output_file}")
+    except Exception as e:
+        print(f"Error writing CSV: {e}")
+
+    # Write runs-only text
+    try:
+        with open(runs_only_file, "w") as txtfile:
+            for run in runs_only:
+                txtfile.write(run + "\n")
+        print(f"✅ Run accessions only saved to {runs_only_file}")
+    except Exception as e:
+        print(f"Error writing run accessions only file: {e}")
+
+    # Write failures
+    if failed:
+        try:
+            with open(fail_log, "w") as flog:
+                for acc, reason in failed:
+                    flog.write(f"{acc}\t{reason}\n")
+            print(f"⚠️ Failed accessions logged to {fail_log}")
+        except Exception as e:
+            print(f"Error writing failure log: {e}")
+
+    # Write comparison log
+    try:
+        with open(comparison_log_file, "w") as clog:
+            clog.write("Accession\tExpected Runs\tFound Runs\tStatus\n")
+            for entry in comparison:
+                clog.write(f"{entry['accession']}\t{entry['expected']}\t{entry['found']}\t{entry['status']}\n")
+        print(f"📊 Run comparison logged to {comparison_log_file}")
+    except Exception as e:
+        print(f"Error writing comparison log: {e}")
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Download run accessions for a list of project (or other) accessions sequentially.",
-        epilog="Example usage: python download_runs.py projects.txt --email your_email@example.com --api-key YOUR_API_KEY --verbose"
+        description="Download run accessions for a list of project (or other) accessions, with parallel processing and checkpointing.",
+        epilog="Example usage: python accession.py projects.txt --email your_email@example.com --api-key YOUR_API_KEY --threads 4 --verbose"
     )
     parser.add_argument("input_file", help="Input file with one accession per line.")
     parser.add_argument("-o", "--output_file", default="run_accessions.csv", help="CSV output file name.")
@@ -528,6 +703,7 @@ def main():
     parser.add_argument("--email", help="Your email address (required for NCBI queries).")
     parser.add_argument("--api-key", help="Your NCBI API key (optional).")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output for detailed logging.")
+    parser.add_argument("--threads", type=int, default=4, help="Number of threads for parallel processing (1 to 10).")
     args = parser.parse_args()
 
     email = args.email if args.email else input("Enter your email (required for NCBI queries): ").strip()
@@ -537,97 +713,102 @@ def main():
         print("Error: Email is required for NCBI queries.")
         sys.exit(1)
 
+    # Validate threads
+    threads = max(1, min(args.threads, 10))
+    if args.threads != threads:
+        print(f"Threads adjusted to {threads} (must be between 1 and 10).")
+
+    # Register signal handler for Ctrl+C
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Load checkpoint
+    load_checkpoint()
+
+    # Read accessions
     accessions = read_accessions(args.input_file)
-    results = []
-    failed = []
-    runs_only = []
-    seen_runs = set()
-    comparison_log = []
+    total_accessions = len(accessions)
 
-    # Process accessions with progress bar in non-verbose mode
-    if not args.verbose and tqdm is not None:
-        iterator = tqdm(accessions, desc="Processing accessions", unit="accession")
-    else:
-        iterator = accessions
+    # Filter out completed accessions
+    completed = set(checkpoint_data["completed"])
+    remaining_accessions = [acc for acc in accessions if acc not in completed]
+    print(f"Processing {len(remaining_accessions)} of {total_accessions} accessions (skipping {len(completed)} completed).")
 
-    for accession in iterator:
-        if args.verbose:
-            print(f"\n🔍 Processing: {accession}")
-        try:
-            run_list, expected_runs = process_accession(accession, email, api_key, verbose=args.verbose)
-            found_runs = len(run_list)
-            status = "Complete" if found_runs >= expected_runs and expected_runs > 0 else "Incomplete" if expected_runs > 0 else "Unknown"
-            comparison_log.append({
-                "accession": accession,
-                "expected": expected_runs,
-                "found": found_runs,
-                "runs": run_list,
-                "status": status
-            })
+    if not remaining_accessions:
+        print("All accessions already processed. Writing outputs from checkpoint.")
+        write_outputs(checkpoint_data["comparison"], args.output_file, args.runs_only, args.fail_log, "run_comparison.log")
+        return
+
+    # Prepare results
+    results = checkpoint_data["comparison"].copy()
+
+    # Process accessions
+    if threads == 1:
+        # Single-threaded with progress bar
+        if not args.verbose and tqdm is not None:
+            iterator = tqdm(remaining_accessions, desc="Processing accessions", unit="accession")
+        else:
+            iterator = remaining_accessions
+
+        for accession in iterator:
             if args.verbose:
-                print(f" - Expected {expected_runs} runs, found {found_runs} runs: {status}")
-                if run_list:
-                    print(f" - Runs: {', '.join(run_list)}")
+                with print_lock:
+                    print(f"\n🔍 Processing: {accession}")
+            result = process_accession_wrapper((accession, email, api_key, args.verbose))
+            results.append(result)
 
-            if run_list:
-                for run in run_list:
-                    if run not in seen_runs:
-                        results.append((accession, run))
-                        runs_only.append(run)
-                        seen_runs.add(run)
-            else:
-                failed.append((accession, "No run accessions found"))
-        except Exception as e:
-            print(f"❌ Failed to process {accession}: {e}")
-            failed.append((accession, str(e)))
-            comparison_log.append({
-                "accession": accession,
-                "expected": 0,
-                "found": 0,
-                "runs": [],
-                "status": "Failed"
-            })
-        time.sleep(0.5)
+            # Update checkpoint
+            with checkpoint_lock:
+                checkpoint_data["completed"].append(accession)
+                checkpoint_data["comparison"].append(result)
+                if result["error"]:
+                    checkpoint_data["failed"].append((accession, result["error"]))
+                else:
+                    for run in result["runs"]:
+                        if run not in set(checkpoint_data["runs_only"]):
+                            checkpoint_data["results"].append((accession, run))
+                            checkpoint_data["runs_only"].append(run)
+                    if not result["runs"] and result["status"] != "Failed":
+                        checkpoint_data["failed"].append((accession, "No run accessions found"))
+                save_checkpoint()
 
-    # Write CSV
-    try:
-        with open(args.output_file, "w", newline="", encoding="utf-8-sig") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(["Project Accession", "Run Accession"])
-            writer.writerows(results)
-        print(f"\n✅ Results saved to {args.output_file}")
-    except Exception as e:
-        print(f"Error writing CSV: {e}")
+            time.sleep(0.5)  # Rate limit
+    else:
+        # Parallel processing
+        tasks = [(acc, email, api_key, args.verbose) for acc in remaining_accessions]
+        processed_count = len(completed)
 
-    # Write runs-only text
-    try:
-        with open(args.runs_only, "w") as txtfile:
-            for run in runs_only:
-                txtfile.write(run + "\n")
-        print(f"✅ Run accessions only saved to {args.runs_only}")
-    except Exception as e:
-        print(f"Error writing run accessions only file: {e}")
+        if not args.verbose:
+            print(f"Starting parallel processing with {threads} threads...")
 
-    # Write failures
-    if failed:
-        try:
-            with open(args.fail_log, "w") as flog:
-                for acc, reason in failed:
-                    flog.write(f"{acc}\t{reason}\n")
-            print(f"⚠️ Failed accessions logged to {args.fail_log}")
-        except Exception as e:
-            print(f"Error writing failure log: {e}")
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            for result in executor.map(process_accession_wrapper, tasks):
+                results.append(result)
+                processed_count += 1
 
-    # Write comparison log
-    try:
-        with open("run_comparison.log", "w") as clog:
-            clog.write("Accession\tExpected Runs\tFound Runs\tStatus\tRun Accessions\n")
-            for entry in comparison_log:
-                runs_str = ",".join(entry["runs"]) if entry["runs"] else "None"
-                clog.write(f"{entry['accession']}\t{entry['expected']}\t{entry['found']}\t{entry['status']}\t{runs_str}\n")
-        print(f"📊 Run comparison logged to run_comparison.log")
-    except Exception as e:
-        print(f"Error writing comparison log: {e}")
+                # Update checkpoint
+                with checkpoint_lock:
+                    checkpoint_data["completed"].append(result["accession"])
+                    checkpoint_data["comparison"].append(result)
+                    if result["error"]:
+                        checkpoint_data["failed"].append((result["accession"], result["error"]))
+                    else:
+                        for run in result["runs"]:
+                            if run not in set(checkpoint_data["runs_only"]):
+                                checkpoint_data["results"].append((result["accession"], run))
+                                checkpoint_data["runs_only"].append(run)
+                        if not result["runs"] and result["status"] != "Failed":
+                            checkpoint_data["failed"].append((result["accession"], "No run accessions found"))
+                    save_checkpoint()
+
+                # Show progress in non-verbose mode
+                if not args.verbose:
+                    with print_lock:
+                        print(f"Processed {processed_count}/{total_accessions} accessions")
+
+                time.sleep(0.1)  # Slight delay to avoid overwhelming servers
+
+    # Write final outputs
+    write_outputs(results, args.output_file, args.runs_only, args.fail_log, "run_comparison.log")
 
 if __name__ == '__main__':
     main()
