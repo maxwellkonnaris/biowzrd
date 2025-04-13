@@ -701,7 +701,7 @@ def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log
         print(f"Error writing comparison log: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(
+   parser = argparse.ArgumentParser(
         description="Download run accessions for a list of project (or other) accessions, with parallel processing and checkpointing.",
         epilog="Example usage: python accession.py projects.txt --email your_email@example.com --api-key YOUR_API_KEY --threads 4 --verbose"
     )
@@ -713,7 +713,31 @@ def main():
     parser.add_argument("--api-key", help="Your NCBI API key (optional).")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output for detailed logging.")
     parser.add_argument("--threads", type=int, default=4, help="Number of threads for parallel processing (1 to 10).")
+    parser.add_argument("--slurm", action="store_true", help="Submit as a SLURM batch job instead of running interactively.")
     args = parser.parse_args()
+
+    # Handle SLURM batch submission
+    if args.slurm:
+        import subprocess
+        import os
+        slurm_script = f"""#!/bin/bash
+#SBATCH --time=4:00:00
+#SBATCH --mem=16G
+#SBATCH --cpus-per-task=16
+#SBATCH --output=fetch-%j.out
+#SBATCH --error=fetch-%j.err
+
+python {os.path.abspath(__file__)} {args.input_file} -o {args.output_file} --runs-only {args.runs_only} --fail-log {args.fail_log} --email {args.email or ''} --api-key {args.api_key or ''} {'--verbose' if args.verbose else ''} --threads {args.threads}
+"""
+        with open("accession_slurm.sh", "w") as f:
+            f.write(slurm_script)
+        try:
+            result = subprocess.run(["sbatch", "accession_slurm.sh"], capture_output=True, text=True, check=True)
+            print(f"Submitted SLURM job: {result.stdout.strip()}")
+            sys.exit(0)
+        except subprocess.CalledProcessError as e:
+            print(f"Error submitting SLURM job: {e.stderr}")
+            sys.exit(1)
 
     email = args.email if args.email else input("Enter your email (required for NCBI queries): ").strip()
     api_key = args.api_key if args.api_key else input("Enter your NCBI API key (press enter if none): ").strip()
