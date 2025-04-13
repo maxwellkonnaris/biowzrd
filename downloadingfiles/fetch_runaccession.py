@@ -581,7 +581,12 @@ def process_accession_wrapper(args):
     try:
         run_list, expected_runs = process_accession(accession, email, api_key, verbose)
         found_runs = len(run_list)
-        status = "Complete" if found_runs >= expected_runs and expected_runs > 0 else "Incomplete" if expected_runs > 0 else "Unknown"
+        status = (
+            "Complete"
+            if found_runs >= expected_runs and expected_runs > 0
+            else "Incomplete" if expected_runs > 0
+            else "Unknown"
+        )
         if verbose:
             with print_lock:
                 print(f" - Expected {expected_runs} runs, found {found_runs} runs: {status}")
@@ -701,9 +706,11 @@ def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log
         print(f"Error writing comparison log: {e}")
 
 def main():
-   parser = argparse.ArgumentParser(
-        description="Download run accessions for a list of project (or other) accessions, with parallel processing and checkpointing.",
-        epilog="Example usage: python accession.py projects.txt --email your_email@example.com --api-key YOUR_API_KEY --threads 4 --verbose"
+    parser = argparse.ArgumentParser(
+        description="Download run accessions for a list of project (or other) accessions, "
+                    "with parallel processing and checkpointing.",
+        epilog="Example usage: python accession.py projects.txt --email your_email@example.com "
+               "--api-key YOUR_API_KEY --threads 4 --verbose"
     )
     parser.add_argument("input_file", help="Input file with one accession per line.")
     parser.add_argument("-o", "--output_file", default="run_accessions.csv", help="CSV output file name.")
@@ -713,7 +720,8 @@ def main():
     parser.add_argument("--api-key", help="Your NCBI API key (optional).")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output for detailed logging.")
     parser.add_argument("--threads", type=int, default=4, help="Number of threads for parallel processing (1 to 10).")
-    parser.add_argument("--slurm", action="store_true", help="Submit as a SLURM batch job instead of running interactively.")
+    parser.add_argument("--slurm", action="store_true",
+                        help="Submit as a SLURM batch job instead of running interactively.")
     args = parser.parse_args()
 
     # Handle SLURM batch submission
@@ -764,11 +772,18 @@ python {os.path.abspath(__file__)} {args.input_file} -o {args.output_file} --run
     # Filter out completed accessions
     completed = set(checkpoint_data["completed"])
     remaining_accessions = [acc for acc in accessions if acc not in completed]
-    print(f"Processing {len(remaining_accessions)} of {total_accessions} accessions (skipping {len(completed)} completed).")
+    print(f"Processing {len(remaining_accessions)} of {total_accessions} accessions "
+          f"(skipping {len(completed)} completed).")
 
     if not remaining_accessions:
         print("All accessions already processed. Writing outputs from checkpoint.")
-        write_outputs(checkpoint_data["comparison"], args.output_file, args.runs_only, args.fail_log, "run_comparison.log")
+        write_outputs(
+            checkpoint_data["comparison"],
+            args.output_file,
+            args.runs_only,
+            args.fail_log,
+            "run_comparison.log"
+        )
         return
 
     # Prepare results
