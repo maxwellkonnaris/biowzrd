@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=parallel_transfer
-#SBATCH --output=transfer_%j.log
-#SBATCH --error=transfer_%j.err
+#SBATCH --job-name=parallel_rsync
+#SBATCH --output=rsync_%j.log
+#SBATCH --error=rsync_%j.err
 #SBATCH --time=48:00:00
-#SBATCH --account=one
+#SBATCH --account=open
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
@@ -11,258 +11,159 @@
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=ALL
 
-################################################################################
-# Transfers files from a source directory to a destination directory in parallel
-# using GNU Parallel and rsync with retries. By default, it copies subdirectories
-# unless -n is specified.  This version does NOT use --partial-dir because
-# --append-verify conflicts with that flag in rsync.
-################################################################################
+###############################################################################
+# This script copies an entire directory (and all its subdirectories) from
+# SRC_DIR to DEST_DIR, in parallel, using rsync. It does not delete or modify
+# files in the source. At the end, it checks that the destination has the same
+# number of files, and logs any missing ones if there's a mismatch.
+###############################################################################
 
-set -x  # Enable command tracing for debugging
+set -eu  # Exit on error or undefined variable
 
-# ---------------------- Default Values ----------------------
+# --------------------- Defaults / Usage --------------------
 DEFAULT_SRC_DIR="/storage/home/mak6930/scratch/mlscale/fastq_data"
 DEFAULT_DEST_DIR="/storage/home/mak6930/silvermanlab/mlscale/fastq_data"
-INCLUDE_SUBDIRS=true  # Default: transfer all subdirectories
 
-# ---------------------- Usage Function ----------------------
 usage() {
-  cat <<EOF
+cat <<EOF
 Usage: $(basename "$0") [options]
 
-Transfers files/directories from SRC to DEST using rsync and parallel with retries.
+Copies an entire directory (with subdirectories) from SRC_DIR to DEST_DIR
+using rsync in parallel. Does NOT delete source files.
 
 Options:
-  -s <path>   Source directory (default: $DEFAULT_SRC_DIR)
-  -d <path>   Destination directory (default: $DEFAULT_DEST_DIR)
-  -n          Do NOT include subdirectories (only transfer top-level files)
-  -h          Show this help message and exit
+  -s <path>  Source directory (default: $DEFAULT_SRC_DIR)
+  -d <path>  Destination directory (default: $DEFAULT_DEST_DIR)
+  -h         Show this help message and exit
 
-HPC Info:
-  - Slurm job requesting 16 CPUs, 64 GB RAM, 48h.
-  - If subdirectories are included (default), a final deep rsync is done to catch
-    any missed files.  If -n is used, that deep sync is skipped.
-  - Adjust concurrency by editing parallel -j or changing --cpus-per-task.
+Slurm job parameters (time, CPUs, memory) can be customized in the SBATCH header.
 EOF
-  exit 0
+exit 0
 }
 
-# ------------------- Parse Command-Line Flags -------------------
-while getopts "s:d:nh" opt; do
+SRC_DIR="$DEFAULT_SRC_DIR"
+DEST_DIR="$DEFAULT_DEST_DIR"
+
+# ---------------------- Parse CLI args ---------------------
+while getopts "s:d:h" opt; do
   case "$opt" in
     s) SRC_DIR="$OPTARG" ;;
     d) DEST_DIR="$OPTARG" ;;
-    n) INCLUDE_SUBDIRS=false ;;
     h) usage ;;
     *) usage ;;
   esac
 done
 shift $((OPTIND - 1))
 
-# If not set by flags, use defaults
-: "${SRC_DIR:=$DEFAULT_SRC_DIR}"
-: "${DEST_DIR:=$DEFAULT_DEST_DIR}"
-
-# ------------------- Environment Setup -------------------
-SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
-STATUS_DIR="./transfer_status"
-LOG_FILE="$SLURM_SUBMIT_DIR/transfer_${SLURM_JOB_ID}.log"
-
-mkdir -p "$(dirname "$LOG_FILE")" || {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Cannot create log file directory"
-  exit 1
-}
-
-# ------------------- Logging & Cleanup -------------------
-log_message() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
-
-cleanup() {
-  rm -f "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt" "$SLURM_SUBMIT_DIR/transfer_chunk.sh" 2>/dev/null
-  log_message "Cleaned up temporary files in $STATUS_DIR"
-}
-
-trap "log_message 'Caught SIGTERM, cleaning up...' && cleanup && exit 1" SIGTERM
-trap "log_message 'Caught SIGINT, cleaning up...' && cleanup && exit 1" SIGINT
-trap cleanup EXIT
-
-# ------------------- Validate Paths -------------------
-if [ ! -d "$SRC_DIR" ]; then
-  log_message "ERROR: Source directory $SRC_DIR does not exist"
+# ---------------------- Validation -------------------------
+if [[ ! -d "$SRC_DIR" ]]; then
+  echo "ERROR: Source directory does not exist: $SRC_DIR"
   exit 1
 fi
 
-if ! mkdir -p "$DEST_DIR" "$STATUS_DIR"; then
-  log_message "ERROR: Failed to create directories $DEST_DIR or $STATUS_DIR"
-  exit 1
-fi
-
-touch "$STATUS_DIR/test_write" && rm "$STATUS_DIR/test_write" || {
-  log_message "ERROR: $STATUS_DIR is not writable"
+mkdir -p "$DEST_DIR" || {
+  echo "ERROR: Unable to create destination directory: $DEST_DIR"
   exit 1
 }
 
-# ------------------- Initial Checks -------------------
-log_message "===== INITIAL TRANSFER CHECK ====="
-src_files=$(find "$SRC_DIR" -type f | wc -l)
-src_dirs=$(find "$SRC_DIR" -type d | wc -l)
-log_message "Expected to transfer: $src_files files, $src_dirs directories"
-log_message "Top-level items:"
-while IFS= read -r -d '' item; do
-  log_message "  $item"
-done < <(find "$SRC_DIR" -maxdepth 1 -not -path "$SRC_DIR" -print0)
+# Make a local log file
+LOG_FILE="rsync_${SLURM_JOB_ID}.log"
+touch "$LOG_FILE" || {
+  echo "ERROR: Unable to write to current directory for logs."
+  exit 1
+}
 
-# Force reprocessing by removing old status flags
-rm -f "$STATUS_DIR"/*.done 2>/dev/null
+echo "==================== STARTING JOB $(date) ====================" | tee -a "$LOG_FILE"
+echo "Source:      $SRC_DIR" | tee -a "$LOG_FILE"
+echo "Destination: $DEST_DIR" | tee -a "$LOG_FILE"
 
-if [ "$src_files" -eq 0 ] && [ "$src_dirs" -eq 1 ]; then
-  log_message "WARNING: Source directory $SRC_DIR appears empty; proceeding anyway."
+# Count total files in source
+echo "Counting files in source..." | tee -a "$LOG_FILE"
+EXPECTED_FILE_COUNT=$(find "$SRC_DIR" -type f | wc -l)
+echo "Expected file count: $EXPECTED_FILE_COUNT" | tee -a "$LOG_FILE"
+
+# ----------------- Create the chunk script -----------------
+# Each parallel job will run this to copy exactly one file, preserving structure.
+CHUNK_SCRIPT="per_file_rsync.sh"
+cat << 'EOF' > "$CHUNK_SCRIPT"
+#!/bin/bash
+SRC_FILE="$1"
+SRC_DIR="$2"
+DEST_DIR="$3"
+LOG_FILE="$4"
+
+# Compute relative path
+REL_PATH=$(realpath --relative-to="$SRC_DIR" "$SRC_FILE")
+
+# Create the parent directory in the destination
+mkdir -p "$DEST_DIR/$(dirname "$REL_PATH")"
+
+# Now rsync that single file
+# Using -a to preserve attributes, timestamps, etc.; no deletion on source
+# --partial and --append-verify are optional if you want partial file resumes
+rsync -a "$SRC_FILE" "$DEST_DIR/$REL_PATH"
+RC=$?
+
+if [ $RC -ne 0 ]; then
+  echo "[ERROR] rsync failed for file: $SRC_FILE (exit code: $RC)" >> "$LOG_FILE"
+  exit $RC
 fi
 
-# Attempt to load parallel if available
+echo "[OK] Copied file: $SRC_FILE" >> "$LOG_FILE"
+EOF
+
+chmod +x "$CHUNK_SCRIPT"
+
+# -------------------- Generate file list -------------------
+# We'll pass each file to per_file_rsync.sh in parallel.
+echo "Building list of all source files..." | tee -a "$LOG_FILE"
+FILE_LIST="files_to_copy_${SLURM_JOB_ID}.txt"
+find "$SRC_DIR" -type f > "$FILE_LIST"
+
+FILE_COUNT=$(wc -l < "$FILE_LIST")
+echo "Found $FILE_COUNT files in the source directory (should match expected)." | tee -a "$LOG_FILE"
+
+# -------------- Parallel copy of all files ---------------
+echo "Starting parallel rsync..." | tee -a "$LOG_FILE"
+
+# Try to load parallel if available (depends on your HPC setup)
 module load parallel 2>/dev/null || true
 
-# ------------------- Create Chunk Script -------------------
-cat << 'CHUNKEOF' > "$SLURM_SUBMIT_DIR/transfer_chunk.sh"
-#!/bin/bash
-src_path="$1"
-dest_dir="$2"
-status_dir="$3"
-log_file="$4"
-source_dir="$5"
-
-# Figure out a relative path for status tracking
-rel_path=$(realpath --relative-to="$source_dir" "$src_path" 2>/dev/null || basename "$src_path")
-status_file="${status_dir}/$(echo "$rel_path" | tr '/' '_').done"
-
-# If it's already transferred, skip
-if [ -f "$status_file" ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Skipping $src_path (already completed)" | tee -a "$log_file"
-  exit 0
-fi
-
-# Create parent directories in the destination (for nested paths)
-if [ -d "$src_path" ]; then
-  mkdir -p "$dest_dir/$(realpath --relative-to="$source_dir" "$src_path")"
+if command -v parallel &>/dev/null; then
+  # Using parallel
+  parallel --no-notice -j "$SLURM_CPUS_PER_TASK" \
+    "$PWD/$CHUNK_SCRIPT" {} "$SRC_DIR" "$DEST_DIR" "$PWD/$LOG_FILE" \
+    :::: "$FILE_LIST"
 else
-  parent_subdir=$(dirname "$(realpath --relative-to="$source_dir" "$src_path")")
-  mkdir -p "$dest_dir/$parent_subdir"
+  # Fallback: sequential
+  echo "GNU Parallel not found, copying files sequentially..." | tee -a "$LOG_FILE"
+  while read -r file; do
+    "$PWD/$CHUNK_SCRIPT" "$file" "$SRC_DIR" "$DEST_DIR" "$PWD/$LOG_FILE"
+  done < "$FILE_LIST"
 fi
 
-# Retry up to 3 times
-for attempt in {1..3}; do
-  # NOTE: We do NOT use --partial-dir because --append-verify conflicts with it.
-  # We'll keep --partial & --append-verify so large file restarts can happen in-place.
-  rsync -a --progress --stats \
-        --partial --append-verify --checksum \
-        "$src_path" "$dest_dir/"
-  rc=$?
+echo "Parallel rsync completed." | tee -a "$LOG_FILE"
 
-  if [ $rc -ne 0 ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Attempt $attempt failed for $src_path (rsync exit code: $rc)" | tee -a "$log_file"
-    if [ $attempt -eq 3 ]; then
-      echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Transfer of $src_path failed after 3 attempts" | tee -a "$log_file"
-      exit 1
-    fi
-    sleep 10
-    continue
-  fi
+# -------------- Verify final file count --------------
+echo "Verifying file count in the destination..." | tee -a "$LOG_FILE"
+ACTUAL_COUNT=$(find "$DEST_DIR" -type f | wc -l)
+echo "Destination file count: $ACTUAL_COUNT" | tee -a "$LOG_FILE"
 
-  # Success
-  touch "$status_file"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Transfer of $src_path completed successfully" | tee -a "$log_file"
-  exit 0
-done
-CHUNKEOF
-
-chmod +x "$SLURM_SUBMIT_DIR/transfer_chunk.sh"
-
-# ------------------- Collect Items to Transfer -------------------
-log_message "===== COLLECTING ITEMS TO TRANSFER ====="
-chunk_list=()
-
-if $INCLUDE_SUBDIRS; then
-  # Include directories + files at top-level
-  while IFS= read -r -d '' item; do
-    chunk_list+=("$item")
-  done < <(find "$SRC_DIR" -maxdepth 1 -not -path "$SRC_DIR" -print0)
+if [ "$ACTUAL_COUNT" -eq "$EXPECTED_FILE_COUNT" ]; then
+  echo "File counts match! Transfer succeeded." | tee -a "$LOG_FILE"
 else
-  # Only grab top-level files, skip directories
-  while IFS= read -r -d '' item; do
-    chunk_list+=("$item")
-  done < <(find "$SRC_DIR" -maxdepth 1 -type f -print0)
+  echo "WARNING: File counts do NOT match!" | tee -a "$LOG_FILE"
+  echo "  Expected: $EXPECTED_FILE_COUNT" | tee -a "$LOG_FILE"
+  echo "  Got:      $ACTUAL_COUNT" | tee -a "$LOG_FILE"
+
+  echo "Listing missing files..." | tee -a "$LOG_FILE"
+  # We'll sort them and compare
+  comm -23 \
+    <(find "$SRC_DIR" -type f | sed "s|$SRC_DIR/||" | sort) \
+    <(find "$DEST_DIR" -type f | sed "s|$DEST_DIR/||" | sort) \
+    | while read -r missing_rel; do
+      echo "Missing: $SRC_DIR/$missing_rel" | tee -a "$LOG_FILE"
+    done
 fi
 
-if [ ${#chunk_list[@]} -eq 0 ]; then
-  log_message "WARNING: No top-level items to process."
-fi
-
-# ------------------- Transfer in Parallel (or Sequential) -------------------
-log_message "===== STARTING TRANSFER ====="
-if command -v parallel >/dev/null 2>&1; then
-  log_message "Using GNU Parallel for multi-core transfers (no TTY/interactive)."
-  # Remove --eta or any TTY-based progress to avoid /dev/tty errors
-  parallel --no-notice --plain --retries 3 -j "$SLURM_CPUS_PER_TASK" \
-    "$SLURM_SUBMIT_DIR/transfer_chunk.sh" {} "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" "$SRC_DIR" ::: "${chunk_list[@]}" || {
-    log_message "ERROR: Parallel transfer failed"
-    exit 1
-  }
-else
-  log_message "GNU Parallel not found, falling back to sequential transfers."
-  for item in "${chunk_list[@]}"; do
-    "$SLURM_SUBMIT_DIR/transfer_chunk.sh" "$item" "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" "$SRC_DIR" || {
-      log_message "ERROR: Transfer of $item failed"
-      exit 1
-    }
-  done
-fi
-
-# ------------------- Optional Final Sync & Validation -------------------
-if $INCLUDE_SUBDIRS; then
-  # If subdirectories are allowed, do a final deep sync to catch any missed items
-  log_message "===== FINAL SYNC ====="
-  rsync -a --progress --checksum \
-        --partial --append-verify \
-        "$SRC_DIR/" "$DEST_DIR/" || {
-    log_message "ERROR: Final sync failed"
-    exit 1
-  }
-else
-  log_message "Skipping final deep sync (no subdirectories requested)."
-fi
-
-# -------------- Final Checks --------------
-log_message "===== FINAL TRANSFER CHECK ====="
-dest_files=$(find "$DEST_DIR" -type f | wc -l)
-dest_dirs=$(find "$DEST_DIR" -type d | wc -l)
-log_message "Transferred: $dest_files files, $dest_dirs directories"
-
-if [ "$src_files" -ne "$dest_files" ] || [ "$src_dirs" -ne "$dest_dirs" ]; then
-  log_message "ERROR: Mismatch (Expected $src_files files/$src_dirs dirs, got $dest_files files/$dest_dirs dirs)."
-  log_message "Checking for missing files..."
-  comm -23 <(find "$SRC_DIR" -type f | sort) <(find "$DEST_DIR" -type f | sort) | while read -r missing; do
-    log_message "Missing file: $missing"
-  done
-  log_message "Checking for missing directories..."
-  comm -23 <(find "$SRC_DIR" -type d | sort) <(find "$DEST_DIR" -type d | sort) | while read -r missing; do
-    log_message "Missing directory: $missing"
-  done
-  exit 1
-fi
-
-# Dry-run validation with checksum
-rsync -a --dry-run --checksum "$SRC_DIR/" "$DEST_DIR/" > "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt"
-if grep -qE "would be|differ" "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt"; then
-  log_message "ERROR: Validation found discrepancies"
-  cat "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt" >> "$LOG_FILE"
-  exit 1
-else
-  log_message "Validation passed: All files and directories match"
-fi
-
-# -------------- Summary --------------
-log_message "===== JOB COMPLETED ====="
-COMPLETED_ITEMS=$(find "$STATUS_DIR" -name "*.done" | wc -l)
-TOTAL_ITEMS=${#chunk_list[@]}
-log_message "Top-level items processed: $COMPLETED_ITEMS / $TOTAL_ITEMS"
+echo "==================== JOB FINISHED $(date) ====================" | tee -a "$LOG_FILE"
