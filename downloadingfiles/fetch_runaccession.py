@@ -54,7 +54,7 @@ def get_run_accessions_ncbi(accession, email, api_key):
             Entrez.esearch,
             db="sra",
             term=f"{accession}[BioProject]",
-            retmax=100000  # fetch all
+            retmax=100000
         )
         record = Entrez.read(handle)
         handle.close()
@@ -98,7 +98,6 @@ def get_run_accessions_ncbi(accession, email, api_key):
     except Exception as e:
         print(f"Error using Bio.Entrez for accession {accession}: {e}")
         return []
-
 
 def get_run_accessions_geo(accession, email, api_key):
     Entrez.email = email
@@ -193,7 +192,7 @@ def process_accession(accession, email, api_key):
     else:
         print(f"Unknown accession prefix for {accession}. Skipping.")
         return []
-        
+
 def read_accessions(input_file):
     accessions = []
     try:
@@ -237,20 +236,17 @@ def main():
         print(f"\n🔍 Processing: {accession}")
         try:
             run_list = process_accession(accession, email, api_key)
-            for run in run_list:
-                if run not in seen_runs:
-                    results.append((accession, run))
-                    runs_only.append(run)
-                    seen_runs.add(run)
-        
-            if not run_list:
-                results.append((accession, "No run accessions found"))
+            if run_list:
+                for run in run_list:
+                    if run not in seen_runs:
+                        results.append((accession, run))
+                        runs_only.append(run)
+                        seen_runs.add(run)
+            else:
                 failed.append((accession, "No run accessions found"))
         except Exception as e:
             print(f"❌ Failed to process {accession}: {e}")
             failed.append((accession, str(e)))
-            results.append((accession, "ERROR"))
-
         time.sleep(0.5)
 
     try:
