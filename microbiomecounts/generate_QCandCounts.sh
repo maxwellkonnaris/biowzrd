@@ -48,14 +48,14 @@ FASTQ_DIR="${FASTQ_DIR:-$DEFAULT_DIR}"
 NUM_WORKERS="${NUM_WORKERS:-$DEFAULT_WORKERS}"
 MOTUS_TAX_LEVEL="${MOTUS_TAX_LEVEL:-$DEFAULT_MOTUS_TAX_LEVEL}"
 
-# Validate Conda and environments
-if ! command -v conda &>/dev/null; then
-  echo "Error: Conda not found"
+# Validate micromamba and environments
+if ! command -v micromamba &>/dev/null; then
+  echo "Error: micromamba not found"
   exit 1
 fi
 for env in dada2 metaphlan motus; do
-  if ! conda env list | grep -q "^$env "; then
-    echo "Error: Conda environment $env not found"
+  if ! micromamba env list | grep -q "^$env "; then
+    echo "Error: micromamba environment $env not found"
     exit 1
   fi
 done
@@ -260,12 +260,12 @@ convert_metaphlan_to_counts() {
 # Merge profiles for a Bioproject
 merge_profiles() {
   local bioproject="$1"
-  local tool="$2"  # "metaphlan" or "motus"
+  local tool="$2"  # "metaphlan", "motus", or "dada2"
   local output_dir="$bioproject"
   local merged_file="${output_dir}/${bioproject}_${tool}_merged.txt"
   local profile_files
 
-  # Load expected accessions for this Bioproject from input.tsv
+  # Load expected accessions for this Bioproject
   declare -A expected_accessions
   while IFS="$DELIMITER" read -r proj accession sample_type; do
     if [[ "$proj" == "$bioproject" ]]; then
@@ -278,6 +278,8 @@ merge_profiles() {
     profile_files=($(ls "$output_dir"/*_metaphlan4_counts.txt 2>/dev/null))
   elif [[ "$tool" == "motus" ]]; then
     profile_files=($(ls "$output_dir"/*_motus.txt 2>/dev/null))
+  elif [[ "$tool" == "dada2" ]]; then
+    profile_files=($(ls "$output_dir"/seqtab_*.rds 2>/dev/null))
   fi
 
   # Check if all expected accessions have completed profiles
@@ -288,7 +290,6 @@ merge_profiles() {
       all_complete=false
       break
     fi
-    # Verify profile file exists
     if [[ "$tool" == "metaphlan" && ! -f "$output_dir/${accession}_metaphlan4_counts.txt" ]]; then
       log_debug "[merge_profiles] $bioproject ($tool): Missing metaphlan profile for $accession"
       all_complete=false
@@ -297,26 +298,48 @@ merge_profiles() {
       log_debug "[merge_profiles] $bioproject ($tool): Missing motus profile for $accession"
       all_complete=false
       break
+    elif [[ "$tool" == "dada2" && ! -f "$output_dir/seqtab_${accession}.rds" ]]; then
+      log_debug "[merge_profiles] $bioproject ($tool): Missing dada2 seqtab for $accession"
+      all_complete=false
+      break
     fi
   done
 
   # Proceed with merging only if all expected profiles are complete
   if [[ "$all_complete" == "true" && ${#profile_files[@]} -gt 0 ]]; then
-    if [[ ${#profile_files[@]} -gt 1 ]]; then
-      if [[ "$tool" == "metaphlan" ]]; then
-        local input_list="${profile_files[*]}"
-        run_command "conda run -n metaphlan merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
-          "[metaphlan merge] Failed for $bioproject" || return 1
-        log_debug "Merged MetaPhlAn profiles for $bioproject into $merged_file"
-      elif [[ "$tool" == "motus" ]]; then
-        local input_list=$(printf "%s," "${profile_files[@]}" | sed 's/,$//')
-        run_command "conda run -n motus motus merge -i \"$input_list\" -o \"$merged_file\"" \
-          "[motus merge] Failed for $bioproject" || return 1
-        log_debug "Merged mOTUs profiles for $bioproject into $merged_file"
-      fi
-    elif [[ ${#profile_files[@]} -eq 1 ]]; then
+    if [[ "$tool" == "metaphlan" && ${#profile_files[@]} -gt 1 ]]; then
+      local input_list="${profile_files[*]}"
+      run_command "micromamba run -n metaphlan merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
+        "[metaphlan merge] Failed for $bioproject" || return 1
+      log_debug "Merged MetaPhlAn profiles for $bioproject into $merged_file"
+    elif [[ "$tool" == "metaphlan" && ${#profile_files[@]} -eq 1 ]]; then
       cp "${profile_files[0]}" "$merged_file"
-      log_debug "Copied single $tool profile for $bioproject to $merged_file"
+      log_debug "Copied single metaphlan profile for $bioproject to $merged_file"
+    elif [[ "$tool" == "motus" && ${#profile_files[@]} -gt 1 ]]; then
+      local input_list=$(printf "%s," "${profile_files[@]}" | sed 's/,$//')
+      run_command "micromamba run -n motus motus merge -i \"$input_list\" -o \"$merged_file\"" \
+        "[motus merge] Failed for $bioproject" || return 1
+      log_debug "Merged mOTUs profiles for $bioproject into $merged_file"
+    elif [[ "$tool" == "motus" && ${#profile_files[@]} -eq 1 ]]; then
+      cp "${profile_files[0]}" "$merged_file"
+      log_debug "Copied single motus profile for $bioproject to $merged_file"
+    elif [[ "$tool" == "dada2" ]]; then
+      local input_list="${bioproject} ${profile_files[*]}"
+      run_command "micromamba run -n dada2 Rscript merge_dada2.R $input_list" \
+        "[dada2 merge] Failed for $bioproject" || return 1
+      log_debug "Merged and processed DADA2 sequence tables for $bioproject"
+      # Run taxonomy assignment for each accession
+      for seqtab_file in "$output_dir"/seqtab_nochim_*.rds; do
+        if [[ -f "$seqtab_file" ]]; then
+          local accession=$(basename "$seqtab_file" | sed 's/seqtab_nochim_\(.*\)\.rds/\1/')
+          local asv_output="$output_dir/dada2_results_${accession}.rds"
+          local tax_output="$output_dir/dada2_taxonomy_${accession}.rds"
+          if [[ ! -f "$asv_output" || ! -f "$tax_output" ]]; then
+            run_command "micromamba run -n dada2 Rscript run_dada2_partial.R none --seqtab \"$seqtab_file\" --output-asv \"$asv_output\" --output-tax \"$tax_output\"" \
+              "[dada2 taxonomy] Failed for $accession in $bioproject" || log_debug "Failed taxonomy assignment for $accession"
+          fi
+        fi
+      done
     fi
   else
     log_debug "[merge_profiles] $bioproject ($tool): Skipping merge due to incomplete or missing profiles"
@@ -364,8 +387,7 @@ process_sample() {
   local METAPHLAN_PROFILE="${TMP_DIR}/${RUN_ACCESSION}_metaphlan4.txt"
   local METAPHLAN_COUNTS="${OUTPUT_DIR}/${RUN_ACCESSION}_metaphlan4_counts.txt"
   local MOTUS_PROFILE="${OUTPUT_DIR}/${RUN_ACCESSION}_motus.txt"
-  local DADA2_ASV="${OUTPUT_DIR}/dada2_results_${RUN_ACCESSION}.rds"
-  local DADA2_TAX="${OUTPUT_DIR}/dada2_taxonomy_${RUN_ACCESSION}.rds"
+  local DADA2_SEQTAB="${OUTPUT_DIR}/seqtab_${RUN_ACCESSION}.rds"
   mkdir -p "$OUTPUT_DIR"
 
   # Initialize log file
@@ -421,38 +443,32 @@ process_sample() {
   if [[ "$SAMPLE_TYPE" == "16S" ]]; then
     if [[ -f "$PAIRED_FASTQ" ]]; then
       if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
-        run_command "conda run -n dada2 fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER" \
+        run_command "micromamba run -n dada2 fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER" \
           "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
       fi
-      if validate_fastq "$QC1" && validate_fastq "$QC2" && [[ ! -f "$DADA2_ASV" ]]; then
-        # Run DADA2 in TMP_DIR to keep filtered_fastq/ temporary
-        run_command "(cd \"$TMP_DIR\" && conda run -n dada2 Rscript run_dada2.R \"$QC1\" \"$QC2\")" \
+      if validate_fastq "$QC1" && validate_fastq "$QC2" && [[ ! -f "$DADA2_SEQTAB" ]]; then
+        run_command "(cd \"$TMP_DIR\" && micromamba run -n dada2 Rscript run_dada2_partial.R \"$QC1\" \"$QC2\")" \
           "[dada2] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
-        # Move DADA2 outputs to OUTPUT_DIR
-        mv "$TMP_DIR/dada2_results_${RUN_ACCESSION}.rds" "$DADA2_ASV" 2>/dev/null || log_debug "No ASV output for $RUN_ACCESSION"
-        mv "$TMP_DIR/dada2_taxonomy_${RUN_ACCESSION}.rds" "$DADA2_TAX" 2>/dev/null || log_debug "No taxonomy output for $RUN_ACCESSION"
+        mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB" 2>/dev/null || log_debug "No seqtab output for $RUN_ACCESSION"
       fi
     else
       if [[ ! -f "$QC" ]]; then
-        run_command "conda run -n dada2 fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
+        run_command "micromamba run -n dada2 fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
           "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
       fi
-      if validate_fastq "$QC" && [[ ! -f "$DADA2_ASV" ]]; then
-        # Run DADA2 in TMP_DIR
-        run_command "(cd \"$TMP_DIR\" && conda run -n dada2 Rscript run_dada2.R \"$QC\")" \
+      if validate_fastq "$QC" && [[ ! -f "$DADA2_SEQTAB" ]]; then
+        run_command "(cd \"$TMP_DIR\" && micromamba run -n dada2 Rscript run_dada2_partial.R \"$QC\")" \
           "[dada2] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
-        # Move DADA2 outputs to OUTPUT_DIR
-        mv "$TMP_DIR/dada2_results_${RUN_ACCESSION}.rds" "$DADA2_ASV" 2>/dev/null || log_debug "No ASV output for $RUN_ACCESSION"
-        mv "$TMP_DIR/dada2_taxonomy_${RUN_ACCESSION}.rds" "$DADA2_TAX" 2>/dev/null || log_debug "No taxonomy output for $RUN_ACCESSION"
+        mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB" 2>/dev/null || log_debug "No seqtab output for $RUN_ACCESSION"
       fi
     fi
   elif [[ "$SAMPLE_TYPE" == "meta" ]]; then
     if [[ ! -f "$QC" ]]; then
-      run_command "conda run -n metaphlan fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
+      run_command "micromamba run -n metaphlan fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
         "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
     if validate_fastq "$QC" && [[ ! -f "$METAPHLAN_PROFILE" ]]; then
-      run_command_with_output "conda run -n metaphlan metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
+      run_command_with_output "micromamba run -n metaphlan metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
         "[metaphlan] Failed for $RUN_ACCESSION" "$METAPHLAN_LOG" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
     if validate_fastq "$QC" && [[ -f "$METAPHLAN_PROFILE" && ! -f "$METAPHLAN_COUNTS" ]]; then
@@ -460,7 +476,7 @@ process_sample() {
         { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
     if validate_fastq "$QC" && [[ ! -f "$MOTUS_PROFILE" ]]; then
-      run_command "conda run -n motus motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+      run_command "micromamba run -n motus motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
         "[motus] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
   else
@@ -494,9 +510,9 @@ final_validation_and_merge() {
   declare -A ACTUAL_SAMPLES
   for dir in */; do
     if [[ -d "$dir" && "$dir" != "*/" ]]; then
-      for file in "$dir"*_metaphlan4_counts.txt "$dir"*_motus.txt "$dir"*dada2_results*.rds; do
+      for file in "$dir"*_metaphlan4_counts.txt "$dir"*_motus.txt "$dir"/seqtab_*.rds; do
         if [[ -f "$file" ]]; then
-          local accession=$(basename "$file" | sed -E 's/^(metaphlan4_counts|motus|dada2_results)_([^_.]+).*/\2/')
+          local accession=$(basename "$file" | sed -E 's/^(metaphlan4_counts|motus|seqtab)_([^_.]+).*/\2/')
           ACTUAL_SAMPLES["$accession"]="$dir"
         fi
       done
@@ -525,6 +541,7 @@ final_validation_and_merge() {
   for bioproject in "${!BIOPROJECTS[@]}"; do
     merge_profiles "$bioproject" "metaphlan" || log_debug "Failed to merge MetaPhlAn profiles for $bioproject"
     merge_profiles "$bioproject" "motus" || log_debug "Failed to merge mOTUs profiles for $bioproject"
+    merge_profiles "$bioproject" "dada2" || log_debug "Failed to merge DADA2 sequence tables for $bioproject"
   done
 
   # Log final status
