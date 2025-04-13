@@ -55,7 +55,7 @@ if ! command -v micromamba &>/dev/null; then
   echo "Error: micromamba not found"
   exit 1
 fi
-for env in dada2 metaphlan motus; do
+for env in dada2 mpa motus; do
   if ! micromamba env list | grep -q "^$env "; then
     echo "Error: micromamba environment $env not found"
     exit 1
@@ -337,7 +337,7 @@ merge_profiles() {
   if [[ "$all_complete" == "true" && ${#profile_files[@]} -gt 0 ]]; then
     if [[ "$tool" == "metaphlan" && ${#profile_files[@]} -gt 1 ]]; then
       local input_list="${profile_files[*]}"
-      run_command "micromamba run -n metaphlan merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
+      run_command "micromamba run -n mpa merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
         "[metaphlan merge] Failed for $bioproject" || return 1
       log_debug "Merged MetaPhlAn profiles for $bioproject into $merged_file"
     elif [[ "$tool" == "metaphlan" && ${#profile_files[@]} -eq 1 ]]; then
@@ -480,11 +480,11 @@ process_sample() {
     fi
   elif [[ "$SAMPLE_TYPE" == "meta" ]]; then
     if [[ ! -f "$QC" ]]; then
-      run_command "micromamba run -n metaphlan fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
+      run_command "micromamba run -n mpa fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
         "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
     if validate_fastq "$QC" && [[ ! -f "$METAPHLAN_PROFILE" ]]; then
-      run_command_with_output "micromamba run -n metaphlan metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
+      run_command_with_output "micromamba run -n mpa metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
         "[metaphlan] Failed for $RUN_ACCESSION" "$METAPHLAN_LOG" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
     if validate_fastq "$QC" && [[ -f "$METAPHLAN_PROFILE" && ! -f "$METAPHLAN_COUNTS" ]]; then
