@@ -12,15 +12,10 @@
 #SBATCH --mail-type=ALL
 
 ################################################################################
-# This script transfers files from a source directory to a destination directory
-# in parallel using GNU Parallel and rsync with retries. By default, it copies
-# all subdirectories, but you can skip subdirectories with `-n`.
-#
-# HPC usage notes:
-#   - Requests 16 CPUs, 64 GB memory, 48 hours by default.
-#   - Adjust concurrency in the parallel command if needed (e.g. -j 4).
-#   - A final "full directory sync" is done if subdirectories are included,
-#     ensuring everything matches even if a chunk missed something.
+# Transfers files from a source directory to a destination directory in parallel
+# using GNU Parallel and rsync with retries. By default, it copies subdirectories
+# unless -n is specified.  This version does NOT use --partial-dir because
+# --append-verify conflicts with that flag in rsync.
 ################################################################################
 
 set -x  # Enable command tracing for debugging
@@ -28,9 +23,7 @@ set -x  # Enable command tracing for debugging
 # ---------------------- Default Values ----------------------
 DEFAULT_SRC_DIR="/storage/home/mak6930/scratch/mlscale/fastq_data"
 DEFAULT_DEST_DIR="/storage/home/mak6930/silvermanlab/mlscale/fastq_data"
-INCLUDE_SUBDIRS=true  # Default is "transfer all subdirectories"
-PARTIAL_DIR="${TMPDIR:-/tmp}/rsync_partials"  # Where partial files go
-mkdir -p "$PARTIAL_DIR"
+INCLUDE_SUBDIRS=true  # Default: transfer all subdirectories
 
 # ---------------------- Usage Function ----------------------
 usage() {
@@ -45,12 +38,11 @@ Options:
   -n          Do NOT include subdirectories (only transfer top-level files)
   -h          Show this help message and exit
 
-Environment / HPC Info:
+HPC Info:
   - Slurm job requesting 16 CPUs, 64 GB RAM, 48h.
-  - Adjust concurrency by editing parallel -j in the script or changing --cpus-per-task.
-  - If subdirectories are included (default), a final deep rsync is done to catch any
-    missed files. If -n is used, that deep sync is skipped.
-
+  - If subdirectories are included (default), a final deep rsync is done to catch
+    any missed files.  If -n is used, that deep sync is skipped.
+  - Adjust concurrency by editing parallel -j or changing --cpus-per-task.
 EOF
   exit 0
 }
@@ -91,7 +83,6 @@ cleanup() {
   log_message "Cleaned up temporary files in $STATUS_DIR"
 }
 
-# Trap common signals (SIGTERM, SIGINT) for HPC job cancellations
 trap "log_message 'Caught SIGTERM, cleaning up...' && cleanup && exit 1" SIGTERM
 trap "log_message 'Caught SIGINT, cleaning up...' && cleanup && exit 1" SIGINT
 trap cleanup EXIT
@@ -140,7 +131,6 @@ dest_dir="$2"
 status_dir="$3"
 log_file="$4"
 source_dir="$5"
-partial_dir="$6"
 
 # Figure out a relative path for status tracking
 rel_path=$(realpath --relative-to="$source_dir" "$src_path" 2>/dev/null || basename "$src_path")
@@ -160,10 +150,12 @@ else
   mkdir -p "$dest_dir/$parent_subdir"
 fi
 
+# Retry up to 3 times
 for attempt in {1..3}; do
+  # NOTE: We do NOT use --partial-dir because --append-verify conflicts with it.
+  # We'll keep --partial & --append-verify so large file restarts can happen in-place.
   rsync -a --progress --stats \
-        --partial --partial-dir="$partial_dir" \
-        --append-verify --checksum \
+        --partial --append-verify --checksum \
         "$src_path" "$dest_dir/"
   rc=$?
 
@@ -191,7 +183,7 @@ log_message "===== COLLECTING ITEMS TO TRANSFER ====="
 chunk_list=()
 
 if $INCLUDE_SUBDIRS; then
-  # Include both files and directories at top-level
+  # Include directories + files at top-level
   while IFS= read -r -d '' item; do
     chunk_list+=("$item")
   done < <(find "$SRC_DIR" -maxdepth 1 -not -path "$SRC_DIR" -print0)
@@ -209,16 +201,17 @@ fi
 # ------------------- Transfer in Parallel (or Sequential) -------------------
 log_message "===== STARTING TRANSFER ====="
 if command -v parallel >/dev/null 2>&1; then
-  log_message "Using GNU Parallel for multi-core transfers."
-  parallel --no-notice --plain --eta --retries 3 -j "$SLURM_CPUS_PER_TASK" \
-    "$SLURM_SUBMIT_DIR/transfer_chunk.sh" {} "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" "$SRC_DIR" "$PARTIAL_DIR" ::: "${chunk_list[@]}" || {
+  log_message "Using GNU Parallel for multi-core transfers (no TTY/interactive)."
+  # Remove --eta or any TTY-based progress to avoid /dev/tty errors
+  parallel --no-notice --plain --retries 3 -j "$SLURM_CPUS_PER_TASK" \
+    "$SLURM_SUBMIT_DIR/transfer_chunk.sh" {} "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" "$SRC_DIR" ::: "${chunk_list[@]}" || {
     log_message "ERROR: Parallel transfer failed"
     exit 1
   }
 else
   log_message "GNU Parallel not found, falling back to sequential transfers."
   for item in "${chunk_list[@]}"; do
-    "$SLURM_SUBMIT_DIR/transfer_chunk.sh" "$item" "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" "$SRC_DIR" "$PARTIAL_DIR" || {
+    "$SLURM_SUBMIT_DIR/transfer_chunk.sh" "$item" "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" "$SRC_DIR" || {
       log_message "ERROR: Transfer of $item failed"
       exit 1
     }
@@ -230,7 +223,7 @@ if $INCLUDE_SUBDIRS; then
   # If subdirectories are allowed, do a final deep sync to catch any missed items
   log_message "===== FINAL SYNC ====="
   rsync -a --progress --checksum \
-        --partial --partial-dir="$PARTIAL_DIR" --append-verify \
+        --partial --append-verify \
         "$SRC_DIR/" "$DEST_DIR/" || {
     log_message "ERROR: Final sync failed"
     exit 1
