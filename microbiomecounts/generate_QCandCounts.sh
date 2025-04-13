@@ -25,6 +25,7 @@ DEFAULT_MOTUS_TAX_LEVEL="mOTU"  # Default taxonomic level for mOTUs
 LOG_LEVEL="INFO"  # Adjustable log level: INFO, DEBUG
 TMP_BASE="${SCRATCH:-/scratch}"  # Prefer $SCRATCH, fall back to /scratch
 RDP_DATABASE="rdp_19_toGenus_trainset.fa.gz"
+QUALITY_PROFILE_DIR="quality_profiles"
 
 # Cleanup function for lock directory
 cleanup() {
@@ -33,12 +34,13 @@ cleanup() {
 trap cleanup EXIT
 
 # Parse command-line arguments
-while getopts ":i:d:w:k:" opt; do
+while getopts ":i:d:w:k:q" opt; do
   case $opt in
     i) INPUT_FILE="$OPTARG" ;;
     d) FASTQ_DIR="$OPTARG" ;;
     w) NUM_WORKERS="$OPTARG" ;;
     k) MOTUS_TAX_LEVEL="$OPTARG" ;;
+    q) QUALITY_CHECK="true" ;;
     \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
   esac
 done
@@ -62,11 +64,12 @@ done
 
 # Validate input file and directories
 if [[ -z "$INPUT_FILE" ]]; then
-  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>]"
+  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [-q]"
   echo "  <input>: CSV, TSV, or TXT file with columns: Bioproject,RunAccession,SequencingType"
   echo "  <fastq_directory>: Directory containing FASTQ files (default: $DEFAULT_DIR)"
   echo "  <num_workers>: Number of parallel workers (default: $DEFAULT_WORKERS)"
   echo "  <motus_tax_level>: Taxonomic level for mOTUs (e.g., mOTU, phylum; default: $DEFAULT_MOTUS_TAX_LEVEL)"
+  echo "  -q: Generate quality profiles for FASTQs before processing"
   exit 1
 fi
 
@@ -234,6 +237,31 @@ run_command_with_output() {
   done
 }
 
+# Generate quality profiles for FASTQs
+generate_quality_profiles() {
+  local max_samples=5  # Limit to avoid overwhelming output
+  local count=0
+  mkdir -p "$QUALITY_PROFILE_DIR"
+  while IFS="$DELIMITER" read -r bioproject accession sample_type; do
+    if [[ "$sample_type" == "16S" && $count -lt $max_samples ]]; then
+      local fastq1="${FASTQ_DIR}/${accession}_1.fastq.gz"
+      local fastq2="${FASTQ_DIR}/${accession}_2.fastq.gz"
+      local output_pdf="${QUALITY_PROFILE_DIR}/${accession}_quality.pdf"
+      if [[ -f "$fastq1" && ! -f "$output_pdf" ]]; then
+        if [[ -f "$fastq2" ]]; then
+          run_command "micromamba run -n dada2 Rscript -e 'library(dada2); pdf(\"$output_pdf\"); plotQualityProfile(c(\"$fastq1\", \"$fastq2\")); dev.off()'" \
+            "[quality profile] Failed for $accession" || log_debug "Failed to generate quality profile for $accession"
+        else
+          run_command "micromamba run -n dada2 Rscript -e 'library(dada2); pdf(\"$output_pdf\"); plotQualityProfile(\"$fastq1\"); dev.off()'" \
+            "[quality profile] Failed for $accession" || log_debug "Failed to generate quality profile for $accession"
+        fi
+        log_info "Generated quality profile for $accession in $output_pdf"
+        (( count++ ))
+      fi
+    fi
+  done < <(tail -n +2 "$INPUT_FILE")
+}
+
 # Convert MetaPhlAn profile to counts
 convert_metaphlan_to_counts() {
   local metaphlan_log="$1"
@@ -328,18 +356,6 @@ merge_profiles() {
       run_command "micromamba run -n dada2 Rscript merge_dada2.R $input_list" \
         "[dada2 merge] Failed for $bioproject" || return 1
       log_debug "Merged and processed DADA2 sequence tables for $bioproject"
-      # Run taxonomy assignment for each accession
-      for seqtab_file in "$output_dir"/seqtab_nochim_*.rds; do
-        if [[ -f "$seqtab_file" ]]; then
-          local accession=$(basename "$seqtab_file" | sed 's/seqtab_nochim_\(.*\)\.rds/\1/')
-          local asv_output="$output_dir/dada2_results_${accession}.rds"
-          local tax_output="$output_dir/dada2_taxonomy_${accession}.rds"
-          if [[ ! -f "$asv_output" || ! -f "$tax_output" ]]; then
-            run_command "micromamba run -n dada2 Rscript run_dada2_partial.R none --seqtab \"$seqtab_file\" --output-asv \"$asv_output\" --output-tax \"$tax_output\"" \
-              "[dada2 taxonomy] Failed for $accession in $bioproject" || log_debug "Failed taxonomy assignment for $accession"
-          fi
-        fi
-      done
     fi
   else
     log_debug "[merge_profiles] $bioproject ($tool): Skipping merge due to incomplete or missing profiles"
@@ -549,14 +565,21 @@ final_validation_and_merge() {
 }
 
 # Export functions and variables for GNU Parallel
-export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts merge_profiles final_validation_and_merge
-export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID DELIMITER
+export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts merge_profiles final_validation_and_merge generate_quality_profiles
+export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID DELIMITER QUALITY_PROFILE_DIR
 
 # Initialize lock files
 touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK"
 
 # Load completed samples once
 load_completed
+
+# Generate quality profiles if requested
+if [[ "$QUALITY_CHECK" == "true" ]]; then
+  log_info "Generating quality profiles for up to 5 samples"
+  generate_quality_profiles
+  exit 0
+fi
 
 # Process input file with GNU Parallel
 log_info "Starting initial processing with $NUM_WORKERS workers"
