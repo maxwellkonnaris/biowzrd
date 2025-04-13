@@ -30,9 +30,9 @@ try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
-    print("Warning: tqdm not installed. Progress bar will be disabled in single-threaded mode. Install with 'pip install tqdm'.")
+    print("Warning: tqdm not installed. Progress bar disabled. Install with 'pip install tqdm' for progress display.")
 
-# Global lock for thread-safe operations
+# Global locks for thread-safe operations
 print_lock = Lock()
 checkpoint_lock = Lock()
 
@@ -53,7 +53,8 @@ def save_checkpoint():
             with open("checkpoint.json", "w") as f:
                 json.dump(checkpoint_data, f, indent=2)
         except Exception as e:
-            print(f"Error saving checkpoint: {e}")
+            with print_lock:
+                print(f"Error saving checkpoint: {e}")
 
 def load_checkpoint():
     """Load checkpoint data from checkpoint.json if it exists."""
@@ -62,15 +63,19 @@ def load_checkpoint():
         try:
             with open("checkpoint.json", "r") as f:
                 checkpoint_data.update(json.load(f))
-            print(f"Loaded checkpoint: {len(checkpoint_data['completed'])} accessions already processed.")
+            with print_lock:
+                print(f"Loaded checkpoint: {len(checkpoint_data['completed'])} accessions already processed.")
         except Exception as e:
-            print(f"Error loading checkpoint: {e}")
+            with print_lock:
+                print(f"Error loading checkpoint: {e}")
 
 def signal_handler(sig, frame):
     """Handle interrupt (Ctrl+C) by saving checkpoint and exiting."""
-    print("\nInterrupt received, saving checkpoint...")
+    with print_lock:
+        print("\nInterrupt received, saving checkpoint...")
     save_checkpoint()
-    print("Checkpoint saved to checkpoint.json. Resume by rerunning the script.")
+    with print_lock:
+        print("Checkpoint saved to checkpoint.json. Resume by rerunning the script.")
     sys.exit(0)
 
 def safe_entrez_request(func, *args, max_retries=2, verbose=False, **kwargs):
@@ -572,7 +577,7 @@ def process_accession(accession, email, api_key, verbose=False):
 
 def process_accession_wrapper(args):
     """Wrapper for threading: process one accession and return structured result."""
-    accession, email, api_key, verbose = args
+    accession, email, api_key, verbose, pbar = args
     try:
         run_list, expected_runs = process_accession(accession, email, api_key, verbose)
         found_runs = len(run_list)
@@ -599,6 +604,10 @@ def process_accession_wrapper(args):
             "status": "Failed",
             "error": str(e)
         }
+    finally:
+        if pbar:
+            with print_lock:
+                pbar.update(1)
 
 def read_accessions(input_file):
     """Read accessions from input file."""
@@ -753,7 +762,7 @@ def main():
             if args.verbose:
                 with print_lock:
                     print(f"\n🔍 Processing: {accession}")
-            result = process_accession_wrapper((accession, email, api_key, args.verbose))
+            result = process_accession_wrapper((accession, email, api_key, args.verbose, None))
             results.append(result)
 
             # Update checkpoint
@@ -773,17 +782,18 @@ def main():
 
             time.sleep(0.5)  # Rate limit
     else:
-        # Parallel processing
-        tasks = [(acc, email, api_key, args.verbose) for acc in remaining_accessions]
-        processed_count = len(completed)
+        # Parallel processing with progress bar
+        pbar = None
+        if not args.verbose and tqdm is not None:
+            pbar = tqdm(total=len(remaining_accessions), desc="Processing accessions", unit="accession")
+        tasks = [(acc, email, api_key, args.verbose, pbar) for acc in remaining_accessions]
 
-        if not args.verbose:
+        if not args.verbose and pbar is None:
             print(f"Starting parallel processing with {threads} threads...")
 
         with ThreadPoolExecutor(max_workers=threads) as executor:
             for result in executor.map(process_accession_wrapper, tasks):
                 results.append(result)
-                processed_count += 1
 
                 # Update checkpoint
                 with checkpoint_lock:
@@ -800,12 +810,15 @@ def main():
                             checkpoint_data["failed"].append((result["accession"], "No run accessions found"))
                     save_checkpoint()
 
-                # Show progress in non-verbose mode
-                if not args.verbose:
+                # Progress feedback
+                if not args.verbose and pbar is None:
                     with print_lock:
-                        print(f"Processed {processed_count}/{total_accessions} accessions")
+                        print(f"Processed {len(checkpoint_data['completed'])}/{total_accessions} accessions")
 
                 time.sleep(0.1)  # Slight delay to avoid overwhelming servers
+
+        if pbar:
+            pbar.close()
 
     # Write final outputs
     write_outputs(results, args.output_file, args.runs_only, args.fail_log, "run_comparison.log")
