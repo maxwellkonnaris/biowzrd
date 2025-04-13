@@ -266,7 +266,7 @@ def get_run_accessions_geo(accession, email, api_key):
             except Exception as e:
                 wait_time = 2 ** attempt
                 print(f"pysradb error: {e}. Retrying in {wait_time}s...")
-                time.sleep(wait W_time)
+                time.sleep(wait_time)
 
     return list(set(runs))
 
