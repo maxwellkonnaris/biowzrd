@@ -67,7 +67,7 @@ def fetch_runs_ena(accession):
         return []
 
 def get_run_accessions_ncbi(accession, email, api_key):
-    """Fetch run accessions from NCBI SRA for BioProject (PRJNA/SRP), resolving SRS to runs."""
+    """Fetch run accessions from NCBI SRA for BioProject (PRJNA/SRP), including SRS and XML RUN_SET."""
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
@@ -110,87 +110,98 @@ def get_run_accessions_ncbi(accession, email, api_key):
             header = lines[0].split(",")
             try:
                 run_index = header.index("Run")
-                sample_index = header.index("SampleName")  # NEW: Get SRS for further querying
             except ValueError:
                 run_index = 0
-                sample_index = -1
 
-            # Collect runs and SRS
+            # Collect runs from runinfo
             for line in lines[1:]:
                 cols = line.split(",")
                 if len(cols) > run_index and cols[run_index].strip():
                     runs.append(cols[run_index].strip())
-                # NEW: If no runs but SRS exists, we'll query it later
-                # (Avoid collecting SRS here; we query them explicitly below)
 
-        # NEW: Step 3: If no runs found, check for SRS-linked runs
-        if not runs:
-            print(f" - No runs in initial query for {accession}, checking SRS...")
-            srs_ids = []
-            # Re-query to get full XML for SRA IDs, which may include SRS
-            for i in range(0, len(id_list), batch_size):
-                batch_ids = id_list[i:i + batch_size]
+        # Step 3: Check XML for SRS and runs
+        print(f" - Checking XML for SRS and runs in {accession}...")
+        srs_ids = []
+        xml_runs = []  # NEW: Store runs from RUN_SET
+        for i in range(0, len(id_list), batch_size):
+            batch_ids = id_list[i:i + batch_size]
+            handle = safe_entrez_request(
+                Entrez.efetch,
+                db="sra",
+                id=",".join(batch_ids),
+                rettype="full",
+                retmode="xml"
+            )
+            xml_data = Entrez.read(handle)
+            handle.close()
+
+            # Parse XML for SRS and runs
+            for exp in xml_data:
+                try:
+                    # Extract SRS
+                    sample_acc = exp["EXPERIMENT_PACKAGE"]["SAMPLE"]["IDENTIFIERS"].get("EXTERNAL_ID", {}).get("content", "")
+                    if sample_acc.startswith("SRS"):
+                        srs_ids.append(sample_acc)
+                except (KeyError, TypeError):
+                    pass
+
+                try:
+                    # NEW: Extract runs from RUN_SET
+                    run_set = exp["EXPERIMENT_PACKAGE"].get("RUN_SET", {})
+                    if run_set:
+                        for run in run_set.get("RUN", []):
+                            run_acc = run.get("accession", "")
+                            if run_acc.startswith(("SRR", "ERR", "DRR")):
+                                xml_runs.append(run_acc)
+                except (KeyError, TypeError):
+                    pass
+
+        if xml_runs:
+            print(f" - Found runs in XML RUN_SET for {accession}: {', '.join(xml_runs)}")
+            runs.extend(xml_runs)
+
+        # Step 4: Query SRA for runs linked to SRS
+        if srs_ids:
+            print(f" - Found SRS for {accession}: {', '.join(srs_ids)}. Fetching runs...")
+            for srs in srs_ids:
                 handle = safe_entrez_request(
-                    Entrez.efetch,
+                    Entrez.esearch,
                     db="sra",
-                    id=",".join(batch_ids),
-                    rettype="full",
-                    retmode="xml"
+                    term=f"{srs}[Sample]",
+                    retmax=100000
                 )
-                xml_data = Entrez.read(handle)
+                srs_record = Entrez.read(handle)
                 handle.close()
+                srs_id_list = srs_record.get("IdList", [])
+                if srs_id_list:
+                    for j in range(0, len(srs_id_list), batch_size):
+                        srs_batch_ids = srs_id_list[j:j + batch_size]
+                        handle = safe_entrez_request(
+                            Entrez.efetch,
+                            db="sra",
+                            id=",".join(srs_batch_ids),
+                            rettype="runinfo",
+                            retmode="text"
+                        )
+                        srs_text = handle.read()
+                        handle.close()
 
-                # Parse XML for Sample IDs (SRS)
-                for exp in xml_data:
-                    try:
-                        sample_acc = exp["EXPERIMENT_PACKAGE"]["SAMPLE"]["IDENTIFIERS"].get("EXTERNAL_ID", {}).get("content", "")
-                        if sample_acc.startswith("SRS"):
-                            srs_ids.append(sample_acc)
-                    except (KeyError, TypeError):
-                        continue
+                        if isinstance(srs_text, bytes):
+                            srs_text = srs_text.decode("utf-8")
+                        srs_lines = srs_text.strip().split("\n")
+                        if len(srs_lines) < 2:
+                            continue
 
-            # Step 4: Query SRA for runs linked to SRS
-            if srs_ids:
-                print(f" - Found SRS for {accession}: {', '.join(srs_ids)}. Fetching runs...")
-                for srs in srs_ids:
-                    handle = safe_entrez_request(
-                        Entrez.esearch,
-                        db="sra",
-                        term=f"{srs}[Sample]",
-                        retmax=100000
-                    )
-                    srs_record = Entrez.read(handle)
-                    handle.close()
-                    srs_id_list = srs_record.get("IdList", [])
-                    if srs_id_list:
-                        for j in range(0, len(srs_id_list), batch_size):
-                            srs_batch_ids = srs_id_list[j:j + batch_size]
-                            handle = safe_entrez_request(
-                                Entrez.efetch,
-                                db="sra",
-                                id=",".join(srs_batch_ids),
-                                rettype="runinfo",
-                                retmode="text"
-                            )
-                            srs_text = handle.read()
-                            handle.close()
+                        srs_header = srs_lines[0].split(",")
+                        try:
+                            srs_run_index = srs_header.index("Run")
+                        except ValueError:
+                            srs_run_index = 0
 
-                            if isinstance(srs_text, bytes):
-                                srs_text = srs_text.decode("utf-8")
-                            srs_lines = srs_text.strip().split("\n")
-                            if len(srs_lines) < 2:
-                                continue
-
-                            srs_header = srs_lines[0].split(",")
-                            try:
-                                srs_run_index = srs_header.index("Run")
-                            except ValueError:
-                                srs_run_index = 0
-
-                            for line in srs_lines[1:]:
-                                cols = line.split(",")
-                                if len(cols) > srs_run_index and cols[srs_run_index].strip():
-                                    runs.append(cols[srs_run_index].strip())
+                        for line in srs_lines[1:]:
+                            cols = line.split(",")
+                            if len(cols) > srs_run_index and cols[srs_run_index].strip():
+                                runs.append(cols[srs_run_index].strip())
 
         return list(set(runs))
 
@@ -199,7 +210,7 @@ def get_run_accessions_ncbi(accession, email, api_key):
         return []
 
 def get_run_accessions_geo(accession, email, api_key):
-    """Resolve GSE to SRR (unchanged)."""
+    """Resolve GSE to SRR."""
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
@@ -255,12 +266,12 @@ def get_run_accessions_geo(accession, email, api_key):
             except Exception as e:
                 wait_time = 2 ** attempt
                 print(f"pysradb error: {e}. Retrying in {wait_time}s...")
-                time.sleep(wait_time)
+                time.sleep(wait W_time)
 
     return list(set(runs))
 
 def fallback_entrez_accession(accession, email, api_key):
-    """Fallback: Search for runs by accession[ACCN], resolving SRS to runs."""
+    """Fallback: Search for runs by accession[ACCN], including SRS and XML RUN_SET."""
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
@@ -301,82 +312,95 @@ def fallback_entrez_accession(accession, email, api_key):
             header = lines[0].split(",")
             try:
                 run_index = header.index("Run")
-                sample_index = header.index("SampleName")  # NEW: For SRS
             except ValueError:
                 run_index = 0
-                sample_index = -1
 
             for line in lines[1:]:
                 cols = line.split(",")
                 if len(cols) > run_index and cols[run_index].strip():
                     runs.append(cols[run_index].strip())
-                # NEW: Collect SRS for further querying (handled below)
 
-        # NEW: If no runs, check for SRS-linked runs
-        if not runs:
-            print(f" - No runs in fallback for {accession}, checking SRS...")
-            srs_ids = []
-            for i in range(0, len(id_list), batch_size):
-                batch_ids = id_list[i:i + batch_size]
+        # Check XML for SRS and runs
+        print(f" - Checking XML for SRS and runs in fallback for {accession}...")
+        srs_ids = []
+        xml_runs = []  # NEW: Store runs from RUN_SET
+        for i in range(0, len(id_list), batch_size):
+            batch_ids = id_list[i:i + batch_size]
+            handle = safe_entrez_request(
+                Entrez.efetch,
+                db="sra",
+                id=",".join(batch_ids),
+                rettype="full",
+                retmode="xml"
+            )
+            xml_data = Entrez.read(handle)
+            handle.close()
+
+            for exp in xml_data:
+                try:
+                    # Extract SRS
+                    sample_acc = exp["EXPERIMENT_PACKAGE"]["SAMPLE"]["IDENTIFIERS"].get("EXTERNAL_ID", {}).get("content", "")
+                    if sample_acc.startswith("SRS"):
+                        srs_ids.append(sample_acc)
+                except (KeyError, TypeError):
+                    pass
+
+                try:
+                    # NEW: Extract runs from RUN_SET
+                    run_set = exp["EXPERIMENT_PACKAGE"].get("RUN_SET", {})
+                    if run_set:
+                        for run in run_set.get("RUN", []):
+                            run_acc = run.get("accession", "")
+                            if run_acc.startswith(("SRR", "ERR", "DRR")):
+                                xml_runs.append(run_acc)
+                except (KeyError, TypeError):
+                    pass
+
+        if xml_runs:
+            print(f" - Found runs in XML RUN_SET for {accession}: {', '.join(xml_runs)}")
+            runs.extend(xml_runs)
+
+        if srs_ids:
+            print(f" - Found SRS for {accession}: {', '.join(srs_ids)}. Fetching runs...")
+            for srs in srs_ids:
                 handle = safe_entrez_request(
-                    Entrez.efetch,
+                    Entrez.esearch,
                     db="sra",
-                    id=",".join(batch_ids),
-                    rettype="full",
-                    retmode="xml"
+                    term=f"{srs}[Sample]",
+                    retmax=100000
                 )
-                xml_data = Entrez.read(handle)
+                srs_record = Entrez.read(handle)
                 handle.close()
+                srs_id_list = srs_record.get("IdList", [])
+                if srs_id_list:
+                    for j in range(0, len(srs_id_list), batch_size):
+                        srs_batch_ids = srs_id_list[j:j + batch_size]
+                        handle = safe_entrez_request(
+                            Entrez.efetch,
+                            db="sra",
+                            id=",".join(srs_batch_ids),
+                            rettype="runinfo",
+                            retmode="text"
+                        )
+                        srs_text = handle.read()
+                        handle.close()
 
-                for exp in xml_data:
-                    try:
-                        sample_acc = exp["EXPERIMENT_PACKAGE"]["SAMPLE"]["IDENTIFIERS"].get("EXTERNAL_ID", {}).get("content", "")
-                        if sample_acc.startswith("SRS"):
-                            srs_ids.append(sample_acc)
-                    except (KeyError, TypeError):
-                        continue
+                        if isinstance(srs_text, bytes):
+                            srs_text = srs_text.decode("utf-8")
+                        srs_lines = srs_text.strip().split("\n")
+                        if len(srs_lines) < 2:
+                            continue
 
-            if srs_ids:
-                print(f" - Found SRS for {accession}: {', '.join(srs_ids)}. Fetching runs...")
-                for srs in srs_ids:
-                    handle = safe_entrez_request(
-                        Entrez.esearch,
-                        db="sra",
-                        term=f"{srs}[Sample]",
-                        retmax=100000
-                    )
-                    srs_record = Entrez.read(handle)
-                    handle.close()
-                    srs_id_list = srs_record.get("IdList", [])
-                    if srs_id_list:
-                        for j in range(0, len(srs_id_list), batch_size):
-                            srs_batch_ids = srs_id_list[j:j + batch_size]
-                            handle = safe_entrez_request(
-                                Entrez.efetch,
-                                db="sra",
-                                id=",".join(srs_batch_ids),
-                                rettype="runinfo",
-                                retmode="text"
-                            )
-                            srs_text = handle.read()
-                            handle.close()
+                        srs_header = srs_lines[0].split(",")
+                        try:
+                            srs_run_index = srs_header.index("Run")
+                        except ValueError:
+                            srs_run_index = 0
 
-                            if isinstance(srs_text, bytes):
-                                srs_text = srs_text.decode("utf-8")
-                            srs_lines = srs_text.strip().split("\n")
-                            if len(srs_lines) < 2:
-                                continue
-
-                            srs_header = srs_lines[0].split(",")
-                            try:
-                                srs_run_index = srs_header.index("Run")
-                            except ValueError:
-                                srs_run_index = 0
-
-                            for line in srs_lines[1:]:
-                                cols = line.split(",")
-                                if len(cols) > srs_run_index and cols[srs_run_index].strip():
-                                    runs.append(cols[srs_run_index].strip())
+                        for line in srs_lines[1:]:
+                            cols = line.split(",")
+                            if len(cols) > srs_run_index and cols[srs_run_index].strip():
+                                runs.append(cols[srs_run_index].strip())
 
         return list(set(runs))
     except Exception as e:
@@ -384,7 +408,7 @@ def fallback_entrez_accession(accession, email, api_key):
         return []
 
 def process_accession(accession, email, api_key):
-    """Resolve accession to run accessions (SRR/ERR/DRR), with SRS handling for BioProjects."""
+    """Resolve accession to run accessions (SRR/ERR/DRR)."""
     accession = accession.strip()
 
     # If already a run accession, return it
@@ -393,7 +417,7 @@ def process_accession(accession, email, api_key):
 
     # Primary approach based on prefix
     if accession.startswith("PRJNA") or accession.startswith("SRP"):
-        runs_1 = get_run_accessions_ncbi(accession, email, api_key)  # Now resolves SRS to runs
+        runs_1 = get_run_accessions_ncbi(accession, email, api_key)
         runs_2 = fetch_runs_ena(accession)
         merged_runs = list(set(runs_1 + runs_2))
     elif accession.startswith("GSE"):
@@ -408,7 +432,7 @@ def process_accession(accession, email, api_key):
     if merged_runs:
         return merged_runs
 
-    # Fallback with Entrez [ACCN], which now also resolves SRS
+    # Fallback with Entrez [ACCN]
     print(f" - No runs found in primary approach for {accession}, trying fallback_entrez_accession...")
     fallback_runs = fallback_entrez_accession(accession, email, api_key)
     return fallback_runs
