@@ -690,7 +690,7 @@ def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log
         except Exception as e:
             print(f"Error writing failure log: {e}")
 
-    # Write comparison log
+    # Write comparison log (no run accessions)
     try:
         with open(comparison_log_file, "w") as clog:
             clog.write("Accession\tExpected Runs\tFound Runs\tStatus\n")
@@ -768,7 +768,12 @@ def main():
             # Update checkpoint
             with checkpoint_lock:
                 checkpoint_data["completed"].append(accession)
-                checkpoint_data["comparison"].append(result)
+                checkpoint_data["comparison"].append({
+                    "accession": result["accession"],
+                    "expected": result["expected"],
+                    "found": result["found"],
+                    "status": result["status"]
+                })
                 if result["error"]:
                     checkpoint_data["failed"].append((accession, result["error"]))
                 else:
@@ -798,7 +803,12 @@ def main():
                 # Update checkpoint
                 with checkpoint_lock:
                     checkpoint_data["completed"].append(result["accession"])
-                    checkpoint_data["comparison"].append(result)
+                    checkpoint_data["comparison"].append({
+                        "accession": result["accession"],
+                        "expected": result["expected"],
+                        "found": result["found"],
+                        "status": result["status"]
+                    })
                     if result["error"]:
                         checkpoint_data["failed"].append((result["accession"], result["error"]))
                     else:
