@@ -7,7 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=300G
+#SBATCH --mem=64G  # Reduced memory to a more reasonable amount
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=ALL
 
@@ -27,17 +27,21 @@ LOG_FILE="$SLURM_SUBMIT_DIR/transfer_${SLURM_JOB_ID}.log"
 # Ensure SLURM_SUBMIT_DIR is set
 SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 
-# Cleanup function for filelists and temp files
-cleanup() {
-  rm -f "$STATUS_DIR/filelist_part_"* "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt" "$SLURM_SUBMIT_DIR/transfer_chunk.sh"
-  log_message "Cleaned up temporary files in $STATUS_DIR"
-}
-trap cleanup EXIT  # Run cleanup on script exit (success, failure, or interrupt)
+# Ensure log file directory exists
+mkdir -p "$(dirname "$LOG_FILE")" || { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Cannot create log file directory"; exit 1; }
 
 # Function to log messages with timestamps
 log_message() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
+
+# Cleanup function for filelists and temp files
+cleanup() {
+  rm -f "$STATUS_DIR/filelist_part_"* "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt" \
+        "$SLURM_SUBMIT_DIR/transfer_chunk.sh" "$STATUS_DIR"/*.done 2>/dev/null
+  log_message "Cleaned up temporary files in $STATUS_DIR"
+}
+trap cleanup EXIT  # Run cleanup on script exit (success, failure, or interrupt)
 
 # Validate paths
 if [ ! -d "$SRC_DIR" ]; then
@@ -49,9 +53,15 @@ if ! mkdir -p "$DEST_DIR" "$STATUS_DIR"; then
   exit 1
 fi
 
-# Generate relative file list
+# Check if STATUS_DIR is writable
+touch "$STATUS_DIR/test_write" && rm "$STATUS_DIR/test_write" || {
+  log_message "ERROR: $STATUS_DIR is not writable"
+  exit 1
+}
+
+# Generate relative file list, stripping ./ prefix
 cd "$SRC_DIR" || { log_message "ERROR: Cannot cd to $SRC_DIR"; exit 1; }
-find . -type f -not -name "*.tmp" -not -name "*.swp" > "$STATUS_DIR/filelist.txt"
+find . -type f -not -name "*.tmp" -not -name "*.swp" | sed 's|^\./||' > "$STATUS_DIR/filelist.txt"
 if [ ! -s "$STATUS_DIR/filelist.txt" ]; then
   log_message "ERROR: No files found in $SRC_DIR"
   exit 1
@@ -86,15 +96,17 @@ fi
 
 # Retry logic for robustness
 for attempt in {1..3}; do
-  if rsync -avh --progress --stats \
+  rsync -avh --progress --stats \
       --partial --append-verify --checksum \
       --files-from="$chunk" \
-      "$SRC_DIR/" "$DEST_DIR/"; then
+      "$SRC_DIR/" "$DEST_DIR/"
+  rsync_exit=$?
+  if [ $rsync_exit -eq 0 ]; then
     touch "$status_file"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Chunk $chunk completed successfully" | tee -a "$LOG_FILE"
     exit 0
   else
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Attempt $attempt failed for chunk $chunk" | tee -a "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Attempt $attempt failed for chunk $chunk (rsync exit code: $rsync_exit)" | tee -a "$LOG_FILE"
     [ $attempt -eq 3 ] && {
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Chunk $chunk failed after 3 attempts" | tee -a "$LOG_FILE"
       exit 1
@@ -106,10 +118,19 @@ EOF
 
 chmod +x "$SLURM_SUBMIT_DIR/transfer_chunk.sh"
 
-# Run in parallel with no tty prompts
+# Run in parallel with no tty prompts, skipping empty chunks
 log_message "===== STARTING PARALLEL TRANSFER ====="
+chunk_list=()
+for chunk in "$STATUS_DIR/filelist_part_"*; do
+  [ -s "$chunk" ] || { log_message "WARNING: Skipping empty chunk $chunk"; continue; }
+  chunk_list+=("$chunk")
+done
+if [ ${#chunk_list[@]} -eq 0 ]; then
+  log_message "ERROR: No valid chunks to process"
+  exit 1
+fi
 parallel --no-notice --plain --eta --retries 3 -j "$SLURM_CPUS_PER_TASK" \
-  "$SLURM_SUBMIT_DIR/transfer_chunk.sh" {} "$SRC_DIR" "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" ::: "$STATUS_DIR/filelist_part_"* || {
+  "$SLURM_SUBMIT_DIR/transfer_chunk.sh" {} "$SRC_DIR" "$DEST_DIR" "$STATUS_DIR" "$LOG_FILE" ::: "${chunk_list[@]}" || {
   log_message "ERROR: Parallel transfer failed"
   exit 1
 }
@@ -123,9 +144,16 @@ rsync -avh --progress --checksum "$SRC_DIR/" "$DEST_DIR/" || {
 
 # Validation step
 log_message "===== VALIDATING TRANSFER ====="
-rsync -avh --dry-run --checksum "$SRC_DIR/" "$DEST_DIR/" | tee "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt"
-if grep -q "would be" "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt"; then
-  log_message "WARNING: Validation found discrepancies"
+src_count=$(find "$SRC_DIR" -type f | wc -l)
+dest_count=$(find "$DEST_DIR" -type f | wc -l)
+if [ "$src_count" -ne "$dest_count" ]; then
+  log_message "ERROR: File count mismatch (Source: $src_count, Destination: $dest_count)"
+  exit 1
+fi
+rsync -avh --dry-run --checksum "$SRC_DIR/" "$DEST_DIR/" > "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt"
+if grep -qE "would be|differ" "$STATUS_DIR/validation_${SLURM_JOB_ID}.txt"; then
+  log_message "ERROR: Validation found discrepancies"
+  exit 1
 else
   log_message "Validation passed: All files match"
 fi
