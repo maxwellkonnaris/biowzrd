@@ -73,16 +73,16 @@ update_input_csv() {
 }
 
 # Parse command-line arguments
-while getopts ":i:d:w:k:qa:m:p:" opt; do
-  case $opt in
-    i) INPUT_FILE="$OPTARG" ;;
-    d) FASTQ_DIR="$OPTARG" ;;
-    w) NUM_WORKERS="$OPTARG" ;;
-    k) MOTUS_TAX_LEVEL="$OPTARG" ;;
-    q) QUALITY_CHECK="true" ;;
-    a) DADA2_ENV="$OPTARG" ;;
-    m) MOTUS_ENV="$OPTARG" ;;
-    p) MPA_ENV="$OPTARG" ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i) INPUT_FILE="$2"; shift 2 ;;
+    -d) FASTQ_DIR="$2"; shift 2 ;;
+    -w) NUM_WORKERS="$2"; shift 2 ;;
+    -k) MOTUS_TAX_LEVEL="$2"; shift 2 ;;
+    -q) QUALITY_CHECK="true"; shift ;;
+    -a) DADA2_ENV="$2"; shift 2 ;;
+    -m) MOTUS_ENV="$2"; shift 2 ;;
+    -p) MPA_ENV="$2"; shift 2 ;;
     --debug) LOG_LEVEL="DEBUG"; shift ;;
     -*) echo "Invalid option: $1" >&2; exit 1 ;;
     *) echo "Unexpected argument: $1" >&2; exit 1 ;;
@@ -175,109 +175,182 @@ validate_input_file() {
 validate_input_file "$INPUT_FILE"
 
 # Update input.csv with FASTQ paths
+# Update input.csv with FASTQ paths
 update_input_with_fastq_paths() {
-  log_info "Updating input.csv with FASTQ file paths"
+  log_info "Checking if input.csv needs FASTQ path updates"
   local temp_file=$(mktemp)
   
   # Read existing header
   local header=$(head -n 1 "$INPUT_FILE")
-  if [[ "$header" != *",Fastq1,Fastq2"* ]]; then
-    header="${header},Fastq1,Fastq2"
-  fi
-  echo "$header" > "$temp_file"
   
-  # Collect all FASTQ files
-  declare -A fastq1_map
-  declare -A fastq2_map
-  while IFS= read -r file; do
-    # Extract accession from filename
-    # Matches: {accession}.fastq.gz, {accession}_1.fastq.gz, {accession}_2.fastq.gz
-    if [[ "$file" =~ ^(.*)_([12])\.fastq\.gz$ ]]; then
-      local accession="${BASH_REMATCH[1]}"
-      local pair="${BASH_REMATCH[2]}"
-      if [[ "$pair" == "1" ]]; then
-        fastq1_map["$accession"]="$file"
-      elif [[ "$pair" == "2" ]]; then
-        fastq2_map["$accession"]="$file"
+  # Check if Fastq1 and Fastq2 columns exist and have no empty/invalid paths
+  local needs_update=false
+  if [[ "$header" == *",Fastq1,Fastq2"* ]]; then
+    local all_valid=true
+    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
+      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
+        continue
       fi
-    elif [[ "$file" =~ ^(.*)\.fastq\.gz$ ]]; then
-      local accession="${BASH_REMATCH[1]}"
-      fastq1_map["$accession"]="$file"
+      # Check for empty or non-existent paths
+      if [[ -z "$fastq1" && -z "$fastq2" ]]; then
+        log_debug "Empty FASTQ paths for $accession: Fastq1=$fastq1, Fastq2=$fastq2"
+        all_valid=false
+        break
+      fi
+      if [[ -n "$fastq1" && ! -f "$fastq1" ]]; then
+        log_debug "Invalid FASTQ path for $accession: Fastq1=$fastq1 does not exist"
+        all_valid=false
+        break
+      fi
+      if [[ -n "$fastq2" && ! -f "$fastq2" ]]; then
+        log_debug "Invalid FASTQ path for $accession: Fastq2=$fastq2 does not exist"
+        all_valid=false
+        break
+      fi
+    done < "$INPUT_FILE"
+    if [[ "$all_valid" == "true" ]]; then
+      log_info "input.csv has valid non-empty Fastq1 and/or Fastq2 for all samples; skipping update"
+      rm -f "$temp_file"
+      return 0
+    else
+      log_info "Found empty or invalid FASTQ paths; updating input.csv"
+      needs_update=true
     fi
-  done < <(find "$FASTQ_DIR" -maxdepth 1 -type f -name "*.fastq.gz")
-
-  # Update rows
-  local missing_fastq=0
-  while IFS="$DELIMITER" read -r bioproject accession sample_type rest; do
-    if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
-      continue
-    fi
-    local fastq1="${fastq1_map[$accession]}"
-    local fastq2="${fastq2_map[$accession]}"
-    if [[ -z "$fastq1" ]]; then
-      log_debug "No FASTQ file found for $accession"
-      ((missing_fastq++))
-      fastq1=""
-    fi
-    # If rest is non-empty, it may contain old Fastq1,Fastq2; ignore them
-    echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}" >> "$temp_file"
-  done < "$INPUT_FILE"
-
-  # Verify updated file
-  local valid=true
-  while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2; do
-    if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
-      continue
-    fi
-    if [[ -z "$fastq1" ]]; then
-      log_debug "Verification failed: No FASTQ file for $accession"
-      valid=false
-    elif [[ ! -f "$fastq1" ]]; then
-      log_debug "Verification failed: FASTQ file $fastq1 does not exist for $accession"
-      valid=false
-    fi
-  done < "$temp_file"
-
-  if [[ "$valid" == "false" || $missing_fastq -gt 0 ]]; then
-    log_info "Found $missing_fastq RunAccessions with missing FASTQ files"
-    rm -f "$temp_file"
-    exit 1
+  else
+    log_info "Fastq1 and Fastq2 columns missing; updating input.csv"
+    header="${header},Fastq1,Fastq2"
+    needs_update=true
   fi
+  
+  if [[ "$needs_update" == "true" ]]; then
+    echo "$header" > "$temp_file"
+    
+    # Ensure FASTQ_DIR is absolute
+    FASTQ_DIR=$(realpath "$FASTQ_DIR" 2>/dev/null || echo "$FASTQ_DIR")
+    log_debug "Searching FASTQ_DIR: $FASTQ_DIR"
+    
+    # Log all FASTQ files found
+    log_debug "Listing all *.fastq.gz files in $FASTQ_DIR"
+    find "$FASTQ_DIR" -maxdepth 1 -type f -name "*.fastq.gz" | while read -r file; do
+      log_debug "Found file: $file"
+    done
+    
+    # Collect all FASTQ files
+    declare -A fastq1_map
+    declare -A fastq2_map
+    while IFS= read -r file; do
+      filename=$(basename "$file")
+      if [[ "$filename" =~ ^([A-Za-z0-9]+)_([12])\.fastq\.gz$ ]]; then
+        local accession="${BASH_REMATCH[1]}"
+        local pair="${BASH_REMATCH[2]}"
+        log_debug "Matched paired file: $filename -> accession=$accession, pair=$pair"
+        if [[ "$pair" == "1" ]]; then
+          fastq1_map["$accession"]="$file"
+        elif [[ "$pair" == "2" ]]; then
+          fastq2_map["$accession"]="$file"
+        fi
+      elif [[ "$filename" =~ ^([A-Za-z0-9]+)\.fastq\.gz$ ]]; then
+        local accession="${BASH_REMATCH[1]}"
+        log_debug "Matched single-end file: $filename -> accession=$accession"
+        if [[ -z "${fastq1_map[$accession]}" && -z "${fastq2_map[$accession]}" ]]; then
+          fastq1_map["$accession"]="$file"
+        fi
+      else
+        log_debug "File does not match expected pattern: $filename"
+      fi
+    done < <(find "$FASTQ_DIR" -maxdepth 1 -type f -name "*.fastq.gz")
 
-  # Update input.csv
-  update_input_csv "$(cat "$temp_file")"
+    # Update rows, preserving extra columns
+    local missing_fastq=0
+    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
+      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
+        continue
+      fi
+      # Use existing paths if valid, else update
+      local new_fastq1="$fastq1"
+      local new_fastq2="$fastq2"
+      if [[ -z "$fastq1" || ! -f "$fastq1" || -z "$fastq2" || ! -f "$fastq2" ]]; then
+        new_fastq1="${fastq1_map[$accession]}"
+        new_fastq2="${fastq2_map[$accession]}"
+      fi
+      if [[ -z "$new_fastq1" && -z "$new_fastq2" ]]; then
+        log_debug "No FASTQ file found for $accession"
+        ((missing_fastq++))
+      else
+        log_debug "Assigned for $accession: Fastq1=$new_fastq1, Fastq2=$new_fastq2"
+      fi
+      echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${new_fastq1}${DELIMITER}${new_fastq2}${DELIMITER}${rest}" >> "$temp_file"
+    done < "$INPUT_FILE"
+
+    # Verify updated file
+    local valid=true
+    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
+      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
+        continue
+      fi
+      if [[ -z "$fastq1" && -z "$fastq2" ]]; then
+        log_debug "Verification failed: No FASTQ file for $accession"
+        valid=false
+      elif [[ -n "$fastq1" && ! -f "$fastq1" ]]; then
+        log_debug "Verification failed: FASTQ file $fastq1 does not exist for $accession"
+        valid=false
+      elif [[ -n "$fastq2" && ! -f "$fastq2" ]]; then
+        log_debug "Verification failed: FASTQ file $fastq2 does not exist for $accession"
+        valid=false
+      fi
+    done < "$temp_file"
+
+    if [[ "$valid" == "false" || $missing_fastq -gt 0 ]]; then
+      log_info "Found $missing_fastq RunAccessions with missing FASTQ files"
+      rm -f "$temp_file"
+      exit 1
+    fi
+
+    # Update input.csv
+    update_input_csv "$(cat "$temp_file")"
+    log_info "Updated input.csv with FASTQ paths"
+  fi
   rm -f "$temp_file"
-  log_info "Updated input.csv with FASTQ paths"
 }
 
+# Initialize checkpoint columns
 # Initialize checkpoint columns
 initialize_checkpoints() {
   log_info "Initializing checkpoint columns in input.csv"
   local temp_file=$(mktemp)
   local header=$(head -n 1 "$INPUT_FILE")
   
+  # Ensure necessary checkpoint columns
   if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-    # In debug mode, add columns for each step
     if [[ "$header" != *",Fastp,Dada2,Motus,Metaphlan,Completed"* ]]; then
       header="${header},Fastp,Dada2,Motus,Metaphlan,Completed"
     fi
   else
-    # In non-debug mode, add only Completed column
     if [[ "$header" != *",Completed"* ]]; then
       header="${header},Completed"
     fi
   fi
   echo "$header" > "$temp_file"
 
-  # Preserve data, initialize new columns
+  # Preserve existing checkpoint data
   while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
     if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
       continue
     fi
     if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-      echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}0${DELIMITER}0${DELIMITER}0${DELIMITER}0${DELIMITER}0" >> "$temp_file"
+      # In debug mode, preserve or initialize debug columns
+      if [[ "$header" == *",Fastp,Dada2,Motus,Metaphlan,Completed"* ]]; then
+        echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}${rest}" >> "$temp_file"
+      else
+        echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}0${DELIMITER}0${DELIMITER}0${DELIMITER}0${DELIMITER}0" >> "$temp_file"
+      fi
     else
-      echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}0" >> "$temp_file"
+      # In non-debug mode, preserve Completed if it exists
+      local completed="0"
+      if [[ "$rest" == *"$DELIMITER"*[0-1] ]]; then
+        completed=$(echo "$rest" | awk -F"$DELIMITER" '{print $NF}')
+      fi
+      echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}${completed}" >> "$temp_file"
     fi
   done < "$INPUT_FILE"
 
@@ -1118,14 +1191,14 @@ export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE
 # Initialize lock files
 touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK" "$INPUT_LOCK"
 
-# Load completed samples
-load_completed
-
 # Update input.csv with FASTQ paths
 update_input_with_fastq_paths
 
 # Initialize checkpoint columns
 initialize_checkpoints
+
+# Load completed samples
+load_completed
 
 # Generate quality profiles if requested
 if [[ "$QUALITY_CHECK" == "true" ]]; then
