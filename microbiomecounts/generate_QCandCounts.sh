@@ -13,10 +13,20 @@ export SHELL=/bin/bash
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=END,FAIL
 
-# Default directory for FASTQ files
+# Purpose: SLURM script for processing 16S and metagenomic FASTQ files using fastp, DADA2, MetaPhlAn, and mOTUs.
+# Inputs: CSV/TSV with Bioproject, RunAccession, SequencingType, optional Fastq1/Fastq2.
+# Dependencies: micromamba, fastp, R (DADA2), MetaPhlAn, mOTUs, GNU parallel.
+# Tip: Use --debug with a small dataset to test the pipeline.
+
+########################################
+# Default Variables & Directories
+########################################
+
 DEFAULT_DIR="fastq_data/fastq_biologicaldata"
 LOCK_DIR="$PWD/locks"
 mkdir -p "$LOCK_DIR"
+
+touch "$LOCK_DIR/debug.lock" "$LOCK_DIR/completed.lock" "$LOCK_DIR/failed.lock" "$LOCK_DIR/input.lock"
 DEBUG_FILE="debug.log"
 DEBUG_LOCK="$LOCK_DIR/debug.lock"
 COMPLETED_FILE="completed_steps.log"
@@ -24,29 +34,44 @@ COMPLETED_LOCK="$LOCK_DIR/completed.lock"
 FAILED_FILE="failed.log"
 FAILED_LOCK="$LOCK_DIR/failed.lock"
 INPUT_LOCK="$LOCK_DIR/input.lock"
+
 DEFAULT_WORKERS=4
 DEFAULT_MOTUS_TAX_LEVEL="mOTU"
 LOG_LEVEL="INFO"
 TMP_BASE="$PWD"
 RDP_DATABASE="rdp_19_toGenus_trainset.fa.gz"
 QUALITY_PROFILE_DIR="quality_profiles"
+
 DEFAULT_DADA2_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/dada2"
 DEFAULT_MOTUS_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/motus"
 DEFAULT_MPA_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/mpa"
 
-# Cleanup function
+INPUT_HEADER=""
+declare -a TMP_DIRS
+
+########################################
+# Cleanup
+########################################
 cleanup() {
+  for dir in "${TMP_DIRS[@]}"; do
+    [[ -d "$dir" ]] && rm -rf "$dir"
+  done
   rm -rf "$LOCK_DIR"
 }
 trap cleanup EXIT
 
-# Logging functions
+########################################
+# Logging Functions
+########################################
+
 log_debug() {
   [[ "$LOG_LEVEL" == "DEBUG" ]] || return
   local msg="$1"
   echo "$(date) [DEBUG] $msg" >&2
-  flock -x "$DEBUG_LOCK" -c "echo \"$(date) [DEBUG] $msg\" >> \"$DEBUG_FILE\"" 2>/dev/null || \
-    echo "[WARN] Could not log to $DEBUG_FILE: $msg" >&2
+  {
+    flock -x "$DEBUG_LOCK" || true
+    echo "$(date) [DEBUG] $msg" >> "$DEBUG_FILE"
+  } 2>/dev/null
 }
 
 log_info() {
@@ -54,25 +79,34 @@ log_info() {
   echo "$(date) [INFO] $msg" | tee -a "$DEBUG_FILE"
 }
 
-# Append to file with locking
+########################################
+# CSV / File Locking Helpers
+########################################
+
 append_with_lock() {
   local line="$1"
   local file="$2"
   local lock="$3"
-  flock -x "$lock" -c "echo \"$line\" >> \"$file\"" 2>/dev/null || \
-    echo "[ERROR] Could not append '$line' to $file" >&2
+  {
+    flock -x "$lock" || true
+    echo "$line" >> "$file"
+  } 2>/dev/null
 }
 
-# Update input.csv with locking
 update_input_csv() {
   local content="$1"
   local file="$INPUT_FILE"
   local lock="$INPUT_LOCK"
-  flock -x "$lock" -c "echo \"$content\" > \"$file\"" 2>/dev/null || \
-    { echo "[ERROR] Could not update $file"; exit 1; }
+  {
+    flock -x "$lock" || true
+    printf "%s" "$content" > "$file"
+  } 2>/dev/null
 }
 
-# Parse command-line arguments
+########################################
+# Command-Line Argument Parsing
+########################################
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -i) INPUT_FILE="$2"; shift 2 ;;
@@ -89,7 +123,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Set defaults
 FASTQ_DIR="${FASTQ_DIR:-$DEFAULT_DIR}"
 NUM_WORKERS="${NUM_WORKERS:-$DEFAULT_WORKERS}"
 MOTUS_TAX_LEVEL="${MOTUS_TAX_LEVEL:-$DEFAULT_MOTUS_TAX_LEVEL}"
@@ -97,16 +130,18 @@ DADA2_ENV="${DADA2_ENV:-$DEFAULT_DADA2_ENV}"
 MOTUS_ENV="${MOTUS_ENV:-$DEFAULT_MOTUS_ENV}"
 MPA_ENV="${MPA_ENV:-$DEFAULT_MPA_ENV}"
 
-# Normalize FASTQ_DIR path
-FASTQ_DIR=$(echo "$FASTQ_DIR" | sed 's|//|/|g')
+if command -v realpath &>/dev/null; then
+  FASTQ_DIR="$(realpath "$FASTQ_DIR")"
+fi
 
-# Validate micromamba
+########################################
+# Check micromamba, environments
+########################################
 if ! command -v micromamba &>/dev/null; then
   echo "Error: micromamba not found"
   exit 1
 fi
 
-# Check environment
 check_env() {
   local env="$1"
   local env_name="$2"
@@ -115,10 +150,8 @@ check_env() {
   if [[ -d "$env" ]]; then
     env_basename=$(basename "$env")
     eval "${env_name}_NAME=$env_basename"
-    return 0
   elif micromamba env list | grep -qE "^[[:space:]]*$env[[:space:]]"; then
     eval "${env_name}_NAME=$env"
-    return 0
   else
     echo "Error: micromamba environment $env_name ($env) not found"
     exit 1
@@ -133,9 +166,12 @@ DADA2_ENV_NAME="${dada2_NAME}"
 MOTUS_ENV_NAME="${motus_NAME}"
 MPA_ENV_NAME="${mpa_NAME}"
 
-# Validate input file
+########################################
+# Validate input file presence
+########################################
 if [[ -z "$INPUT_FILE" ]]; then
-  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [-q] [-a <dada2_env>] [-m <motus_env>] [-p <mpa_env>] [--debug]"
+  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [-q] ..."
+  echo "Tip: Use --debug with a small dataset to test the pipeline."
   exit 1
 fi
 
@@ -144,13 +180,19 @@ if [[ ! -f "$INPUT_FILE" ]]; then
   exit 1
 fi
 
-# Validate temporary directory
+if [[ ! -d "$FASTQ_DIR" ]]; then
+  echo "Error: FASTQ directory $FASTQ_DIR does not exist."
+  exit 1
+fi
+
 if [[ ! -d "$TMP_BASE" || ! -w "$TMP_BASE" ]]; then
   echo "Error: Temporary directory base $TMP_BASE does not exist or is not writable."
   exit 1
 fi
 
+########################################
 # Detect input file format
+########################################
 validate_input_file() {
   local file="$1"
   local first_line
@@ -167,249 +209,22 @@ validate_input_file() {
     exit 1
   fi
 
+  INPUT_HEADER="$first_line"
+
   if [[ "$first_line" != "$EXPECTED_HEADER" && "$first_line" != "${EXPECTED_HEADER},Fastq1,Fastq2"* ]]; then
     echo "Error: Input file $file has incorrect header. Expected: $EXPECTED_HEADER or extended with Fastq1,Fastq2"
     exit 1
   fi
 }
+
 validate_input_file "$INPUT_FILE"
 
-# Update input.csv with FASTQ paths
-# Update input.csv with FASTQ paths
-update_input_with_fastq_paths() {
-  log_info "Checking if input.csv needs FASTQ path updates"
-  local temp_file=$(mktemp)
-  
-  # Read existing header
-  local header=$(head -n 1 "$INPUT_FILE")
-  
-  # Check if Fastq1 and Fastq2 columns exist and have no empty/invalid paths
-  local needs_update=false
-  if [[ "$header" == *",Fastq1,Fastq2"* ]]; then
-    local all_valid=true
-    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
-      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
-        continue
-      fi
-      # Check for empty or non-existent paths
-      if [[ -z "$fastq1" && -z "$fastq2" ]]; then
-        log_debug "Empty FASTQ paths for $accession: Fastq1=$fastq1, Fastq2=$fastq2"
-        all_valid=false
-        break
-      fi
-      if [[ -n "$fastq1" && ! -f "$fastq1" ]]; then
-        log_debug "Invalid FASTQ path for $accession: Fastq1=$fastq1 does not exist"
-        all_valid=false
-        break
-      fi
-      if [[ -n "$fastq2" && ! -f "$fastq2" ]]; then
-        log_debug "Invalid FASTQ path for $accession: Fastq2=$fastq2 does not exist"
-        all_valid=false
-        break
-      fi
-    done < "$INPUT_FILE"
-    if [[ "$all_valid" == "true" ]]; then
-      log_info "input.csv has valid non-empty Fastq1 and/or Fastq2 for all samples; skipping update"
-      rm -f "$temp_file"
-      return 0
-    else
-      log_info "Found empty or invalid FASTQ paths; updating input.csv"
-      needs_update=true
-    fi
-  else
-    log_info "Fastq1 and Fastq2 columns missing; updating input.csv"
-    header="${header},Fastq1,Fastq2"
-    needs_update=true
-  fi
-  
-  if [[ "$needs_update" == "true" ]]; then
-    echo "$header" > "$temp_file"
-    
-    # Ensure FASTQ_DIR is absolute
-    FASTQ_DIR=$(realpath "$FASTQ_DIR" 2>/dev/null || echo "$FASTQ_DIR")
-    log_debug "Searching FASTQ_DIR: $FASTQ_DIR"
-    
-    # Log all FASTQ files found
-    log_debug "Listing all *.fastq.gz files in $FASTQ_DIR"
-    find "$FASTQ_DIR" -maxdepth 1 -type f -name "*.fastq.gz" | while read -r file; do
-      log_debug "Found file: $file"
-    done
-    
-    # Collect all FASTQ files
-    declare -A fastq1_map
-    declare -A fastq2_map
-    while IFS= read -r file; do
-      filename=$(basename "$file")
-      if [[ "$filename" =~ ^([A-Za-z0-9]+)_([12])\.fastq\.gz$ ]]; then
-        local accession="${BASH_REMATCH[1]}"
-        local pair="${BASH_REMATCH[2]}"
-        log_debug "Matched paired file: $filename -> accession=$accession, pair=$pair"
-        if [[ "$pair" == "1" ]]; then
-          fastq1_map["$accession"]="$file"
-        elif [[ "$pair" == "2" ]]; then
-          fastq2_map["$accession"]="$file"
-        fi
-      elif [[ "$filename" =~ ^([A-Za-z0-9]+)\.fastq\.gz$ ]]; then
-        local accession="${BASH_REMATCH[1]}"
-        log_debug "Matched single-end file: $filename -> accession=$accession"
-        if [[ -z "${fastq1_map[$accession]}" && -z "${fastq2_map[$accession]}" ]]; then
-          fastq1_map["$accession"]="$file"
-        fi
-      else
-        log_debug "File does not match expected pattern: $filename"
-      fi
-    done < <(find "$FASTQ_DIR" -maxdepth 1 -type f -name "*.fastq.gz")
-
-    # Update rows, preserving extra columns
-    local missing_fastq=0
-    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
-      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
-        continue
-      fi
-      # Use existing paths if valid, else update
-      local new_fastq1="$fastq1"
-      local new_fastq2="$fastq2"
-      if [[ -z "$fastq1" || ! -f "$fastq1" || -z "$fastq2" || ! -f "$fastq2" ]]; then
-        new_fastq1="${fastq1_map[$accession]}"
-        new_fastq2="${fastq2_map[$accession]}"
-      fi
-      if [[ -z "$new_fastq1" && -z "$new_fastq2" ]]; then
-        log_debug "No FASTQ file found for $accession"
-        ((missing_fastq++))
-      else
-        log_debug "Assigned for $accession: Fastq1=$new_fastq1, Fastq2=$new_fastq2"
-      fi
-      echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${new_fastq1}${DELIMITER}${new_fastq2}${DELIMITER}${rest}" >> "$temp_file"
-    done < "$INPUT_FILE"
-
-    # Verify updated file
-    local valid=true
-    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
-      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
-        continue
-      fi
-      if [[ -z "$fastq1" && -z "$fastq2" ]]; then
-        log_debug "Verification failed: No FASTQ file for $accession"
-        valid=false
-      elif [[ -n "$fastq1" && ! -f "$fastq1" ]]; then
-        log_debug "Verification failed: FASTQ file $fastq1 does not exist for $accession"
-        valid=false
-      elif [[ -n "$fastq2" && ! -f "$fastq2" ]]; then
-        log_debug "Verification failed: FASTQ file $fastq2 does not exist for $accession"
-        valid=false
-      fi
-    done < "$temp_file"
-
-    if [[ "$valid" == "false" || $missing_fastq -gt 0 ]]; then
-      log_info "Found $missing_fastq RunAccessions with missing FASTQ files"
-      rm -f "$temp_file"
-      exit 1
-    fi
-
-    # Update input.csv
-    update_input_csv "$(cat "$temp_file")"
-    log_info "Updated input.csv with FASTQ paths"
-  fi
-  rm -f "$temp_file"
-}
-
-# Initialize checkpoint columns
-# Initialize checkpoint columns
-initialize_checkpoints() {
-  log_info "Initializing checkpoint columns in input.csv"
-  local temp_file=$(mktemp)
-  local header=$(head -n 1 "$INPUT_FILE")
-  
-  # Ensure necessary checkpoint columns
-  if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-    if [[ "$header" != *",Fastp,Dada2,Motus,Metaphlan,Completed"* ]]; then
-      header="${header},Fastp,Dada2,Motus,Metaphlan,Completed"
-    fi
-  else
-    if [[ "$header" != *",Completed"* ]]; then
-      header="${header},Completed"
-    fi
-  fi
-  echo "$header" > "$temp_file"
-
-  # Preserve existing checkpoint data
-  while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
-    if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
-      continue
-    fi
-    if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-      # In debug mode, preserve or initialize debug columns
-      if [[ "$header" == *",Fastp,Dada2,Motus,Metaphlan,Completed"* ]]; then
-        echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}${rest}" >> "$temp_file"
-      else
-        echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}0${DELIMITER}0${DELIMITER}0${DELIMITER}0${DELIMITER}0" >> "$temp_file"
-      fi
-    else
-      # In non-debug mode, preserve Completed if it exists
-      local completed="0"
-      if [[ "$rest" == *"$DELIMITER"*[0-1] ]]; then
-        completed=$(echo "$rest" | awk -F"$DELIMITER" '{print $NF}')
-      fi
-      echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}${completed}" >> "$temp_file"
-    fi
-  done < "$INPUT_FILE"
-
-  update_input_csv "$(cat "$temp_file")"
-  rm -f "$temp_file"
-  log_info "Initialized checkpoint columns"
-}
-
-# Update checkpoint for a sample
-update_checkpoint() {
-  local accession="$1"
-  local step="$2"
-  local value="$3"
-  local temp_file=$(mktemp)
-  
-  local header=$(head -n 1 "$INPUT_FILE")
-  echo "$header" > "$temp_file"
-  
-  local field_index
-  case "$step" in
-    Fastp) field_index=4 ;;
-    Dada2) field_index=5 ;;
-    Motus) field_index=6 ;;
-    Metaphlan) field_index=7 ;;
-    Completed) field_index=8 ;;
-  esac
-  if [[ "$LOG_LEVEL" != "DEBUG" && "$step" == "Completed" ]]; then
-    field_index=6
-  fi
-
-  local updated=false
-  while IFS="$DELIMITER" read -r bioproject acc sample_type fastq1 fastq2 rest; do
-    if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
-      continue
-    fi
-    if [[ "$acc" == "$accession" ]]; then
-      # Update the specific field
-      local fields=("$bioproject" "$acc" "$sample_type" "$fastq1" "$fastq2" $rest)
-      fields[$field_index]="$value"
-      echo "$(IFS="$DELIMITER"; echo "${fields[*]}")" >> "$temp_file"
-      updated=true
-    else
-      echo "${bioproject}${DELIMITER}${acc}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}${rest}" >> "$temp_file"
-    fi
-  done < "$INPUT_FILE"
-
-  if [[ "$updated" == "true" ]]; then
-    update_input_csv "$(cat "$temp_file")"
-    log_debug "Updated checkpoint for $accession: $step=$value"
-  else
-    log_debug "No checkpoint update needed for $accession"
-  fi
-  rm -f "$temp_file"
-}
-
-# Check RDP database
+########################################
+# Check RDP DB if 16S present
+########################################
 check_rdp_database() {
   local has_16s=false
-  while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2; do
+  while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
     if [[ "$sample_type" == "16S" ]]; then
       has_16s=true
       break
@@ -417,8 +232,8 @@ check_rdp_database() {
   done < <(tail -n +2 "$INPUT_FILE")
   
   if [[ "$has_16s" == "true" ]]; then
-    if [[ ! -f "$RDP_DATABASE" ]]; then
-      echo "Error: RDP database $RDP_DATABASE not found."
+    if [[ ! -f "$RDP_DATABASE" || ! -r "$RDP_DATABASE" ]]; then
+      echo "Error: RDP database $RDP_DATABASE not found or not readable."
       exit 1
     fi
     log_info "RDP database $RDP_DATABASE found for 16S samples."
@@ -426,63 +241,60 @@ check_rdp_database() {
 }
 check_rdp_database
 
-# Validate FASTQ directory
-if [[ ! -d "$FASTQ_DIR" ]]; then
-  echo "Error: FASTQ directory $FASTQ_DIR does not exist."
-  exit 1
-fi
-
-# Set SLURM defaults
+########################################
+# SLURM / CPU / Worker Setup
+########################################
 SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-16}
-NUM_WORKERS=${NUM_WORKERS:-$DEFAULT_WORKERS}
-
-# Calculate threads per worker
 if [[ -z "$NUM_WORKERS" || "$NUM_WORKERS" -le 0 ]]; then
-  NUM_WORKERS=4
+  NUM_WORKERS=$DEFAULT_WORKERS
 fi
 THREADS_PER_WORKER=$(( SLURM_CPUS_PER_TASK / NUM_WORKERS ))
-if [[ $THREADS_PER_WORKER -lt 1 ]]; then
-  THREADS_PER_WORKER=1
-  NUM_WORKERS=$SLURM_CPUS_PER_TASK
-fi
+(( THREADS_PER_WORKER < 1 )) && THREADS_PER_WORKER=1
 
-# Log configuration
 log_info "SLURM_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK, NUM_WORKERS=$NUM_WORKERS, THREADS_PER_WORKER=$THREADS_PER_WORKER"
-log_info "Running with $NUM_WORKERS workers, $THREADS_PER_WORKER threads each (total $SLURM_CPUS_PER_TASK CPUs)"
+log_info "Running with $NUM_WORKERS workers, $THREADS_PER_WORKER threads each"
 
-# Validate FASTQ file
+########################################
+# FASTQ Validation
+########################################
 validate_fastq() {
   local file="$1"
   local min_size=100
   if [[ ! -f "$file" ]]; then
-    log_debug "[validate_fastq] File $file does not exist"
     echo "File does not exist: $file"
     return 1
   fi
-  local size=$(stat -c %s "$file" 2>/dev/null || wc -c < "$file")
+
+  local size
+  size=$(stat -c %s "$file" 2>/dev/null || wc -c < "$file")
   if (( size < min_size )); then
-    log_debug "[validate_fastq] File $file too small: $size bytes"
     echo "File too small: $file ($size bytes)"
     return 1
   fi
-  if [[ "$file" == *.gz && ! $(gzip -t "$file" 2>/dev/null && echo "valid") ]]; then
-    log_debug "[validate_fastq] File $file is not a valid gzip"
-    echo "Invalid gzip: $file"
-    return 1
+
+  if [[ "$file" == *.gz ]]; then
+    gzip -t "$file" 2>/dev/null
+    if [[ $? -ne 0 ]]; then
+      echo "Invalid gzip: $file"
+      return 1
+    fi
   fi
   return 0
 }
 
+########################################
+# Command Runners (with retries)
+########################################
 run_command() {
   local cmd="$1"
   local msg="$2"
   local input_file="$3"
   local output_file="$4"
+
   local max_attempts=3
   local attempt=1
   local wait_time=2
   local timeout=7200
-  local error_output
   local start_time=$(date +%s)
 
   while (( attempt <= max_attempts )); do
@@ -490,7 +302,7 @@ run_command() {
     error_output=$(timeout $timeout bash -c "$cmd" 2>&1)
     if [[ $? -eq 0 ]]; then
       local end_time=$(date +%s)
-      log_info "Command succeeded: [$(echo "$msg" | sed 's/Failed/Succeeded/')] Input: $input_file, Output: $output_file, Time: $((end_time - start_time))s"
+      log_info "Command succeeded: [${msg/Failed/Succeeded}] Input: $input_file, Output: $output_file, Time: $((end_time - start_time))s"
       return 0
     else
       log_debug "$msg (attempt $attempt/$max_attempts), Input: $input_file, Output: $output_file, Error: $error_output"
@@ -510,11 +322,11 @@ run_command_with_output() {
   local msg="$2"
   local output_file="$3"
   local input_file="$4"
+
   local max_attempts=3
   local attempt=1
   local wait_time=2
   local timeout=7200
-  local error_output
   local start_time=$(date +%s)
 
   while (( attempt <= max_attempts )); do
@@ -522,7 +334,7 @@ run_command_with_output() {
     error_output=$(timeout $timeout bash -c "$cmd > \"$output_file\" 2>&1")
     if [[ $? -eq 0 ]]; then
       local end_time=$(date +%s)
-      log_info "Command succeeded: [$(echo "$msg" | sed 's/Failed/Succeeded/')] Input: $input_file, Output: $output_file, Time: $((end_time - start_time))s"
+      log_info "Command succeeded: [${msg/Failed/Succeeded}] Input: $input_file, Output: $output_file, Time: $((end_time - start_time))s"
       return 0
     else
       log_debug "$msg (attempt $attempt/$max_attempts), Input: $input_file, Output: $output_file, Error: $error_output"
@@ -537,6 +349,203 @@ run_command_with_output() {
   done
 }
 
+########################################
+# Update Input CSV with FASTQ paths
+########################################
+update_input_with_fastq_paths() {
+  log_info "Checking if input file needs FASTQ path updates"
+
+  local temp_file
+  temp_file=$(mktemp)
+  local header
+  header=$(head -n 1 "$INPUT_FILE")
+
+  local needs_update=false
+  if [[ "$header" == *",Fastq1,Fastq2"* ]]; then
+    local all_valid=true
+    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
+      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
+        continue
+      fi
+      if [[ -z "$fastq1" && -z "$fastq2" ]]; then
+        all_valid=false
+        break
+      fi
+      if [[ -n "$fastq1" && ! -f "$fastq1" ]]; then
+        all_valid=false
+        break
+      fi
+      if [[ -n "$fastq2" && ! -f "$fastq2" ]]; then
+        all_valid=false
+        break
+      fi
+    done < "$INPUT_FILE"
+    if [[ "$all_valid" == "true" ]]; then
+      log_info "FASTQ columns exist and are valid for all samples."
+      rm -f "$temp_file"
+      return
+    else
+      needs_update=true
+    fi
+  else
+    header="${header},Fastq1,Fastq2"
+    needs_update=true
+  fi
+
+  if [[ "$needs_update" == "true" ]]; then
+    echo "$header" > "$temp_file"
+
+    declare -A fastq1_map
+    declare -A fastq2_map
+    while IFS= read -r file; do
+      filename=$(basename "$file")
+      # Paired-end pattern (_1, _2)
+      if [[ "$filename" =~ ^([A-Za-z0-9._-]+)_([12])\.fastq\.gz$ ]]; then
+        local accession="${BASH_REMATCH[1]}"
+        local pair="${BASH_REMATCH[2]}"
+        if [[ "$pair" == "1" ]]; then
+          fastq1_map["$accession"]="$file"
+        else
+          fastq2_map["$accession"]="$file"
+        fi
+      # Single-end pattern (<accession>.fastq.gz or <accession>_3.fastq.gz)
+      elif [[ "$filename" =~ ^([A-Za-z0-9._-]+)(\.fastq\.gz|_3\.fastq\.gz)$ ]]; then
+        local accession="${BASH_REMATCH[1]}"
+        # Only assign to fastq1 if not already assigned (prioritize paired-end)
+        if [[ -z "${fastq1_map[$accession]}" && -z "${fastq2_map[$accession]}" ]]; then
+          fastq1_map["$accession"]="$file"
+        fi
+      fi
+    done < <(find "$FASTQ_DIR" -maxdepth 1 -type f -name "*.fastq.gz")
+
+    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
+      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
+        continue
+      fi
+      local new_fastq1="$fastq1"
+      local new_fastq2="$fastq2"
+      if [[ -z "$fastq1" || ! -f "$fastq1" ]]; then
+        new_fastq1="${fastq1_map[$accession]}"
+      fi
+      if [[ -z "$fastq2" || ! -f "$fastq2" ]]; then
+        new_fastq2="${fastq2_map[$accession]}"
+      fi
+      echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${new_fastq1}${DELIMITER}${new_fastq2}${DELIMITER}${rest}" >> "$temp_file"
+    done < "$INPUT_FILE"
+
+    local missing_count=0
+    while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
+      if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
+        continue
+      fi
+      if [[ -z "$fastq1" && -z "$fastq2" ]]; then
+        ((missing_count++))
+      fi
+    done < "$temp_file"
+
+    if [[ $missing_count -gt 0 ]]; then
+      log_info "Found $missing_count samples still missing FASTQ files"
+      rm -f "$temp_file"
+      exit 1
+    fi
+
+    update_input_csv "$(cat "$temp_file")"
+    rm -f "$temp_file"
+    log_info "Updated input file with FASTQ paths"
+  fi
+}
+
+########################################
+# Initialize/Check Checkpoint Columns
+########################################
+initialize_checkpoints() {
+  log_info "Initializing checkpoint columns"
+  local temp_file
+  temp_file=$(mktemp)
+  local header
+  header=$(head -n 1 "$INPUT_FILE")
+
+  if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
+    if [[ "$header" != *",Fastp,Dada2,Motus,Metaphlan,Completed"* ]]; then
+      header="${header},Fastp,Dada2,Motus,Metaphlan,Completed"
+    fi
+  else
+    if [[ "$header" != *",Completed"* ]]; then
+      header="${header},Completed"
+    fi
+  fi
+  echo "$header" > "$temp_file"
+
+  while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
+    if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
+      continue
+    fi
+    if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
+      if [[ "$header" == *",Fastp,Dada2,Motus,Metaphlan,Completed"* ]]; then
+        echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}${rest}" >> "$temp_file"
+      else
+        echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}0${DELIMITER}0${DELIMITER}0${DELIMITER}0${DELIMITER}0" >> "$temp_file"
+      fi
+    else
+      local completed="0"
+      completed=$(echo "$rest" | awk -F"$DELIMITER" '{print $NF}')
+      echo "${bioproject}${DELIMITER}${accession}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}${completed}" >> "$temp_file"
+    fi
+  done < "$INPUT_FILE"
+
+  update_input_csv "$(cat "$temp_file")"
+  rm -f "$temp_file"
+  log_info "Checkpoint columns initialized"
+}
+
+update_checkpoint() {
+  local accession="$1"
+  local step="$2"
+  local value="$3"
+  local temp_file
+  temp_file=$(mktemp)
+
+  local header
+  header=$(head -n 1 "$INPUT_FILE")
+  echo "$header" > "$temp_file"
+
+  local field_index
+  case "$step" in
+    Fastp) field_index=4 ;;
+    Dada2) field_index=5 ;;
+    Motus) field_index=6 ;;
+    Metaphlan) field_index=7 ;;
+    Completed) field_index=8 ;;
+  esac
+  if [[ "$LOG_LEVEL" != "DEBUG" && "$step" == "Completed" ]]; then
+    field_index=6
+  fi
+
+  local updated=false
+  while IFS="$DELIMITER" read -r bioproject acc sample_type fastq1 fastq2 rest; do
+    if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
+      continue
+    fi
+    if [[ "$acc" == "$accession" ]]; then
+      local fields=("$bioproject" "$acc" "$sample_type" "$fastq1" "$fastq2" $rest)
+      fields[$field_index]="$value"
+      echo "$(IFS="$DELIMITER"; echo "${fields[*]}")" >> "$temp_file"
+      updated=true
+    else
+      echo "${bioproject}${DELIMITER}${acc}${DELIMITER}${sample_type}${DELIMITER}${fastq1}${DELIMITER}${fastq2}${DELIMITER}${rest}" >> "$temp_file"
+    fi
+  done < "$INPUT_FILE"
+
+  if [[ "$updated" == "true" ]]; then
+    update_input_csv "$(cat "$temp_file")"
+    log_debug "Updated checkpoint for $accession: $step=$value"
+  fi
+  rm -f "$temp_file"
+}
+
+########################################
+# Generate Quality Profiles if Requested
+########################################
 generate_quality_profiles() {
   local max_samples=5
   local count=0
@@ -555,46 +564,48 @@ generate_quality_profiles() {
         if [[ $? -eq 0 ]]; then
           log_info "Generated quality profile for $accession in $output_pdf"
           (( count++ ))
-        else
-          log_debug "Failed to generate quality profile for $accession"
         fi
       fi
     fi
   done < <(tail -n +2 "$INPUT_FILE")
 }
 
-# Convert MetaPhlAn profile to counts
+########################################
+# Convert Metaphlan profile to counts
+########################################
 convert_metaphlan_to_counts() {
   local metaphlan_log="$1"
   local metaphlan_profile="$2"
   local output_file="$3"
-  if [[ ! -f "$metaphlan_log" || ! -f "$metaphlan_profile" ]]; then
-    log_debug "[convert_metaphlan_to_counts] Missing files: $metaphlan_log or $metaphlan_profile"
-    echo "Missing files: $metaphlan_log or $metaphlan_profile"
+
+  if [[ ! -f "$metaphlan_profile" ]]; then
+    echo "Missing $metaphlan_profile"
     return 1
   fi
-  local mapped_reads=$(grep "Total number of reads mapped" "$metaphlan_log" | awk '{print $6}' | sed 's/(.*//')
+
+  local mapped_reads
+  mapped_reads=$(grep "Total number of reads mapped" "$metaphlan_log" 2>/dev/null | awk '{print $6}' | sed 's/(.*//')
   if [[ -z "$mapped_reads" ]]; then
-    log_debug "[convert_metaphlan_to_counts] Could not find mapped reads in $metaphlan_log"
-    echo "Could not find mapped reads in $metaphlan_log"
-    return 1
+    mapped_reads=100000
   fi
+
   awk -v mapped="$mapped_reads" '
     BEGIN { FS="\t"; OFS="\t"; print "#clade_name\trelative_abundance\tread_count" }
     /^#/ { next }
     { count = ($2 * mapped / 100); print $1, $2, count }
   ' "$metaphlan_profile" > "$output_file"
-  log_debug "[convert_metaphlan_to_counts] Converted $metaphlan_profile to counts in $output_file"
-  return 0
+
+  log_debug "Converted $metaphlan_profile to counts in $output_file"
 }
 
-# Merge profiles
+########################################
+# Merge Profiles
+########################################
 merge_profiles() {
   local bioproject="$1"
   local tool="$2"
   local output_dir="$bioproject"
   local merged_file="${output_dir}/${bioproject}_${tool}_merged.txt"
-  local profile_files
 
   declare -A expected_accessions
   while IFS="$DELIMITER" read -r proj accession sample_type fastq1 fastq2 rest; do
@@ -603,84 +614,70 @@ merge_profiles() {
     fi
   done < <(tail -n +2 "$INPUT_FILE")
 
-  if [[ "$tool" == "metaphlan" ]]; then
-    profile_files=($(ls "$output_dir"/*_metaphlan4_counts.txt 2>/dev/null))
-  elif [[ "$tool" == "motus" ]]; then
-    profile_files=($(ls "$output_dir"/*_motus.txt 2>/dev/null))
-  elif [[ "$tool" == "dada2" ]]; then
-    profile_files=($(ls "$output_dir"/seqtab_*.rds 2>/dev/null))
-  fi
-
   local all_complete=true
   for accession in "${!expected_accessions[@]}"; do
-    # Check completion status in input.csv
-    local completed=$(awk -F"$DELIMITER" -v acc="$accession" '$2 == acc {print $NF}' "$INPUT_FILE")
+    local completed
+    completed=$(awk -F"$DELIMITER" -v acc="$accession" '$2 == acc {print $NF}' "$INPUT_FILE")
     if [[ "$completed" != "1" ]]; then
-      log_debug "[merge_profiles] $bioproject ($tool): Accession $accession not completed"
-      all_complete=false
-      break
-    fi
-    if [[ "$tool" == "metaphlan" && ! -f "$output_dir/${accession}_metaphlan4_counts.txt" ]]; then
-      log_debug "[merge_profiles] $bioproject ($tool): Missing metaphlan profile for $accession"
-      all_complete=false
-      break
-    elif [[ "$tool" == "motus" && ! -f "$output_dir/${accession}_motus.txt" ]]; then
-      log_debug "[merge_profiles] $bioproject ($tool): Missing motus profile for $accession"
-      all_complete=false
-      break
-    elif [[ "$tool" == "dada2" && ! -f "$output_dir/seqtab_${accession}.rds" ]]; then
-      log_debug "[merge_profiles] $bioproject ($tool): Missing dada2 seqtab for $accession"
       all_complete=false
       break
     fi
   done
 
-  if [[ "$all_complete" == "true" && ${#profile_files[@]} -gt 0 ]]; then
-    if [[ "$tool" == "metaphlan" && ${#profile_files[@]} -gt 1 ]]; then
-      local input_list="${profile_files[*]}"
-      run_command "micromamba run -n \"$MPA_ENV_NAME\" merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
-        "[metaphlan merge] Process for $bioproject" "${profile_files[*]}" "$merged_file" || return 1
-      log_debug "Merged MetaPhlAn profiles for $bioproject into $merged_file"
-    elif [[ "$tool" == "metaphlan" && ${#profile_files[@]} -eq 1 ]]; then
-      cp "${profile_files[0]}" "$merged_file"
-      log_debug "Copied single metaphlan profile for $bioproject to $merged_file"
-    elif [[ "$tool" == "motus" && ${#profile_files[@]} -gt 1 ]]; then
-      local input_list=$(printf "%s," "${profile_files[@]}" | sed 's/,$//')
+  if [[ "$all_complete" == "true" ]]; then
+    local profile_files=()
+    case "$tool" in
+      metaphlan)   profile_files=("$output_dir"/*_metaphlan4_counts.txt) ;;
+      motus)       profile_files=("$output_dir"/*_motus.txt) ;;
+      dada2)       profile_files=("$output_dir"/seqtab_*.rds) ;;
+    esac
+
+    local valid_files=()
+    for f in "${profile_files[@]}"; do
+      [[ -f "$f" ]] && valid_files+=("$f")
+    done
+
+    if [[ "$tool" == "metaphlan" && ${#valid_files[@]} -gt 1 ]]; then
+      run_command "micromamba run -n \"$MPA_ENV_NAME\" merge_metaphlan_tables.py ${valid_files[*]} > \"$merged_file\"" \
+        "[metaphlan merge] for $bioproject" "${valid_files[*]}" "$merged_file"
+    elif [[ "$tool" == "metaphlan" && ${#valid_files[@]} -eq 1 ]]; then
+      cp "${valid_files[0]}" "$merged_file"
+    elif [[ "$tool" == "motus" && ${#valid_files[@]} -gt 1 ]]; then
+      local input_list
+      input_list=$(printf "%s," "${valid_files[@]}" | sed 's/,$//')
       run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus merge -i \"$input_list\" -o \"$merged_file\"" \
-        "[motus merge] Process for $bioproject" "$input_list" "$merged_file" || return 1
-      log_debug "Merged mOTUs profiles for $bioproject into $merged_file"
-    elif [[ "$tool" == "motus" && ${#profile_files[@]} -eq 1 ]]; then
-      cp "${profile_files[0]}" "$merged_file"
-      log_debug "Copied single motus profile for $bioproject to $merged_file"
-    elif [[ "$tool" == "dada2" ]]; then
-      local input_list="${bioproject} ${profile_files[*]}"
-      run_command "micromamba run -n \"$DADA2_ENV_NAME\" Rscript merge_dada2.R $input_list" \
-        "[dada2 merge] Process for $bioproject" "${profile_files[*]}" "" || return 1
-      log_debug "Merged DADA2 sequence tables for $bioproject"
+        "[motus merge] for $bioproject" "$input_list" "$merged_file"
+    elif [[ "$tool" == "motus" && ${#valid_files[@]} -eq 1 ]]; then
+      cp "${valid_files[0]}" "$merged_file"
+    elif [[ "$tool" == "dada2" && ${#valid_files[@]} -gt 0 ]]; then
+      if [[ ! -f "merge_dada2.R" ]]; then
+        log_info "Error: merge_dada2.R not found for DADA2 merging"
+        return 1
+      fi
+      run_command "micromamba run -n \"$DADA2_ENV_NAME\" Rscript merge_dada2.R $bioproject ${valid_files[*]}" \
+        "[dada2 merge] for $bioproject" "${valid_files[*]}" ""
     fi
-  else
-    log_debug "[merge_profiles] $bioproject ($tool): Skipping merge due to incomplete profiles"
-    return 1
   fi
-  return 0
 }
 
-# Load completed samples from input.csv
+########################################
+# Global Array for Completed Samples
+########################################
 declare -A COMPLETED_SAMPLES
 load_completed() {
   while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
-    if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
-      continue
-    fi
-    # Last column is Completed
-    local completed=$(echo "$rest" | awk -F"$DELIMITER" '{print $NF}')
-    if [[ "$completed" == "1" ]]; then
+    local completed_val
+    completed_val=$(echo "$rest" | awk -F"$DELIMITER" '{print $NF}')
+    if [[ "$completed_val" == "1" ]]; then
       COMPLETED_SAMPLES["$accession"]=1
     fi
   done < "$INPUT_FILE"
   log_debug "Loaded ${#COMPLETED_SAMPLES[@]} completed samples"
 }
 
+########################################
+# Process a Single Sample
+########################################
 process_sample() {
   local BIOPROJECT="$1"
   local RUN_ACCESSION="$2"
@@ -688,21 +685,26 @@ process_sample() {
   local INPUT_FASTQ="$4"
   local PAIRED_FASTQ="$5"
 
-  log_debug "Starting process_sample for $RUN_ACCESSION ($SAMPLE_TYPE)"
-  log_info "Processing $RUN_ACCESSION: Input files $INPUT_FASTQ, $PAIRED_FASTQ"
-  if [[ -f "$INPUT_FASTQ" ]]; then
-    local read_count=$(zcat "$INPUT_FASTQ" 2>/dev/null | echo $((`wc -l`/4)))
+  log_debug "Processing $RUN_ACCESSION ($SAMPLE_TYPE)"
+  
+  if [[ "$LOG_LEVEL" == "DEBUG" && -f "$INPUT_FASTQ" ]]; then
+    local read_count
+    read_count=$(zcat "$INPUT_FASTQ" 2>/dev/null | wc -l)
+    read_count=$((read_count/4))
     log_info "$RUN_ACCESSION: Input read count = $read_count"
   fi
 
   if [[ -n "${COMPLETED_SAMPLES[$RUN_ACCESSION]}" ]]; then
-    log_debug "Skipping $RUN_ACCESSION: already processed"
+    log_debug "Skipping $RUN_ACCESSION: already completed"
     return
   fi
 
   local OUTPUT_DIR="${BIOPROJECT}"
-  local LOG_FILE="${OUTPUT_DIR}/processed_files.log"
-  local TMP_DIR=$(mktemp -d -p "$TMP_BASE" "process_${SLURM_JOB_ID}_${RUN_ACCESSION}_XXXXXX")
+  mkdir -p "$OUTPUT_DIR"
+  local TMP_DIR
+  TMP_DIR=$(mktemp -d -p "$TMP_BASE" "process_${SLURM_JOB_ID}_${RUN_ACCESSION}_XXXXXX")
+  TMP_DIRS+=("$TMP_DIR")
+
   local QC1="${TMP_DIR}/qc_${RUN_ACCESSION}_1.fastq.gz"
   local QC2="${TMP_DIR}/qc_${RUN_ACCESSION}_2.fastq.gz"
   local QC="${TMP_DIR}/qc_${RUN_ACCESSION}.fastq.gz"
@@ -712,426 +714,184 @@ process_sample() {
   local METAPHLAN_COUNTS="${OUTPUT_DIR}/${RUN_ACCESSION}_metaphlan4_counts.txt"
   local MOTUS_PROFILE="${OUTPUT_DIR}/${RUN_ACCESSION}_motus.txt"
   local DADA2_SEQTAB="${OUTPUT_DIR}/seqtab_${RUN_ACCESSION}.rds"
-  mkdir -p "$OUTPUT_DIR"
 
-  touch "$LOG_FILE"
-
-  # Validate input files
-  if [[ -f "$INPUT_FASTQ" && -f "$PAIRED_FASTQ" ]]; then
-    local reason1=$(validate_fastq "$INPUT_FASTQ")
-    local status1=$?
-    local reason2=$(validate_fastq "$PAIRED_FASTQ")
-    local status2=$?
-    if [[ $status1 -ne 0 || $status2 -ne 0 ]]; then
-      local reason="Invalid FASTQ files - $INPUT_FASTQ: $reason1; $PAIRED_FASTQ: $reason2"
-      log_debug "$reason"
-      append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-      rm -rf "$TMP_DIR"
-      return 1
-    fi
-    if grep -q "$INPUT_FASTQ" "$LOG_FILE" && grep -q "$PAIRED_FASTQ" "$LOG_FILE"; then
-      log_debug "Skipping $RUN_ACCESSION: files already logged"
-    else
-      append_with_lock "$INPUT_FASTQ" "$LOG_FILE" "$COMPLETED_LOCK"
-      append_with_lock "$PAIRED_FASTQ" "$LOG_FILE" "$COMPLETED_LOCK"
-    fi
-  elif [[ -f "$INPUT_FASTQ" ]]; then
-    local reason=$(validate_fastq "$INPUT_FASTQ")
+  if [[ -f "$INPUT_FASTQ" ]]; then
+    local reason1
+    reason1=$(validate_fastq "$INPUT_FASTQ")
     if [[ $? -ne 0 ]]; then
-      log_debug "Invalid FASTQ file for $RUN_ACCESSION: $reason"
-      append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
+      append_with_lock "$RUN_ACCESSION:$reason1" "$FAILED_FILE" "$FAILED_LOCK"
       rm -rf "$TMP_DIR"
       return 1
-    fi
-    if grep -q "$INPUT_FASTQ" "$LOG_FILE"; then
-      log_debug "Skipping $RUN_ACCESSION: file already logged"
-    else
-      append_with_lock "$INPUT_FASTQ" "$LOG_FILE" "$COMPLETED_LOCK"
     fi
   else
-    local reason="No valid FASTQ files for $RUN_ACCESSION"
-    log_debug "$reason"
+    local reason="Missing FASTQ: $INPUT_FASTQ"
     append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
     rm -rf "$TMP_DIR"
     return 1
   fi
 
-  local FILE_SIZE_GB=$(du -BG "$INPUT_FASTQ" | cut -f1 | sed 's/G//')
-  log_debug "Processing $RUN_ACCESSION (Type: $SAMPLE_TYPE, Size: ${FILE_SIZE_GB}GB, Threads: $THREADS_PER_WORKER)"
+  if [[ -n "$PAIRED_FASTQ" && -f "$PAIRED_FASTQ" ]]; then
+    local reason2
+    reason2=$(validate_fastq "$PAIRED_FASTQ")
+    if [[ $? -ne 0 ]]; then
+      append_with_lock "$RUN_ACCESSION:$reason2" "$FAILED_FILE" "$FAILED_LOCK"
+      rm -rf "$TMP_DIR"
+      return 1
+    fi
+  fi
 
+  # =============== 16S Workflow ===============
   if [[ "$SAMPLE_TYPE" == "16S" ]]; then
-    # Fastp step
     if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-      local fastp_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $4}' "$INPUT_FILE")
+      local fastp_status
+      fastp_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $4}' "$INPUT_FILE")
       if [[ "$fastp_status" == "1" ]]; then
-        log_debug "Skipping fastp for $RUN_ACCESSION: already completed"
+        log_debug "Skipping fastp for $RUN_ACCESSION: checkpoint set"
       else
-        if [[ -f "$PAIRED_FASTQ" ]]; then
-          if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
-            local reason=$(run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --detect_adapter_for_pe --disable_quality_filtering --trim_poly_g --empty_output_tabular" \
-              "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2")
-            if [[ $? -ne 0 ]]; then
-              append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-              rm -rf "$TMP_DIR"
-              return 1
-            fi
-          fi
-          local reason1=$(validate_fastq "$QC1")
-          local status1=$?
-          local reason2=$(validate_fastq "$QC2")
-          local status2=$?
-          if [[ $status1 -ne 0 || $status2 -ne 0 ]]; then
-            local reason="Invalid QC FASTQ files - $QC1: $reason1; $QC2: $reason2"
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-          log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC1\" 2>/dev/null | echo $((`wc -l`/4)))"
+        if [[ -n "$PAIRED_FASTQ" ]]; then
+          run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
+            "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2"
+          update_checkpoint "$RUN_ACCESSION" "Fastp" "1"
         else
-          if [[ ! -f "$QC" ]]; then
-            local reason=$(run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --trim_poly_g --empty_output_tabular" \
-              "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC")
-            if [[ $? -ne 0 ]]; then
-              append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-              rm -rf "$TMP_DIR"
-              return 1
-            fi
-          fi
-          local reason=$(validate_fastq "$QC")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-          log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC\" 2>/dev/null | echo $((`wc -l`/4)))"
+          run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
+            "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC"
+          update_checkpoint "$RUN_ACCESSION" "Fastp" "1"
         fi
-        update_checkpoint "$RUN_ACCESSION" "Fastp" "1"
       fi
     else
-      if [[ -f "$PAIRED_FASTQ" ]]; then
-        if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
-          local reason=$(run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --detect_adapter_for_pe --disable_quality_filtering --trim_poly_g --empty_output_tabular" \
-            "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-        fi
-        local reason1=$(validate_fastq "$QC1")
-        local status1=$?
-        local reason2=$(validate_fastq "$QC2")
-        local status2=$?
-        if [[ $status1 -ne 0 || $status2 -ne 0 ]]; then
-          local reason="Invalid QC FASTQ files - $QC1: $reason1; $QC2: $reason2"
-          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
-        fi
-        log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC1\" 2>/dev/null | echo $((`wc -l`/4)))"
+      if [[ -n "$PAIRED_FASTQ" ]]; then
+        run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
+          "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2"
       else
-        if [[ ! -f "$QC" ]]; then
-          local reason=$(run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --trim_poly_g --empty_output_tabular" \
-            "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-        fi
-        local reason=$(validate_fastq "$QC")
-        if [[ $? -ne 0 ]]; then
-          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
-        fi
-        log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC\" 2>/dev/null | echo $((`wc -l`/4)))"
+        run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
+          "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC"
       fi
     fi
 
-    # Dada2 step
-    if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-      local dada2_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $5}' "$INPUT_FILE")
-      if [[ "$dada2_status" == "1" ]]; then
-        log_debug "Skipping dada2 for $RUN_ACCESSION: already completed"
+    if [[ -n "$PAIRED_FASTQ" ]]; then
+      run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC1\" \"$QC2\")" \
+        "[dada2] Process for $RUN_ACCESSION" "$QC1,$QC2" "$DADA2_SEQTAB"
+      if [[ -f "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" ]]; then
+        mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB"
       else
-        if [[ -f "$PAIRED_FASTQ" ]]; then
-          if [[ ! -f "$DADA2_SEQTAB" ]]; then
-            local reason=$(run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC1\" \"$QC2\")" \
-              "[dada2] Process for $RUN_ACCESSION" "$QC1,$QC2" "$DADA2_SEQTAB")
-            if [[ $? -ne 0 ]]; then
-              append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-              rm -rf "$TMP_DIR"
-              return 1
-            fi
-            mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB" 2>/dev/null || {
-              local reason="No seqtab output for $RUN_ACCESSION"
-              log_debug "$reason"
-              append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-              rm -rf "$TMP_DIR"
-              return 1
-            }
-          fi
-        else
-          if [[ ! -f "$DADA2_SEQTAB" ]]; then
-            local reason=$(run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC\")" \
-              "[dada2] Process for $RUN_ACCESSION" "$QC" "$DADA2_SEQTAB")
-            if [[ $? -ne 0 ]]; then
-              append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-              rm -rf "$TMP_DIR"
-              return 1
-            fi
-            mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB" 2>/dev/null || {
-              local reason="No seqtab output for $RUN_ACCESSION"
-              log_debug "$reason"
-              append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-              rm -rf "$TMP_DIR"
-              return 1
-            }
-          fi
-        fi
-        update_checkpoint "$RUN_ACCESSION" "Dada2" "1"
+        log_info "Error: DADA2 output $TMP_DIR/seqtab_${RUN_ACCESSION}.rds not found for $RUN_ACCESSION"
+        append_with_lock "$RUN_ACCESSION:DADA2 output missing" "$FAILED_FILE" "$FAILED_LOCK"
+        rm -rf "$TMP_DIR"
+        return 1
       fi
     else
-      if [[ -f "$PAIRED_FASTQ" ]]; then
-        if [[ ! -f "$DADA2_SEQTAB" ]]; then
-          local reason=$(run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC1\" \"$QC2\")" \
-            "[dada2] Process for $RUN_ACCESSION" "$QC1,$QC2" "$DADA2_SEQTAB")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-          mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB" 2>/dev/null || {
-            local reason="No seqtab output for $RUN_ACCESSION"
-            log_debug "$reason"
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          }
-        fi
+      run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC\")" \
+        "[dada2] Process for $RUN_ACCESSION" "$QC" "$DADA2_SEQTAB"
+      if [[ -f "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" ]]; then
+        mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB"
       else
-        if [[ ! -f "$DADA2_SEQTAB" ]]; then
-          local reason=$(run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC\")" \
-            "[dada2] Process for $RUN_ACCESSION" "$QC" "$DADA2_SEQTAB")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-          mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB" 2>/dev/null || {
-            local reason="No seqtab output for $RUN_ACCESSION"
-            log_debug "$reason"
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          }
-        fi
+        log_info "Error: DADA2 output $TMP_DIR/seqtab_${RUN_ACCESSION}.rds not found for $RUN_ACCESSION"
+        append_with_lock "$RUN_ACCESSION:DADA2 output missing" "$FAILED_FILE" "$FAILED_LOCK"
+        rm -rf "$TMP_DIR"
+        return 1
       fi
     fi
+
+  # =============== Metagenomic Workflow ===============
   elif [[ "$SAMPLE_TYPE" == "meta" ]]; then
-    # Fastp step
     if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-      local fastp_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $4}' "$INPUT_FILE")
-      if [[ "$fastp_status" == "1" ]]; then
-        log_debug "Skipping fastp for $RUN_ACCESSION: already completed"
-      else
-        if [[ -f "$PAIRED_FASTQ" ]]; then
-          if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
-            local reason=$(run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --detect_adapter_for_pe --disable_quality_filtering --trim_poly_g --empty_output_tabular" \
-              "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2")
-            if [[ $? -ne 0 ]]; then
-              append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-              rm -rf "$TMP_DIR"
-              return 1
-            fi
-          fi
-          local reason1=$(validate_fastq "$QC1")
-          local status1=$?
-          local reason2=$(validate_fastq "$QC2")
-          local status2=$?
-          if [[ $status1 -ne 0 || $status2 -ne 0 ]]; then
-            local reason="Invalid QC FASTQ files - $QC1: $reason1; $QC2: $reason2"
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-          log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC1\" 2>/dev/null | echo $((`wc -l`/4)))"
+      local fastp_status
+      fastp_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $4}' "$INPUT_FILE")
+      if [[ "$fastp_status" != "1" ]]; then
+        if [[ -n "$PAIRED_FASTQ" ]]; then
+          run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
+            "[fastp] Process,
+            "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2"
         else
-          if [[ ! -f "$QC" ]]; then
-            local reason=$(run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --trim_poly_g --empty_output_tabular" \
-              "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC")
-            if [[ $? -ne 0 ]]; then
-              append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-              rm -rf "$TMP_DIR"
-              return 1
-            fi
-          fi
-          local reason=$(validate_fastq "$QC")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-          log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC\" 2>/dev/null | echo $((`wc -l`/4)))"
+          run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
+            "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC"
         fi
         update_checkpoint "$RUN_ACCESSION" "Fastp" "1"
       fi
     else
-      if [[ -f "$PAIRED_FASTQ" ]]; then
-        if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
-          local reason=$(run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --detect_adapter_for_pe --disable_quality_filtering --trim_poly_g --empty_output_tabular" \
-            "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-        fi
-        local reason1=$(validate_fastq "$QC1")
-        local status1=$?
-        local reason2=$(validate_fastq "$QC2")
-        local status2=$?
-        if [[ $status1 -ne 0 || $status2 -ne 0 ]]; then
-          local reason="Invalid QC FASTQ files - $QC1: $reason1; $QC2: $reason2"
-          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
-        fi
-        log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC1\" 2>/dev/null | echo $((`wc -l`/4)))"
+      if [[ -n "$PAIRED_FASTQ" ]]; then
+        run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
+          "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2"
       else
-        if [[ ! -f "$QC" ]]; then
-          local reason=$(run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --trim_poly_g --empty_output_tabular" \
-            "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-        fi
-        local reason=$(validate_fastq "$QC")
-        if [[ $? -ne 0 ]]; then
-          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
-        fi
-        log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC\" 2>/dev/null | echo $((`wc -l`/4)))"
+        run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
+          "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC"
       fi
     fi
 
     local FASTQ_TO_USE
-    if [[ -f "$PAIRED_FASTQ" ]]; then
+    if [[ -n "$PAIRED_FASTQ" ]]; then
       FASTQ_TO_USE="$QC1,$QC2"
     else
       FASTQ_TO_USE="$QC"
     fi
 
-    # Metaphlan step
     if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-      local metaphlan_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $7}' "$INPUT_FILE")
-      if [[ "$metaphlan_status" == "1" ]]; then
-        log_debug "Skipping metaphlan for $RUN_ACCESSION: already completed"
-      else
-        if [[ ! -f "$METAPHLAN_PROFILE" ]]; then
-          rm -f "$METAPHLAN_BOWTIE"
-          local reason=$(run_command_with_output "micromamba run -n \"$MPA_ENV_NAME\" metaphlan \"$FASTQ_TO_USE\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
-            "[metaphlan] Process for $RUN_ACCESSION" "$METAPHLAN_LOG" "$FASTQ_TO_USE")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
-        fi
-        if [[ -f "$METAPHLAN_PROFILE" && ! -f "$METAPHLAN_COUNTS" ]]; then
-          local reason=$(convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS")
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
+      local metaphlan_status
+      metaphlan_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $7}' "$INPUT_FILE")
+      if [[ "$metaphlan_status" != "1" ]]; then
+        run_command "micromamba run -n \"$MPA_ENV_NAME\" metaphlan \"$FASTQ_TO_USE\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\" 2> \"$METAPHLAN_LOG\"" \
+          "[metaphlan] Process for $RUN_ACCESSION" "$FASTQ_TO_USE" "$METAPHLAN_PROFILE"
+        if [[ -f "$METAPHLAN_PROFILE" ]]; then
+          convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS"
         fi
         update_checkpoint "$RUN_ACCESSION" "Metaphlan" "1"
       fi
     else
       if [[ ! -f "$METAPHLAN_PROFILE" ]]; then
-        rm -f "$METAPHLAN_BOWTIE"
-        local reason=$(run_command_with_output "micromamba run -n \"$MPA_ENV_NAME\" metaphlan \"$FASTQ_TO_USE\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
-          "[metaphlan] Process for $RUN_ACCESSION" "$METAPHLAN_LOG" "$FASTQ_TO_USE")
-        if [[ $? -ne 0 ]]; then
-          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
-        fi
-      fi
-      if [[ -f "$METAPHLAN_PROFILE" && ! -f "$METAPHLAN_COUNTS" ]]; then
-        local reason=$(convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS")
-        if [[ $? -ne 0 ]]; then
-          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
+        run_command "micromamba run -n \"$MPA_ENV_NAME\" metaphlan \"$FASTQ_TO_USE\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\" 2> \"$METAPHLAN_LOG\"" \
+          "[metaphlan] Process for $RUN_ACCESSION" "$FASTQ_TO_USE" "$METAPHLAN_PROFILE"
+        if [[ -f "$METAPHLAN_PROFILE" ]]; then
+          convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS"
         fi
       fi
     fi
 
-    # Motus step
     if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-      local motus_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $6}' "$INPUT_FILE")
-      if [[ "$motus_status" == "1" ]]; then
-        log_debug "Skipping motus for $RUN_ACCESSION: already completed"
-      else
-        if [[ ! -f "$MOTUS_PROFILE" ]]; then
-          if [[ -f "$PAIRED_FASTQ" ]]; then
-            local reason=$(run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -f \"$QC1\" -r \"$QC2\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-              "[motus] Process for $RUN_ACCESSION" "$QC1,$QC2" "$MOTUS_PROFILE")
-          else
-            local reason=$(run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-              "[motus] Process for $RUN_ACCESSION" "$QC" "$MOTUS_PROFILE")
-          fi
-          if [[ $? -ne 0 ]]; then
-            append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-            rm -rf "$TMP_DIR"
-            return 1
-          fi
+      local motus_status
+      motus_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $6}' "$INPUT_FILE")
+      if [[ "$motus_status" != "1" ]]; then
+        if [[ -n "$PAIRED_FASTQ" ]]; then
+          run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -f \"$QC1\" -r \"$QC2\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+            "[motus] Process for $RUN_ACCESSION" "$QC1,$QC2" "$MOTUS_PROFILE"
+        else
+          run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+            "[motus] Process for $RUN_ACCESSION" "$QC" "$MOTUS_PROFILE"
         fi
         update_checkpoint "$RUN_ACCESSION" "Motus" "1"
       fi
     else
       if [[ ! -f "$MOTUS_PROFILE" ]]; then
-        if [[ -f "$PAIRED_FASTQ" ]]; then
-          local reason=$(run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -f \"$QC1\" -r \"$QC2\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-            "[motus] Process for $RUN_ACCESSION" "$QC1,$QC2" "$MOTUS_PROFILE")
+        if [[ -n "$PAIRED_FASTQ" ]]; then
+          run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -f \"$QC1\" -r \"$QC2\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+            "[motus] Process for $RUN_ACCESSION" "$QC1,$QC2" "$MOTUS_PROFILE"
         else
-          local reason=$(run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-            "[motus] Process for $RUN_ACCESSION" "$QC" "$MOTUS_PROFILE")
-        fi
-        if [[ $? -ne 0 ]]; then
-          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
+          run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+            "[motus] Process for $RUN_ACCESSION" "$QC" "$MOTUS_PROFILE"
         fi
       fi
     fi
   else
     local reason="Invalid sample type: $SAMPLE_TYPE"
-    log_debug "$reason for $RUN_ACCESSION"
     append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
     rm -rf "$TMP_DIR"
     return 1
   fi
 
-  # Mark as completed
   update_checkpoint "$RUN_ACCESSION" "Completed" "1"
   append_with_lock "${RUN_ACCESSION}:COMPLETE" "$COMPLETED_FILE" "$COMPLETED_LOCK"
-  log_info "Finished processing $RUN_ACCESSION"
+  log_info "Finished $RUN_ACCESSION"
   rm -rf "$TMP_DIR"
 }
 
-# Final validation and merging
+########################################
+# Final Merge & Validation
+########################################
 final_validation_and_merge() {
   log_info "Starting final validation and merging"
 
   declare -A EXPECTED_SAMPLES
   declare -A BIOPROJECTS
+
   while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
     if [[ -z "$bioproject" || "$bioproject" == "Bioproject" ]]; then
       continue
@@ -1140,106 +900,70 @@ final_validation_and_merge() {
     BIOPROJECTS["$bioproject"]=1
   done < <(tail -n +2 "$INPUT_FILE")
 
-  declare -A ACTUAL_SAMPLES
-  for dir in */; do
-    if [[ -d "$dir" && "$dir" != "*/" ]]; then
-      for file in "$dir"*_metaphlan4_counts.txt "$dir"*_motus.txt "$dir"/seqtab_*.rds; do
-        if [[ -f "$file" ]]; then
-          local accession=$(basename "$file" | sed -E 's/^(metaphlan4_counts|motus|seqtab)_([^_.]+).*/\2/')
-          ACTUAL_SAMPLES["$accession"]="$dir"
-        fi
-      done
-    fi
-  done
-
-  local missing=()
-  for accession in "${!EXPECTED_SAMPLES[@]}"; do
-    if [[ -z "${ACTUAL_SAMPLES[$accession]}" || -z "${COMPLETED_SAMPLES[$accession]}" ]]; then
-      missing+=("$accession")
-      log_debug "Missing or incomplete sample: $accession"
-    fi
-  done
-
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    log_info "Retrying ${#missing[@]} missing samples"
-    # Retry only missing samples
-    local temp_input=$(mktemp)
-    head -n 1 "$INPUT_FILE" > "$temp_input"
-    for accession in "${missing[@]}"; do
-      grep "^.*${DELIMITER}${accession}${DELIMITER}" "$INPUT_FILE" >> "$temp_input"
-    done
-    tail -n +2 "$temp_input" | parallel --colsep "$DELIMITER" --jobs "$NUM_WORKERS" --halt now,fail=1 /tmp/process_sample_wrapper.sh {1} {2} {3} {4} {5} "$DEBUG_FILE" "$DEBUG_LOCK" "$COMPLETED_FILE" "$COMPLETED_LOCK" "$FAILED_FILE" "$FAILED_LOCK" "$THREADS_PER_WORKER" "$MOTUS_TAX_LEVEL" "$INPUT_FILE" "$LOG_LEVEL" "$TMP_BASE" "$SLURM_JOB_ID" "$DELIMITER" "$DADA2_ENV_NAME" "$MOTUS_ENV_NAME" "$MPA_ENV_NAME"
-    rm -f "$temp_input"
-    load_completed
-  else
-    log_info "No missing samples to retry"
-  fi
-
   for bioproject in "${!BIOPROJECTS[@]}"; do
-    merge_profiles "$bioproject" "metaphlan" || log_debug "Failed to merge MetaPhlAn profiles for $bioproject"
-    merge_profiles "$bioproject" "motus" || log_debug "Failed to merge mOTUs profiles for $bioproject"
-    merge_profiles "$bioproject" "dada2" || log_debug "Failed to merge DADA2 sequence tables for $bioproject"
+    merge_profiles "$bioproject" "metaphlan"
+    merge_profiles "$bioproject" "motus"
+    merge_profiles "$bioproject" "dada2"
   done
 
-  log_info "Final validation and merging complete. Expected: ${#EXPECTED_SAMPLES[@]}, Actual: ${#ACTUAL_SAMPLES[@]}, Completed: ${#COMPLETED_SAMPLES[@]}"
+  log_info "Final validation and merging complete."
+  log_info "All processing complete."
 }
 
-# Export functions and variables
-export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts merge_profiles final_validation_and_merge generate_quality_profiles update_checkpoint
-export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK INPUT_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID DELIMITER QUALITY_PROFILE_DIR DADA2_ENV_NAME MOTUS_ENV_NAME MPA_ENV_NAME SLURM_CPUS_PER_TASK NUM_WORKERS
+########################################
+# Main Workflow
+########################################
 
-# Initialize lock files
-touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK" "$INPUT_LOCK"
-
-# Update input.csv with FASTQ paths
 update_input_with_fastq_paths
-
-# Initialize checkpoint columns
 initialize_checkpoints
-
-# Load completed samples
 load_completed
 
-# Generate quality profiles if requested
 if [[ "$QUALITY_CHECK" == "true" ]]; then
   log_info "Generating quality profiles for up to 5 samples"
   generate_quality_profiles
   exit 0
 fi
 
-# Create wrapper script for GNU Parallel
 cat << 'EOF' > /tmp/process_sample_wrapper.sh
 #!/bin/bash
+$(declare -f process_sample)
+$(declare -f log_debug)
+$(declare -f log_info)
+$(declare -f append_with_lock)
+$(declare -f update_checkpoint)
+$(declare -f validate_fastq)
+$(declare -f run_command)
+$(declare -f run_command_with_output)
+$(declare -f convert_metaphlan_to_counts)
 BIOPROJECT="$1"
 RUN_ACCESSION="$2"
 SAMPLE_TYPE="$3"
 INPUT_FASTQ="$4"
 PAIRED_FASTQ="$5"
-export DEBUG_FILE="$6"
-export DEBUG_LOCK="$7"
-export COMPLETED_FILE="$8"
-export COMPLETED_LOCK="$9"
-export FAILED_FILE="${10}"
-export FAILED_LOCK="${11}"
-export THREADS_PER_WORKER="${12}"
-export MOTUS_TAX_LEVEL="${13}"
-export INPUT_FILE="${14}"
-export LOG_LEVEL="${15}"
-export TMP_BASE="${16}"
-export SLURM_JOB_ID="${17}"
-export DELIMITER="${18}"
-export DADA2_ENV_NAME="${19}"
-export MOTUS_ENV_NAME="${20}"
-export MPA_ENV_NAME="${21}"
-export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts update_checkpoint
+DEBUG_FILE="$6"
+DEBUG_LOCK="$7"
+COMPLETED_FILE="$8"
+COMPLETED_LOCK="$9"
+FAILED_FILE="${10}"
+FAILED_LOCK="${11}"
+THREADS_PER_WORKER="${12}"
+MOTUS_TAX_LEVEL="${13}"
+INPUT_FILE="${14}"
+LOG_LEVEL="${15}"
+TMP_BASE="${16}"
+SLURM_JOB_ID="${17}"
+DELIMITER="${18}"
+DADA2_ENV_NAME="${19}"
+MOTUS_ENV_NAME="${20}"
+MPA_ENV_NAME="${21}"
 process_sample "$BIOPROJECT" "$RUN_ACCESSION" "$SAMPLE_TYPE" "$INPUT_FASTQ" "$PAIRED_FASTQ"
 EOF
 chmod +x /tmp/process_sample_wrapper.sh
 
-# Process input file
-log_info "Starting initial processing with $NUM_WORKERS workers"
+log_info "Starting parallel processing with $NUM_WORKERS workers"
+
 if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
-  # Process only one 16S and one meta sample
+  log_info "DEBUG mode: Processing only one 16S and one meta sample sequentially"
   local processed_16s=0
   local processed_meta=0
   while IFS="$DELIMITER" read -r bioproject accession sample_type fastq1 fastq2 rest; do
@@ -1247,10 +971,16 @@ if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
       continue
     fi
     if [[ "$sample_type" == "16S" && $processed_16s -eq 0 ]]; then
-      /tmp/process_sample_wrapper.sh "$bioproject" "$accession" "$sample_type" "$fastq1" "$fastq2" "$DEBUG_FILE" "$DEBUG_LOCK" "$COMPLETED_FILE" "$COMPLETED_LOCK" "$FAILED_FILE" "$FAILED_LOCK" "$THREADS_PER_WORKER" "$MOTUS_TAX_LEVEL" "$INPUT_FILE" "$LOG_LEVEL" "$TMP_BASE" "$SLURM_JOB_ID" "$DELIMITER" "$DADA2_ENV_NAME" "$MOTUS_ENV_NAME" "$MPA_ENV_NAME"
+      /tmp/process_sample_wrapper.sh "$bioproject" "$accession" "$sample_type" "$fastq1" "$fastq2" \
+        "$DEBUG_FILE" "$DEBUG_LOCK" "$COMPLETED_FILE" "$COMPLETED_LOCK" "$FAILED_FILE" "$FAILED_LOCK" \
+        "$THREADS_PER_WORKER" "$MOTUS_TAX_LEVEL" "$INPUT_FILE" "$LOG_LEVEL" "$TMP_BASE" "$SLURM_JOB_ID" \
+        "$DELIMITER" "$DADA2_ENV_NAME" "$MOTUS_ENV_NAME" "$MPA_ENV_NAME"
       ((processed_16s++))
     elif [[ "$sample_type" == "meta" && $processed_meta -eq 0 ]]; then
-      /tmp/process_sample_wrapper.sh "$bioproject" "$accession" "$sample_type" "$fastq1" "$fastq2" "$DEBUG_FILE" "$DEBUG_LOCK" "$COMPLETED_FILE" "$COMPLETED_LOCK" "$FAILED_FILE" "$FAILED_LOCK" "$THREADS_PER_WORKER" "$MOTUS_TAX_LEVEL" "$INPUT_FILE" "$LOG_LEVEL" "$TMP_BASE" "$SLURM_JOB_ID" "$DELIMITER" "$DADA2_ENV_NAME" "$MOTUS_ENV_NAME" "$MPA_ENV_NAME"
+      /tmp/process_sample_wrapper.sh "$bioproject" "$accession" "$sample_type" "$fastq1" "$fastq2" \
+        "$DEBUG_FILE" "$DEBUG_LOCK" "$COMPLETED_FILE" "$COMPLETED_LOCK" "$FAILED_FILE" "$FAILED_LOCK" \
+        "$THREADS_PER_WORKER" "$MOTUS_TAX_LEVEL" "$INPUT_FILE" "$LOG_LEVEL" "$TMP_BASE" "$SLURM_JOB_ID" \
+        "$DELIMITER" "$DADA2_ENV_NAME" "$MOTUS_ENV_NAME" "$MPA_ENV_NAME"
       ((processed_meta++))
     fi
     if [[ $processed_16s -eq 1 && $processed_meta -eq 1 ]]; then
@@ -1258,14 +988,16 @@ if [[ "$LOG_LEVEL" == "DEBUG" ]]; then
     fi
   done < "$INPUT_FILE"
 else
-  log_debug "Parallel command: tail -n +2 \"$INPUT_FILE\" | parallel --colsep \"$DELIMITER\" --jobs $NUM_WORKERS --halt now,fail=1 /tmp/process_sample_wrapper.sh {1} {2} {3} {4} {5} \"$DEBUG_FILE\" \"$DEBUG_LOCK\" \"$COMPLETED_FILE\" \"$COMPLETED_LOCK\" \"$FAILED_FILE\" \"$FAILED_LOCK\" \"$THREADS_PER_WORKER\" \"$MOTUS_TAX_LEVEL\" \"$INPUT_FILE\" \"$LOG_LEVEL\" \"$TMP_BASE\" \"$SLURM_JOB_ID\" \"$DELIMITER\" \"$DADA2_ENV_NAME\" \"$MOTUS_ENV_NAME\" \"$MPA_ENV_NAME\""
-  tail -n +2 "$INPUT_FILE" | parallel --colsep "$DELIMITER" --jobs "$NUM_WORKERS" --halt now,fail=1 /tmp/process_sample_wrapper.sh {1} {2} {3} {4} {5} "$DEBUG_FILE" "$DEBUG_LOCK" "$COMPLETED_FILE" "$COMPLETED_LOCK" "$FAILED_FILE" "$FAILED_LOCK" "$THREADS_PER_WORKER" "$MOTUS_TAX_LEVEL" "$INPUT_FILE" "$LOG_LEVEL" "$TMP_BASE" "$SLURM_JOB_ID" "$DELIMITER" "$DADA2_ENV_NAME" "$MOTUS_ENV_NAME" "$MPA_ENV_NAME"
+  tail -n +2 "$INPUT_FILE" | \
+    parallel --colsep "$DELIMITER" --jobs "$NUM_WORKERS" --halt now,fail=1 \
+      /tmp/process_sample_wrapper.sh {1} {2} {3} {4} {5} \
+      "$DEBUG_FILE" "$DEBUG_LOCK" "$COMPLETED_FILE" "$COMPLETED_LOCK" "$FAILED_FILE" "$FAILED_LOCK" \
+      "$THREADS_PER_WORKER" "$MOTUS_TAX_LEVEL" "$INPUT_FILE" "$LOG_LEVEL" "$TMP_BASE" "$SLURM_JOB_ID" \
+      "$DELIMITER" "$DADA2_ENV_NAME" "$MOTUS_ENV_NAME" "$MPA_ENV_NAME"
 fi
 
-# Clean up wrapper
 rm -f /tmp/process_sample_wrapper.sh
 
-# Final validation and merging
 final_validation_and_merge
 
 log_info "All processing, validation, and merging complete."
