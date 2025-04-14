@@ -1,41 +1,69 @@
 #!/bin/bash
+# Ensure bash is used
+export SHELL=/bin/bash
+
 #SBATCH --job-name=counts
-#SBATCH --output=counts_%j.out
-#SBATCH --error=counts_%j.err
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
 #SBATCH --time=48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=100G
+#SBATCH --mem=200G
 #SBATCH --account=open
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=END,FAIL
 
 # Default directory for FASTQ files
-DEFAULT_DIR="fastq_data/fastq_biologicaldata/"
-LOCK_DIR=$(mktemp -d)
+DEFAULT_DIR="fastq_data/fastq_biologicaldata"
+# Modified: Use working directory for locks to avoid /tmp issues
+LOCK_DIR="$PWD/locks"
+mkdir -p "$LOCK_DIR"
 DEBUG_FILE="debug.log"
 DEBUG_LOCK="$LOCK_DIR/debug.lock"
 COMPLETED_FILE="completed_steps.log"
 COMPLETED_LOCK="$LOCK_DIR/completed.lock"
 FAILED_FILE="failed.log"
 FAILED_LOCK="$LOCK_DIR/failed.lock"
-DEFAULT_WORKERS=8  # Default number of workers
-DEFAULT_MOTUS_TAX_LEVEL="mOTU"  # Default taxonomic level for mOTUs
-LOG_LEVEL="INFO"  # Adjustable log level: INFO, DEBUG
-TMP_BASE="$PWD"  # Use present working directory for temporary files
+DEFAULT_WORKERS=4
+DEFAULT_MOTUS_TAX_LEVEL="mOTU"
+LOG_LEVEL="DEBUG"
+TMP_BASE="$PWD"
 RDP_DATABASE="rdp_19_toGenus_trainset.fa.gz"
 QUALITY_PROFILE_DIR="quality_profiles"
-# Default micromamba environment paths or names
 DEFAULT_DADA2_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/dada2"
 DEFAULT_MOTUS_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/motus"
 DEFAULT_MPA_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/mpa"
 
-# Cleanup function for lock directory
+# Cleanup function
 cleanup() {
   rm -rf "$LOCK_DIR"
 }
 trap cleanup EXIT
+
+# Logging functions
+log_debug() {
+  [[ "$LOG_LEVEL" == "DEBUG" ]] || return
+  local msg="$1"
+  echo "$(date) [DEBUG] $msg" >&2
+  flock -x "$DEBUG_LOCK" -c "echo \"$(date) [DEBUG] $msg\" >> \"$DEBUG_FILE\"" 2>/dev/null || \
+    echo "[WARN] Could not log to $DEBUG_FILE: $msg" >&2
+}
+
+# Modified: Simplified to use tee for reliable logging to slurm-*.out and debug.log
+log_info() {
+  local msg="$1"
+  echo "$(date) [INFO] $msg" | tee -a "$DEBUG_FILE"
+}
+
+# Append to file with locking
+append_with_lock() {
+  local line="$1"
+  local file="$2"
+  local lock="$3"
+  flock -x "$lock" -c "echo \"$line\" >> \"$file\"" 2>/dev/null || \
+    echo "[ERROR] Could not append '$line' to $file" >&2
+}
 
 # Parse command-line arguments
 while getopts ":i:d:w:k:qa:m:p:" opt; do
@@ -60,24 +88,25 @@ DADA2_ENV="${DADA2_ENV:-$DEFAULT_DADA2_ENV}"
 MOTUS_ENV="${MOTUS_ENV:-$DEFAULT_MOTUS_ENV}"
 MPA_ENV="${MPA_ENV:-$DEFAULT_MPA_ENV}"
 
-# Validate micromamba and environments
+# Normalize FASTQ_DIR path
+FASTQ_DIR=$(echo "$FASTQ_DIR" | sed 's|//|/|g')
+
+# Validate micromamba
 if ! command -v micromamba &>/dev/null; then
   echo "Error: micromamba not found"
   exit 1
 fi
 
-# Function to check if an environment exists
+# Check environment
 check_env() {
   local env="$1"
   local env_name="$2"
   local env_basename
 
-  # Extract the basename if env is a path
   if [[ -d "$env" ]]; then
     env_basename=$(basename "$env")
     eval "${env_name}_NAME=$env_basename"
     return 0
-  # Otherwise, assume it's a name and check micromamba env list
   elif micromamba env list | grep -qE "^[[:space:]]*$env[[:space:]]"; then
     eval "${env_name}_NAME=$env"
     return 0
@@ -87,27 +116,17 @@ check_env() {
   fi
 }
 
-# Validate each environment
 check_env "$DADA2_ENV" "dada2"
 check_env "$MOTUS_ENV" "motus"
 check_env "$MPA_ENV" "mpa"
 
-# Store environment names for use in commands
 DADA2_ENV_NAME="${dada2_NAME}"
 MOTUS_ENV_NAME="${motus_NAME}"
 MPA_ENV_NAME="${mpa_NAME}"
 
-# Validate input file and directories
+# Validate input file
 if [[ -z "$INPUT_FILE" ]]; then
   echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [-q] [-a <dada2_env>] [-m <motus_env>] [-p <mpa_env>]"
-  echo "  <input>: CSV, TSV, or TXT file with columns: Bioproject,RunAccession,SequencingType"
-  echo "  <fastq_directory>: Directory containing FASTQ files (default: $DEFAULT_DIR)"
-  echo "  <num_workers>: Number of parallel workers (default: $DEFAULT_WORKERS)"
-  echo "  <motus_tax_level>: Taxonomic level for mOTUs (e.g., mOTU, phylum; default: $DEFAULT_MOTUS_TAX_LEVEL)"
-  echo "  -q: Generate quality profiles for FASTQs before processing"
-  echo "  <dada2_env>: DADA2 environment path or name (default: $DEFAULT_DADA2_ENV)"
-  echo "  <motus_env>: mOTUs environment path or name (default: $DEFAULT_MOTUS_ENV)"
-  echo "  <mpa_env>: MetaPhlAn environment path or name (default: $DEFAULT_MPA_ENV)"
   exit 1
 fi
 
@@ -116,7 +135,7 @@ if [[ ! -f "$INPUT_FILE" ]]; then
   exit 1
 fi
 
-# Validate temporary directory base
+# Validate temporary directory
 if [[ ! -d "$TMP_BASE" || ! -w "$TMP_BASE" ]]; then
   echo "Error: Temporary directory base $TMP_BASE does not exist or is not writable."
   exit 1
@@ -128,16 +147,14 @@ validate_input_file() {
   local first_line
   first_line=$(head -n 1 "$file")
   
-  # Check for CSV (comma-separated)
   if [[ "$first_line" == *"Bioproject,RunAccession,SequencingType"* ]]; then
     DELIMITER=','
     EXPECTED_HEADER="Bioproject,RunAccession,SequencingType"
-  # Check for TSV/TXT (tab-separated)
   elif [[ "$first_line" == $'Bioproject\tRunAccession\tSequencingType'* ]]; then
     DELIMITER=$'\t'
     EXPECTED_HEADER="Bioproject\tRunAccession\tSequencingType"
   else
-    echo "Error: Input file $file has unrecognized format or header. Expected: Bioproject,RunAccession,SequencingType (CSV) or Bioproject<tab>RunAccession<tab>SequencingType (TSV/TXT)"
+    echo "Error: Input file $file has unrecognized format or header."
     exit 1
   fi
 
@@ -148,7 +165,7 @@ validate_input_file() {
 }
 validate_input_file "$INPUT_FILE"
 
-# Check for 16S samples and validate RDP database
+# Check RDP database
 check_rdp_database() {
   local has_16s=false
   while IFS="$DELIMITER" read -r bioproject accession sample_type; do
@@ -160,7 +177,7 @@ check_rdp_database() {
   
   if [[ "$has_16s" == "true" ]]; then
     if [[ ! -f "$RDP_DATABASE" ]]; then
-      echo "Error: RDP database $RDP_DATABASE not found in current working directory, required for 16S samples."
+      echo "Error: RDP database $RDP_DATABASE not found."
       exit 1
     fi
     log_info "RDP database $RDP_DATABASE found for 16S samples."
@@ -168,48 +185,34 @@ check_rdp_database() {
 }
 check_rdp_database
 
+# Validate FASTQ directory
 if [[ ! -d "$FASTQ_DIR" ]]; then
   echo "Error: FASTQ directory $FASTQ_DIR does not exist."
   exit 1
 fi
 
+# Set SLURM defaults
+SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-16}
+NUM_WORKERS=${NUM_WORKERS:-$DEFAULT_WORKERS}
+
 # Calculate threads per worker
+if [[ -z "$NUM_WORKERS" || "$NUM_WORKERS" -le 0 ]]; then
+  NUM_WORKERS=4
+fi
 THREADS_PER_WORKER=$(( SLURM_CPUS_PER_TASK / NUM_WORKERS ))
 if [[ $THREADS_PER_WORKER -lt 1 ]]; then
   THREADS_PER_WORKER=1
   NUM_WORKERS=$SLURM_CPUS_PER_TASK
 fi
-echo "Running with $NUM_WORKERS workers, $THREADS_PER_WORKER threads each (total $SLURM_CPUS_PER_TASK CPUs)"
 
-# Logging function with file locking and log level
-log_debug() {
-  [[ "$LOG_LEVEL" == "DEBUG" ]] || return
-  local msg="$1"
-  echo "$(date) [DEBUG] $msg" >&2
-  flock -x "$DEBUG_LOCK" -c "echo \"$(date) [DEBUG] $msg\" >> \"$DEBUG_FILE\"" 2>/dev/null || \
-    echo "[WARN] Could not log to $DEBUG_FILE: $msg" >&2
-}
+# Log configuration
+log_info "SLURM_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK, NUM_WORKERS=$NUM_WORKERS, THREADS_PER_WORKER=$THREADS_PER_WORKER"
+log_info "Running with $NUM_WORKERS workers, $THREADS_PER_WORKER threads each (total $SLURM_CPUS_PER_TASK CPUs)"
 
-log_info() {
-  local msg="$1"
-  echo "$(date) [INFO] $msg" >&2
-  flock -x "$DEBUG_LOCK" -c "echo \"$(date) [INFO] $msg\" >> \"$DEBUG_FILE\"" 2>/dev/null || \
-    echo "[WARN] Could not log to $DEBUG_FILE: $msg" >&2
-}
-
-# Append to file with locking
-append_with_lock() {
-  local line="$1"
-  local file="$2"
-  local lock="$3"
-  flock -x "$lock" -c "echo \"$line\" >> \"$file\"" 2>/dev/null || \
-    echo "[ERROR] Could not append '$line' to $file" >&2
-}
-
-# Validate FASTQ file (size and gzip integrity)
+# Validate FASTQ file
 validate_fastq() {
   local file="$1"
-  local min_size=100  # Minimum size in bytes
+  local min_size=100
   if [[ ! -f "$file" ]]; then
     log_debug "[validate_fastq] File $file does not exist"
     echo "File does not exist: $file"
@@ -229,22 +232,30 @@ validate_fastq() {
   return 0
 }
 
-# Run command with retry
+# Modified: Added input/output file logging, runtime tracking
 run_command() {
   local cmd="$1"
   local err_msg="$2"
+  local input_file="$3"
+  local output_file="$4"
   local max_attempts=3
   local attempt=1
   local wait_time=2
+  local timeout=7200
   local error_output
+  local start_time=$(date +%s)
 
   while (( attempt <= max_attempts )); do
-    error_output=$(eval "$cmd" 2>&1)
+    log_debug "Running command (attempt $attempt): $cmd"
+    error_output=$(timeout $timeout bash -c "$cmd" 2>&1)
     if [[ $? -eq 0 ]]; then
+      local end_time=$(date +%s)
+      log_info "Command succeeded: $err_msg, Input: $input_file, Output: $output_file, Time: $((end_time - start_time))s"
       return 0
     else
-      log_debug "$err_msg (attempt $attempt/$max_attempts): $error_output"
+      log_debug "$err_msg (attempt $attempt/$max_attempts), Input: $input_file, Output: $output_file, Error: $error_output"
       if (( attempt == max_attempts )); then
+        log_info "$err_msg failed after $max_attempts attempts, Input: $input_file, Output: $output_file, Error: $error_output"
         echo "$err_msg: $error_output"
         return 1
       fi
@@ -254,23 +265,30 @@ run_command() {
   done
 }
 
-# Run command with retry and capture output
+# Modified: Added input file logging, runtime tracking
 run_command_with_output() {
   local cmd="$1"
   local err_msg="$2"
   local output_file="$3"
+  local input_file="$4"
   local max_attempts=3
   local attempt=1
   local wait_time=2
+  local timeout=7200
   local error_output
+  local start_time=$(date +%s)
 
   while (( attempt <= max_attempts )); do
-    error_output=$(eval "$cmd > \"$output_file\" 2>&1")
+    log_debug "Running command with output (attempt $attempt): $cmd > $output_file"
+    error_output=$(timeout $timeout bash -c "$cmd > \"$output_file\" 2>&1")
     if [[ $? -eq 0 ]]; then
+      local end_time=$(date +%s)
+      log_info "Command succeeded: $err_msg, Input: $input_file, Output: $output_file, Time: $((end_time - start_time))s"
       return 0
     else
-      log_debug "$err_msg (attempt $attempt/$max_attempts): $error_output"
+      log_debug "$err_msg (attempt $attempt/$max_attempts), Input: $input_file, Output: $output_file, Error: $error_output"
       if (( attempt == max_attempts )); then
+        log_info "$err_msg failed after $max_attempts attempts, Input: $input_file, Output: $output_file, Error: $error_output"
         echo "$err_msg: $error_output"
         return 1
       fi
@@ -280,9 +298,9 @@ run_command_with_output() {
   done
 }
 
-# Generate quality profiles for FASTQs
+# Generate quality profiles
 generate_quality_profiles() {
-  local max_samples=5  # Limit to avoid overwhelming output
+  local max_samples=5
   local count=0
   mkdir -p "$QUALITY_PROFILE_DIR"
   while IFS="$DELIMITER" read -r bioproject accession sample_type; do
@@ -293,13 +311,17 @@ generate_quality_profiles() {
       if [[ -f "$fastq1" && ! -f "$output_pdf" ]]; then
         if [[ -f "$fastq2" ]]; then
           run_command "micromamba run -n \"$DADA2_ENV_NAME\" Rscript -e 'library(dada2); pdf(\"$output_pdf\"); plotQualityProfile(c(\"$fastq1\", \"$fastq2\")); dev.off()'" \
-            "[quality profile] Failed for $accession" || log_debug "Failed to generate quality profile for $accession"
+            "[quality profile] Failed for $accession" "$fastq1,$fastq2" "$output_pdf"
         else
           run_command "micromamba run -n \"$DADA2_ENV_NAME\" Rscript -e 'library(dada2); pdf(\"$output_pdf\"); plotQualityProfile(\"$fastq1\"); dev.off()'" \
-            "[quality profile] Failed for $accession" || log_debug "Failed to generate quality profile for $accession"
+            "[quality profile] Failed for $accession" "$fastq1" "$output_pdf"
         fi
-        log_info "Generated quality profile for $accession in $output_pdf"
-        (( count++ ))
+        if [[ $? -eq 0 ]]; then
+          log_info "Generated quality profile for $accession in $output_pdf"
+          (( count++ ))
+        else
+          log_debug "Failed to generate quality profile for $accession"
+        fi
       fi
     fi
   done < <(tail -n +2 "$INPUT_FILE")
@@ -326,19 +348,18 @@ convert_metaphlan_to_counts() {
     /^#/ { next }
     { count = ($2 * mapped / 100); print $1, $2, count }
   ' "$metaphlan_profile" > "$output_file"
-  log_debug "[convert_metaphlan_to_counts] Converted $metaphlan_profile to counts in $output_file (total mapped: $mapped_reads)"
+  log_debug "[convert_metaphlan_to_counts] Converted $metaphlan_profile to counts in $output_file"
   return 0
 }
 
-# Merge profiles for a Bioproject
+# Merge profiles
 merge_profiles() {
   local bioproject="$1"
-  local tool="$2"  # "metaphlan", "motus", or "dada2"
+  local tool="$2"
   local output_dir="$bioproject"
   local merged_file="${output_dir}/${bioproject}_${tool}_merged.txt"
   local profile_files
 
-  # Load expected accessions for this Bioproject
   declare -A expected_accessions
   while IFS="$DELIMITER" read -r proj accession sample_type; do
     if [[ "$proj" == "$bioproject" ]]; then
@@ -346,7 +367,6 @@ merge_profiles() {
     fi
   done < <(tail -n +2 "$INPUT_FILE")
 
-  # Find available profile files
   if [[ "$tool" == "metaphlan" ]]; then
     profile_files=($(ls "$output_dir"/*_metaphlan4_counts.txt 2>/dev/null))
   elif [[ "$tool" == "motus" ]]; then
@@ -355,11 +375,10 @@ merge_profiles() {
     profile_files=($(ls "$output_dir"/seqtab_*.rds 2>/dev/null))
   fi
 
-  # Check if all expected accessions have completed profiles
   local all_complete=true
   for accession in "${!expected_accessions[@]}"; do
     if [[ -z "${COMPLETED_SAMPLES[$accession]}" ]]; then
-      log_debug "[merge_profiles] $bioproject ($tool): Accession $accession not fully processed"
+      log_debug "[merge_profiles] $bioproject ($tool): Accession $accession not processed"
       all_complete=false
       break
     fi
@@ -378,12 +397,11 @@ merge_profiles() {
     fi
   done
 
-  # Proceed with merging only if all expected profiles are complete
   if [[ "$all_complete" == "true" && ${#profile_files[@]} -gt 0 ]]; then
     if [[ "$tool" == "metaphlan" && ${#profile_files[@]} -gt 1 ]]; then
       local input_list="${profile_files[*]}"
       run_command "micromamba run -n \"$MPA_ENV_NAME\" merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
-        "[metaphlan merge] Failed for $bioproject" || return 1
+        "[metaphlan merge] Failed for $bioproject" "${profile_files[*]}" "$merged_file" || return 1
       log_debug "Merged MetaPhlAn profiles for $bioproject into $merged_file"
     elif [[ "$tool" == "metaphlan" && ${#profile_files[@]} -eq 1 ]]; then
       cp "${profile_files[0]}" "$merged_file"
@@ -391,7 +409,7 @@ merge_profiles() {
     elif [[ "$tool" == "motus" && ${#profile_files[@]} -gt 1 ]]; then
       local input_list=$(printf "%s," "${profile_files[@]}" | sed 's/,$//')
       run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus merge -i \"$input_list\" -o \"$merged_file\"" \
-        "[motus merge] Failed for $bioproject" || return 1
+        "[motus merge] Failed for $bioproject" "$input_list" "$merged_file" || return 1
       log_debug "Merged mOTUs profiles for $bioproject into $merged_file"
     elif [[ "$tool" == "motus" && ${#profile_files[@]} -eq 1 ]]; then
       cp "${profile_files[0]}" "$merged_file"
@@ -399,17 +417,17 @@ merge_profiles() {
     elif [[ "$tool" == "dada2" ]]; then
       local input_list="${bioproject} ${profile_files[*]}"
       run_command "micromamba run -n \"$DADA2_ENV_NAME\" Rscript merge_dada2.R $input_list" \
-        "[dada2 merge] Failed for $bioproject" || return 1
-      log_debug "Merged and processed DADA2 sequence tables for $bioproject"
+        "[dada2 merge] Failed for $bioproject" "${profile_files[*]}" "" || return 1
+      log_debug "Merged DADA2 sequence tables for $bioproject"
     fi
   else
-    log_debug "[merge_profiles] $bioproject ($tool): Skipping merge due to incomplete or missing profiles"
+    log_debug "[merge_profiles] $bioproject ($tool): Skipping merge due to incomplete profiles"
     return 1
   fi
   return 0
 }
 
-# Load completed samples into an associative array
+# Load completed samples
 declare -A COMPLETED_SAMPLES
 load_completed() {
   if [[ -f "$COMPLETED_FILE" ]]; then
@@ -419,22 +437,27 @@ load_completed() {
       fi
     done < "$COMPLETED_FILE"
   fi
-  log_debug "Loaded ${#COMPLETED_SAMPLES[@]} completed samples from $COMPLETED_FILE"
+  log_debug "Loaded ${#COMPLETED_SAMPLES[@]} completed samples"
 }
 
-# Process a single sample
+# Modified: Added read count logging, minimal fastp trimming for meta and 16S
 process_sample() {
   local BIOPROJECT="$1"
   local RUN_ACCESSION="$2"
   local SAMPLE_TYPE="$3"
 
-  # Check if already completed
+  log_debug "Starting process_sample for $RUN_ACCESSION ($SAMPLE_TYPE)"
+  log_info "Processing $RUN_ACCESSION: Input files $INPUT_FASTQ, $PAIRED_FASTQ"
+  if [[ -f "$INPUT_FASTQ" ]]; then
+    local read_count=$(zcat "$INPUT_FASTQ" 2>/dev/null | echo $((`wc -l`/4)))
+    log_info "$RUN_ACCESSION: Input read count = $read_count"
+  fi
+
   if [[ -n "${COMPLETED_SAMPLES[$RUN_ACCESSION]}" ]]; then
-    log_debug "Skipping $RUN_ACCESSION: already fully processed"
+    log_debug "Skipping $RUN_ACCESSION: already processed"
     return
   fi
 
-  # Define file paths
   local INPUT_FASTQ="${FASTQ_DIR}/${RUN_ACCESSION}_1.fastq.gz"
   local PAIRED_FASTQ="${FASTQ_DIR}/${RUN_ACCESSION}_2.fastq.gz"
   local OUTPUT_DIR="${BIOPROJECT}"
@@ -451,7 +474,6 @@ process_sample() {
   local DADA2_SEQTAB="${OUTPUT_DIR}/seqtab_${RUN_ACCESSION}.rds"
   mkdir -p "$OUTPUT_DIR"
 
-  # Initialize log file
   touch "$LOG_FILE"
 
   # Validate input files
@@ -494,25 +516,14 @@ process_sample() {
     return 1
   fi
 
-  # Determine resources (for logging)
   local FILE_SIZE_GB=$(du -BG "$INPUT_FASTQ" | cut -f1 | sed 's/G//')
-  local CPUS=$THREADS_PER_WORKER
-  local MEM TIME
-  if (( FILE_SIZE_GB <= 5 )); then
-    MEM="8G"; TIME="12:00:00"
-  elif (( FILE_SIZE_GB <= 20 )); then
-    MEM="16G"; TIME="24:00:00"
-  else
-    MEM="32G"; TIME="48:00:00"
-  fi
-  log_debug "Processing $RUN_ACCESSION (Type: $SAMPLE_TYPE, Threads: $CPUS)"
+  log_debug "Processing $RUN_ACCESSION (Type: $SAMPLE_TYPE, Size: ${FILE_SIZE_GB}GB, Threads: $THREADS_PER_WORKER)"
 
-  # Workflow
   if [[ "$SAMPLE_TYPE" == "16S" ]]; then
     if [[ -f "$PAIRED_FASTQ" ]]; then
       if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
-        local reason=$(run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER" \
-          "[fastp] Failed for $RUN_ACCESSION")
+        local reason=$(run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --detect_adapter_for_pe --disable_quality_filtering --trim_poly_g --empty_output_tabular" \
+          "[fastp] Failed for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2")
         if [[ $? -ne 0 ]]; then
           append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
           rm -rf "$TMP_DIR"
@@ -529,9 +540,10 @@ process_sample() {
         rm -rf "$TMP_DIR"
         return 1
       fi
+      log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC1\" 2>/dev/null | echo $((`wc -l`/4)))"
       if [[ ! -f "$DADA2_SEQTAB" ]]; then
         local reason=$(run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC1\" \"$QC2\")" \
-          "[dada2] Failed for $RUN_ACCESSION")
+          "[dada2] Failed for $RUN_ACCESSION" "$QC1,$QC2" "$DADA2_SEQTAB")
         if [[ $? -ne 0 ]]; then
           append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
           rm -rf "$TMP_DIR"
@@ -547,8 +559,8 @@ process_sample() {
       fi
     else
       if [[ ! -f "$QC" ]]; then
-        local reason=$(run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
-          "[fastp] Failed for $RUN_ACCESSION")
+        local reason=$(run_command "micromamba run -n \"$DADA2_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --trim_poly_g --empty_output_tabular" \
+          "[fastp] Failed for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC")
         if [[ $? -ne 0 ]]; then
           append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
           rm -rf "$TMP_DIR"
@@ -561,9 +573,10 @@ process_sample() {
         rm -rf "$TMP_DIR"
         return 1
       fi
+      log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC\" 2>/dev/null | echo $((`wc -l`/4)))"
       if [[ ! -f "$DADA2_SEQTAB" ]]; then
         local reason=$(run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC\")" \
-          "[dada2] Failed for $RUN_ACCESSION")
+          "[dada2] Failed for $RUN_ACCESSION" "$QC" "$DADA2_SEQTAB")
         if [[ $? -ne 0 ]]; then
           append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
           rm -rf "$TMP_DIR"
@@ -579,24 +592,51 @@ process_sample() {
       fi
     fi
   elif [[ "$SAMPLE_TYPE" == "meta" ]]; then
-    if [[ ! -f "$QC" ]]; then
-      local reason=$(run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
-        "[fastp] Failed for $RUN_ACCESSION")
+    if [[ -f "$PAIRED_FASTQ" ]]; then
+      if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
+        local reason=$(run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER -q 10 -u 60 -l 10 --detect_adapter_for_pe --disable_quality_filtering --trim_poly_g --empty_output_tabular" \
+          "[fastp] Failed for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2")
+        if [[ $? -ne 0 ]]; then
+          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
+          rm -rf "$TMP_DIR"
+          return 1
+        fi
+      fi
+      local reason1=$(validate_fastq "$QC1")
+      local status1=$?
+      local reason2=$(validate_fastq "$QC2")
+      local status2=$?
+      if [[ $status1 -ne 0 || $status2 -ne 0 ]]; then
+        local reason="Invalid QC FASTQ files - $QC1: $reason1; $QC2: $reason2"
+        append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
+        rm -rf "$TMP_DIR"
+        return 1
+      fi
+      log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC1\" 2>/dev/null | echo $((`wc -l`/4)))"
+      local FASTQ_TO_USE="$QC1,$QC2"
+    else
+      if [[ ! -f "$QC" ]]; then
+        local reason=$(run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER -q 10 -u 80 -l 10 --trim_poly_g --empty_output_tabular" \
+          "[fastp] Failed for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC")
+        if [[ $? -ne 0 ]]; then
+          append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
+          rm -rf "$TMP_DIR"
+          return 1
+        fi
+      fi
+      local reason=$(validate_fastq "$QC")
       if [[ $? -ne 0 ]]; then
         append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
         rm -rf "$TMP_DIR"
         return 1
       fi
-    fi
-    local reason=$(validate_fastq "$QC")
-    if [[ $? -ne 0 ]]; then
-      append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
-      rm -rf "$TMP_DIR"
-      return 1
+      log_info "$RUN_ACCESSION: Post-fastp read count = $(zcat \"$QC\" 2>/dev/null | echo $((`wc -l`/4)))"
+      local FASTQ_TO_USE="$QC"
     fi
     if [[ ! -f "$METAPHLAN_PROFILE" ]]; then
-      local reason=$(run_command_with_output "micromamba run -n \"$MPA_ENV_NAME\" metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
-        "[metaphlan] Failed for $RUN_ACCESSION" "$METAPHLAN_LOG")
+      rm -f "$METAPHLAN_BOWTIE"
+      local reason=$(run_command_with_output "micromamba run -n \"$MPA_ENV_NAME\" metaphlan \"$FASTQ_TO_USE\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
+        "[metaphlan] Failed for $RUN_ACCESSION" "$METAPHLAN_LOG" "$FASTQ_TO_USE")
       if [[ $? -ne 0 ]]; then
         append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
         rm -rf "$TMP_DIR"
@@ -612,8 +652,13 @@ process_sample() {
       fi
     fi
     if [[ ! -f "$MOTUS_PROFILE" ]]; then
-      local reason=$(run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-        "[motus] Failed for $RUN_ACCESSION")
+      if [[ -f "$PAIRED_FASTQ" ]]; then
+        local reason=$(run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -f \"$QC1\" -r \"$QC2\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+          "[motus] Failed for $RUN_ACCESSION" "$QC1,$QC2" "$MOTUS_PROFILE")
+      else
+        local reason=$(run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+          "[motus] Failed for $RUN_ACCESSION" "$QC" "$MOTUS_PROFILE")
+      fi
       if [[ $? -ne 0 ]]; then
         append_with_lock "$RUN_ACCESSION:$reason" "$FAILED_FILE" "$FAILED_LOCK"
         rm -rf "$TMP_DIR"
@@ -628,11 +673,8 @@ process_sample() {
     return 1
   fi
 
-  # Mark as complete only if all steps succeeded
   append_with_lock "${RUN_ACCESSION}:COMPLETE" "$COMPLETED_FILE" "$COMPLETED_LOCK"
-  log_debug "Finished processing $RUN_ACCESSION"
-
-  # Clean up temporary directory
+  log_info "Finished processing $RUN_ACCESSION"
   rm -rf "$TMP_DIR"
 }
 
@@ -640,7 +682,6 @@ process_sample() {
 final_validation_and_merge() {
   log_info "Starting final validation and merging"
 
-  # Load expected accessions from input.tsv
   declare -A EXPECTED_SAMPLES
   declare -A BIOPROJECTS
   while IFS="$DELIMITER" read -r bioproject accession sample_type; do
@@ -648,7 +689,6 @@ final_validation_and_merge() {
     BIOPROJECTS["$bioproject"]=1
   done < <(tail -n +2 "$INPUT_FILE")
 
-  # Find actual processed samples
   declare -A ACTUAL_SAMPLES
   for dir in */; do
     if [[ -d "$dir" && "$dir" != "*/" ]]; then
@@ -661,7 +701,6 @@ final_validation_and_merge() {
     fi
   done
 
-  # Identify missing samples
   local missing=()
   for accession in "${!EXPECTED_SAMPLES[@]}"; do
     if [[ -z "${ACTUAL_SAMPLES[$accession]}" || -z "${COMPLETED_SAMPLES[$accession]}" ]]; then
@@ -670,35 +709,31 @@ final_validation_and_merge() {
     fi
   done
 
-  # Retry missing samples
   if [[ ${#missing[@]} -gt 0 ]]; then
     log_info "Retrying ${#missing[@]} missing samples"
-    printf '%s\n' "${missing[@]}" | parallel --jobs "$NUM_WORKERS" --env process_sample,log_debug,log_info,append_with_lock,validate_fastq,run_command,run_command_with_output,convert_metaphlan_to_counts process_sample "${EXPECTED_SAMPLES[{1}]}" {1}
-    load_completed  # Reload to include newly completed samples
+    printf '%s\n' "${missing[@]}" | parallel --jobs "$NUM_WORKERS" --halt now,fail=1 process_sample "${EXPECTED_SAMPLES[{1}]}" {1}
+    load_completed
   else
     log_info "No missing samples to retry"
   fi
 
-  # Merge profiles for each Bioproject
   for bioproject in "${!BIOPROJECTS[@]}"; do
     merge_profiles "$bioproject" "metaphlan" || log_debug "Failed to merge MetaPhlAn profiles for $bioproject"
     merge_profiles "$bioproject" "motus" || log_debug "Failed to merge mOTUs profiles for $bioproject"
     merge_profiles "$bioproject" "dada2" || log_debug "Failed to merge DADA2 sequence tables for $bioproject"
   done
 
-  # Log final status
   log_info "Final validation and merging complete. Expected: ${#EXPECTED_SAMPLES[@]}, Actual: ${#ACTUAL_SAMPLES[@]}, Completed: ${#COMPLETED_SAMPLES[@]}"
 }
 
-# Export functions and variables for GNU Parallel
-export SHELL=/bin/bash
+# Export functions and variables
 export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts merge_profiles final_validation_and_merge generate_quality_profiles
-export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID DELIMITER QUALITY_PROFILE_DIR DADA2_ENV_NAME MOTUS_ENV_NAME MPA_ENV_NAME
+export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID DELIMITER QUALITY_PROFILE_DIR DADA2_ENV_NAME MOTUS_ENV_NAME MPA_ENV_NAME SLURM_CPUS_PER_TASK NUM_WORKERS
 
 # Initialize lock files
 touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK"
 
-# Load completed samples once
+# Load completed samples
 load_completed
 
 # Generate quality profiles if requested
@@ -708,11 +743,43 @@ if [[ "$QUALITY_CHECK" == "true" ]]; then
   exit 0
 fi
 
-# Process input file with GNU Parallel
-log_info "Starting initial processing with $NUM_WORKERS workers"
-tail -n +2 "$INPUT_FILE" | parallel --colsep "$DELIMITER" --jobs "$NUM_WORKERS" --env process_sample,log_debug,log_info,append_with_lock,validate_fastq,run_command,run_command_with_output,convert_metaphlan_to_counts,merge_profiles,final_validation_and_merge,generate_quality_profiles process_sample {1} {2} {3}
+# Create wrapper script for GNU Parallel
+cat << 'EOF' > /tmp/process_sample_wrapper.sh
+#!/bin/bash
+BIOPROJECT="$1"
+RUN_ACCESSION="$2"
+SAMPLE_TYPE="$3"
+export FASTQ_DIR="$4"
+export DEBUG_FILE="$5"
+export DEBUG_LOCK="$6"
+export COMPLETED_FILE="$7"
+export COMPLETED_LOCK="$8"
+export FAILED_FILE="$9"
+export FAILED_LOCK="${10}"
+export THREADS_PER_WORKER="${11}"
+export MOTUS_TAX_LEVEL="${12}"
+export INPUT_FILE="${13}"
+export LOG_LEVEL="${14}"
+export TMP_BASE="${15}"
+export SLURM_JOB_ID="${16}"
+export DELIMITER="${17}"
+export DADA2_ENV_NAME="${18}"
+export MOTUS_ENV_NAME="${19}"
+export MPA_ENV_NAME="${20}"
+export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts
+process_sample "$BIOPROJECT" "$RUN_ACCESSION" "$SAMPLE_TYPE"
+EOF
+chmod +x /tmp/process_sample_wrapper.sh
 
-# Run final validation and merging
+# Process input file
+log_info "Starting initial processing with $NUM_WORKERS workers"
+log_debug "Parallel command: tail -n +2 \"$INPUT_FILE\" | parallel --colsep \"$DELIMITER\" --jobs $NUM_WORKERS --halt now,fail=1 /tmp/process_sample_wrapper.sh {1} {2} {3} \"$FASTQ_DIR\" \"$DEBUG_FILE\" \"$DEBUG_LOCK\" \"$COMPLETED_FILE\" \"$COMPLETED_LOCK\" \"$FAILED_FILE\" \"$FAILED_LOCK\" \"$THREADS_PER_WORKER\" \"$MOTUS_TAX_LEVEL\" \"$INPUT_FILE\" \"$LOG_LEVEL\" \"$TMP_BASE\" \"$SLURM_JOB_ID\" \"$DELIMITER\" \"$DADA2_ENV_NAME\" \"$MOTUS_ENV_NAME\" \"$MPA_ENV_NAME\""
+tail -n +2 "$INPUT_FILE" | parallel --colsep "$DELIMITER" --jobs "$NUM_WORKERS" --halt now,fail=1 /tmp/process_sample_wrapper.sh {1} {2} {3} "$FASTQ_DIR" "$DEBUG_FILE" "$DEBUG_LOCK" "$COMPLETED_FILE" "$COMPLETED_LOCK" "$FAILED_FILE" "$FAILED_LOCK" "$THREADS_PER_WORKER" "$MOTUS_TAX_LEVEL" "$INPUT_FILE" "$LOG_LEVEL" "$TMP_BASE" "$SLURM_JOB_ID" "$DELIMITER" "$DADA2_ENV_NAME" "$MOTUS_ENV_NAME" "$MPA_ENV_NAME"
+
+# Clean up wrapper
+rm -f /tmp/process_sample_wrapper.sh
+
+# Final validation and merging
 final_validation_and_merge
 
 log_info "All processing, validation, and merging complete."
