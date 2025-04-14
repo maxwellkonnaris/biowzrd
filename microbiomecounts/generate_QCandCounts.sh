@@ -26,6 +26,10 @@ LOG_LEVEL="INFO"  # Adjustable log level: INFO, DEBUG
 TMP_BASE="${SCRATCH:-/scratch}"  # Prefer $SCRATCH, fall back to /scratch
 RDP_DATABASE="rdp_19_toGenus_trainset.fa.gz"
 QUALITY_PROFILE_DIR="quality_profiles"
+# Default micromamba environment paths or names
+DEFAULT_DADA2_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/dada2"
+DEFAULT_MOTUS_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/motus"
+DEFAULT_MPA_ENV="/storage/work/mak6930/applicationstorage/micromamba/envs/mpa"
 
 # Cleanup function for lock directory
 cleanup() {
@@ -34,13 +38,16 @@ cleanup() {
 trap cleanup EXIT
 
 # Parse command-line arguments
-while getopts ":i:d:w:k:q" opt; do
+while getopts ":i:d:w:k:qa:m:p:" opt; do
   case $opt in
     i) INPUT_FILE="$OPTARG" ;;
     d) FASTQ_DIR="$OPTARG" ;;
     w) NUM_WORKERS="$OPTARG" ;;
     k) MOTUS_TAX_LEVEL="$OPTARG" ;;
     q) QUALITY_CHECK="true" ;;
+    a) DADA2_ENV="$OPTARG" ;;
+    m) MOTUS_ENV="$OPTARG" ;;
+    p) MPA_ENV="$OPTARG" ;;
     \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
   esac
 done
@@ -49,27 +56,48 @@ done
 FASTQ_DIR="${FASTQ_DIR:-$DEFAULT_DIR}"
 NUM_WORKERS="${NUM_WORKERS:-$DEFAULT_WORKERS}"
 MOTUS_TAX_LEVEL="${MOTUS_TAX_LEVEL:-$DEFAULT_MOTUS_TAX_LEVEL}"
+DADA2_ENV="${DADA2_ENV:-$DEFAULT_DADA2_ENV}"
+MOTUS_ENV="${MOTUS_ENV:-$DEFAULT_MOTUS_ENV}"
+MPA_ENV="${MPA_ENV:-$DEFAULT_MPA_ENV}"
 
 # Validate micromamba and environments
 if ! command -v micromamba &>/dev/null; then
   echo "Error: micromamba not found"
   exit 1
 fi
-for env in dada2 mpa motus; do
-  if ! micromamba env list | grep -q "^$env "; then
-    echo "Error: micromamba environment $env not found"
+
+# Function to check if an environment exists
+check_env() {
+  local env="$1"
+  local env_name="$2"
+  # If env is a path, check if it exists as a directory
+  if [[ -d "$env" ]]; then
+    return 0
+  # Otherwise, assume it's a name and check micromamba env list
+  elif micromamba env list | grep -qE "^[[:space:]]*$env[[:space:]]"; then
+    return 0
+  else
+    echo "Error: micromamba environment $env_name ($env) not found"
     exit 1
   fi
-done
+}
+
+# Validate each environment
+check_env "$DADA2_ENV" "dada2"
+check_env "$MOTUS_ENV" "motus"
+check_env "$MPA_ENV" "mpa"
 
 # Validate input file and directories
 if [[ -z "$INPUT_FILE" ]]; then
-  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [-q]"
+  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [-q] [-a <dada2_env>] [-m <motus_env>] [-p <mpa_env>]"
   echo "  <input>: CSV, TSV, or TXT file with columns: Bioproject,RunAccession,SequencingType"
   echo "  <fastq_directory>: Directory containing FASTQ files (default: $DEFAULT_DIR)"
   echo "  <num_workers>: Number of parallel workers (default: $DEFAULT_WORKERS)"
   echo "  <motus_tax_level>: Taxonomic level for mOTUs (e.g., mOTU, phylum; default: $DEFAULT_MOTUS_TAX_LEVEL)"
   echo "  -q: Generate quality profiles for FASTQs before processing"
+  echo "  <dada2_env>: DADA2 environment path or name (default: $DEFAULT_DADA2_ENV)"
+  echo "  <motus_env>: mOTUs environment path or name (default: $DEFAULT_MOTUS_ENV)"
+  echo "  <mpa_env>: MetaPhlAn environment path or name (default: $DEFAULT_MPA_ENV)"
   exit 1
 fi
 
@@ -249,10 +277,10 @@ generate_quality_profiles() {
       local output_pdf="${QUALITY_PROFILE_DIR}/${accession}_quality.pdf"
       if [[ -f "$fastq1" && ! -f "$output_pdf" ]]; then
         if [[ -f "$fastq2" ]]; then
-          run_command "micromamba run -n dada2 Rscript -e 'library(dada2); pdf(\"$output_pdf\"); plotQualityProfile(c(\"$fastq1\", \"$fastq2\")); dev.off()'" \
+          run_command "micromamba run -n \"$DADA2_ENV\" Rscript -e 'library(dada2); pdf(\"$output_pdf\"); plotQualityProfile(c(\"$fastq1\", \"$fastq2\")); dev.off()'" \
             "[quality profile] Failed for $accession" || log_debug "Failed to generate quality profile for $accession"
         else
-          run_command "micromamba run -n dada2 Rscript -e 'library(dada2); pdf(\"$output_pdf\"); plotQualityProfile(\"$fastq1\"); dev.off()'" \
+          run_command "micromamba run -n \"$DADA2_ENV\" Rscript -e 'library(dada2); pdf(\"$output_pdf\"); plotQualityProfile(\"$fastq1\"); dev.off()'" \
             "[quality profile] Failed for $accession" || log_debug "Failed to generate quality profile for $accession"
         fi
         log_info "Generated quality profile for $accession in $output_pdf"
@@ -337,7 +365,7 @@ merge_profiles() {
   if [[ "$all_complete" == "true" && ${#profile_files[@]} -gt 0 ]]; then
     if [[ "$tool" == "metaphlan" && ${#profile_files[@]} -gt 1 ]]; then
       local input_list="${profile_files[*]}"
-      run_command "micromamba run -n mpa merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
+      run_command "micromamba run -n \"$MPA_ENV\" merge_metaphlan_tables.py $input_list > \"$merged_file\"" \
         "[metaphlan merge] Failed for $bioproject" || return 1
       log_debug "Merged MetaPhlAn profiles for $bioproject into $merged_file"
     elif [[ "$tool" == "metaphlan" && ${#profile_files[@]} -eq 1 ]]; then
@@ -345,7 +373,7 @@ merge_profiles() {
       log_debug "Copied single metaphlan profile for $bioproject to $merged_file"
     elif [[ "$tool" == "motus" && ${#profile_files[@]} -gt 1 ]]; then
       local input_list=$(printf "%s," "${profile_files[@]}" | sed 's/,$//')
-      run_command "micromamba run -n motus motus merge -i \"$input_list\" -o \"$merged_file\"" \
+      run_command "micromamba run -n \"$MOTUS_ENV\" motus merge -i \"$input_list\" -o \"$merged_file\"" \
         "[motus merge] Failed for $bioproject" || return 1
       log_debug "Merged mOTUs profiles for $bioproject into $merged_file"
     elif [[ "$tool" == "motus" && ${#profile_files[@]} -eq 1 ]]; then
@@ -353,8 +381,8 @@ merge_profiles() {
       log_debug "Copied single motus profile for $bioproject to $merged_file"
     elif [[ "$tool" == "dada2" ]]; then
       local input_list="${bioproject} ${profile_files[*]}"
-      run_command "micromamba run -n dada2 Rscript merge_dada2.R $input_list" \
-        "[dada2 merge] Failed for $bioproject" || return 1
+      run_command "micromamba run -n \"$DADA2_ENV\" Rscript merge_dada2.R $input_list" \
+        "[dada2 merge] Forgotten for $bioproject" || return 1
       log_debug "Merged and processed DADA2 sequence tables for $bioproject"
     fi
   else
@@ -459,41 +487,42 @@ process_sample() {
   if [[ "$SAMPLE_TYPE" == "16S" ]]; then
     if [[ -f "$PAIRED_FASTQ" ]]; then
       if [[ ! -f "$QC1" || ! -f "$QC2" ]]; then
-        run_command "micromamba run -n dada2 fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER" \
+        run_command "micromamba run -n \"$DADA2_ENV\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER" \
           "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
       fi
       if validate_fastq "$QC1" && validate_fastq "$QC2" && [[ ! -f "$DADA2_SEQTAB" ]]; then
-        run_command "(cd \"$TMP_DIR\" && micromamba run -n dada2 Rscript run_dada2_partial.R \"$QC1\" \"$QC2\")" \
+        run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV\" Rscript run_dada2_partial.R \"$QC1\" \"$QC2\")" \
           "[dada2] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
         mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB" 2>/dev/null || log_debug "No seqtab output for $RUN_ACCESSION"
       fi
     else
       if [[ ! -f "$QC" ]]; then
-        run_command "micromamba run -n dada2 fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
+        run_command "micromamba run -n \"$DADA2_ENV\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
           "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
       fi
       if validate_fastq "$QC" && [[ ! -f "$DADA2_SEQTAB" ]]; then
-        run_command "(cd \"$TMP_DIR\" && micromamba run -n dada2 Rscript run_dada2_partial.R \"$QC\")" \
+        run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV\" Rscript run_dada2_partial.R \"$QC\")" \
           "[dada2] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
         mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB" 2>/dev/null || log_debug "No seqtab output for $RUN_ACCESSION"
       fi
     fi
   elif [[ "$SAMPLE_TYPE" == "meta" ]]; then
     if [[ ! -f "$QC" ]]; then
-      run_command "micromamba run -n mpa fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
+      run_command "micromamba run -n \"$MPA_ENV\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER" \
         "[fastp] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
     if validate_fastq "$QC" && [[ ! -f "$METAPHLAN_PROFILE" ]]; then
-      run_command_with_output "micromamba run -n mpa metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
+      run_command_with_output "micromamba run -n \"$MPA_ENV\" metaphlan \"$QC\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\"" \
         "[metaphlan] Failed for $RUN_ACCESSION" "$METAPHLAN_LOG" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
     if validate_fastq "$QC" && [[ -f "$METAPHLAN_PROFILE" && ! -f "$METAPHLAN_COUNTS" ]]; then
       convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS" || \
-        { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
-    fi
-    if validate_fastq "$QC" && [[ ! -f "$MOTUS_PROFILE" ]]; then
-      run_command "micromamba run -n motus motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-        "[motus] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
+        { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP(tty) 
+      append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"
+      if validate_fastq "$QC" && [[ ! -f "$MOTUS_PROFILE" ]]; then
+        run_command "micromamba run -n \"$MOTUS_ENV\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+          "[motus] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
+      fi
     fi
   else
     log_debug "Invalid sample type: $SAMPLE_TYPE for $RUN_ACCESSION"
@@ -566,7 +595,7 @@ final_validation_and_merge() {
 
 # Export functions and variables for GNU Parallel
 export -f process_sample log_debug log_info append_with_lock validate_fastq run_command run_command_with_output convert_metaphlan_to_counts merge_profiles final_validation_and_merge generate_quality_profiles
-export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID DELIMITER QUALITY_PROFILE_DIR
+export FASTQ_DIR DEBUG_FILE DEBUG_LOCK COMPLETED_FILE COMPLETED_LOCK FAILED_FILE FAILED_LOCK THREADS_PER_WORKER MOTUS_TAX_LEVEL INPUT_FILE COMPLETED_SAMPLES LOG_LEVEL TMP_BASE SLURM_JOB_ID DELIMITER QUALITY_PROFILE_DIR DADA2_ENV MOTUS_ENV MPA_ENV
 
 # Initialize lock files
 touch "$DEBUG_LOCK" "$COMPLETED_LOCK" "$FAILED_LOCK"
