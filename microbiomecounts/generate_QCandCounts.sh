@@ -5,8 +5,8 @@
 #SBATCH --time=48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=300G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=100G
 #SBATCH --account=one
 #SBATCH --mail-user=mak6930@psu.edu
 #SBATCH --mail-type=END,FAIL
@@ -382,7 +382,7 @@ merge_profiles() {
     elif [[ "$tool" == "dada2" ]]; then
       local input_list="${bioproject} ${profile_files[*]}"
       run_command "micromamba run -n \"$DADA2_ENV\" Rscript merge_dada2.R $input_list" \
-        "[dada2 merge] Forgotten for $bioproject" || return 1
+        "[dada2 merge] Failed for $bioproject" || return 1
       log_debug "Merged and processed DADA2 sequence tables for $bioproject"
     fi
   else
@@ -517,12 +517,11 @@ process_sample() {
     fi
     if validate_fastq "$QC" && [[ -f "$METAPHLAN_PROFILE" && ! -f "$METAPHLAN_COUNTS" ]]; then
       convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS" || \
-        { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP(tty) 
-      append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"
-      if validate_fastq "$QC" && [[ ! -f "$MOTUS_PROFILE" ]]; then
-        run_command "micromamba run -n \"$MOTUS_ENV\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-          "[motus] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
-      fi
+        { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
+    fi
+    if validate_fastq "$QC" && [[ ! -f "$MOTUS_PROFILE" ]]; then
+      run_command "micromamba run -n \"$MOTUS_ENV\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+        "[motus] Failed for $RUN_ACCESSION" || { append_with_lock "$RUN_ACCESSION" "$FAILED_FILE" "$FAILED_LOCK"; rm -rf "$TMP_DIR"; return 1; }
     fi
   else
     log_debug "Invalid sample type: $SAMPLE_TYPE for $RUN_ACCESSION"
