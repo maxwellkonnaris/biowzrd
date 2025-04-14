@@ -26,7 +26,7 @@ FAILED_LOCK="$LOCK_DIR/failed.lock"
 INPUT_LOCK="$LOCK_DIR/input.lock"
 DEFAULT_WORKERS=4
 DEFAULT_MOTUS_TAX_LEVEL="mOTU"
-LOG_LEVEL="DEBUG"
+LOG_LEVEL="INFO"
 TMP_BASE="$PWD"
 RDP_DATABASE="rdp_19_toGenus_trainset.fa.gz"
 QUALITY_PROFILE_DIR="quality_profiles"
@@ -83,7 +83,9 @@ while getopts ":i:d:w:k:qa:m:p:" opt; do
     a) DADA2_ENV="$OPTARG" ;;
     m) MOTUS_ENV="$OPTARG" ;;
     p) MPA_ENV="$OPTARG" ;;
-    \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
+    --debug) LOG_LEVEL="DEBUG"; shift ;;
+    -*) echo "Invalid option: $1" >&2; exit 1 ;;
+    *) echo "Unexpected argument: $1" >&2; exit 1 ;;
   esac
 done
 
@@ -133,7 +135,7 @@ MPA_ENV_NAME="${mpa_NAME}"
 
 # Validate input file
 if [[ -z "$INPUT_FILE" ]]; then
-  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [-q] [-a <dada2_env>] [-m <motus_env>] [-p <mpa_env>]"
+  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [-q] [-a <dada2_env>] [-m <motus_env>] [-p <mpa_env>] [--debug]"
   exit 1
 fi
 
