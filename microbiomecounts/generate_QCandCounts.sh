@@ -14,7 +14,7 @@ export SHELL=/bin/bash
 #SBATCH --mail-type=END,FAIL
 
 # Purpose: SLURM script for processing 16S and metagenomic FASTQ files 
-#          using fastp, DADA2, MetaPhlAn, and mOTUs.
+#          using fastp (optional), DADA2, MetaPhlAn, and mOTUs.
 # Dependencies: micromamba, fastp, R (DADA2), MetaPhlAn, mOTUs, GNU parallel.
 # Tip: Use --debug with a small dataset to test the pipeline.
 
@@ -38,6 +38,7 @@ INPUT_LOCK="$LOCK_DIR/input.lock"
 DEFAULT_WORKERS=4
 DEFAULT_MOTUS_TAX_LEVEL="mOTU"
 LOG_LEVEL="INFO"
+QC_ENABLED="false"
 TMP_BASE="$PWD"
 RDP_DATABASE="rdp_19_toGenus_trainset.fa.gz"
 
@@ -114,7 +115,8 @@ while [[ $# -gt 0 ]]; do
     -a) DADA2_ENV="$2"; shift 2 ;;
     -m) MOTUS_ENV="$2"; shift 2 ;;
     -p) MPA_ENV="$2"; shift 2 ;;
-    --debug) LOG_LEVEL="DEBUG"; shift ;;
+    --qc) QC_ENABLED="true"; shift ;;
+    --debug) LOG_LEVEL="DEBUG"; QC_ENABLED="true"; shift ;;
     -*) echo "Invalid option: $1" >&2; exit 1 ;;
     *) echo "Unexpected argument: $1" >&2; exit 1 ;;
   esac
@@ -167,7 +169,7 @@ MPA_ENV_NAME="${mpa_NAME}"
 # Validate input file presence
 ########################################
 if [[ -z "$INPUT_FILE" ]]; then
-  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] ..."
+  echo "Usage: $0 -i <input.tsv|input.csv|input.txt> [-d <fastq_directory>] [-w <num_workers>] [-k <motus_tax_level>] [--qc] [--debug] ..."
   echo "Tip: Use --debug with a small dataset to test the pipeline."
   exit 1
 fi
@@ -682,10 +684,11 @@ process_sample() {
     }
   fi
 
-  ################################
-  # 16S Workflow
-  ################################
-  if [[ "$SAMPLE_TYPE" == "16S" ]]; then
+  # Decide whether to run fastp
+  local FASTQ_TO_USE_1="$INPUT_FASTQ"
+  local FASTQ_TO_USE_2="$PAIRED_FASTQ"
+  if [[ "$QC_ENABLED" == "true" ]]; then
+    log_info "Running fastp QC for $RUN_ACCESSION"
     local fastp_status
     fastp_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $6}' "$INPUT_FILE")
     if [[ "$fastp_status" != "1" ]]; then
@@ -694,6 +697,8 @@ process_sample() {
           "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2"
         if [[ $? -eq 0 && -f "$QC1" && -f "$QC2" ]]; then
           update_checkpoint "$RUN_ACCESSION" "Fastp" "1"
+          FASTQ_TO_USE_1="$QC1"
+          FASTQ_TO_USE_2="$QC2"
         else
           log_info "Error: fastp failed or missing outputs for $RUN_ACCESSION"
           append_with_lock "$RUN_ACCESSION:fastp failed or missing $QC1/$QC2" "$FAILED_FILE" "$FAILED_LOCK"
@@ -705,6 +710,7 @@ process_sample() {
           "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC"
         if [[ $? -eq 0 && -f "$QC" ]]; then
           update_checkpoint "$RUN_ACCESSION" "Fastp" "1"
+          FASTQ_TO_USE_1="$QC"
         else
           log_info "Error: fastp failed or missing output for $RUN_ACCESSION"
           append_with_lock "$RUN_ACCESSION:fastp failed or missing $QC" "$FAILED_FILE" "$FAILED_LOCK"
@@ -714,11 +720,20 @@ process_sample() {
       fi
     else
       log_debug "Skipping fastp for $RUN_ACCESSION: checkpoint set"
+      FASTQ_TO_USE_1="$QC1"
+      FASTQ_TO_USE_2="$QC2"
     fi
+  else
+    log_info "Skipping fastp for $RUN_ACCESSION"
+  fi
 
-    if [[ -n "$PAIRED_FASTQ" ]]; then
-      run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC1\" \"$QC2\")" \
-        "[dada2] Process for $RUN_ACCESSION" "$QC1,$QC2" "$DADA2_SEQTAB"
+  ################################
+  # 16S Workflow
+  ################################
+  if [[ "$SAMPLE_TYPE" == "16S" ]]; then
+    if [[ -n "$FASTQ_TO_USE_2" ]]; then
+      run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$FASTQ_TO_USE_1\" \"$FASTQ_TO_USE_2\")" \
+        "[dada2] Process for $RUN_ACCESSION" "$FASTQ_TO_USE_1,$FASTQ_TO_USE_2" "$DADA2_SEQTAB"
       if [[ $? -eq 0 && -f "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" ]]; then
         mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB"
         if [[ -f "$DADA2_SEQTAB" ]]; then
@@ -736,8 +751,8 @@ process_sample() {
         return 1
       fi
     else
-      run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$QC\")" \
-        "[dada2] Process for $RUN_ACCESSION" "$QC" "$DADA2_SEQTAB"
+      run_command "(cd \"$TMP_DIR\" && micromamba run -n \"$DADA2_ENV_NAME\" Rscript run_dada2_partial.R \"$FASTQ_TO_USE_1\")" \
+        "[dada2] Process for $RUN_ACCESSION" "$FASTQ_TO_USE_1" "$DADA2_SEQTAB"
       if [[ $? -eq 0 && -f "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" ]]; then
         mv "$TMP_DIR/seqtab_${RUN_ACCESSION}.rds" "$DADA2_SEQTAB"
         if [[ -f "$DADA2_SEQTAB" ]]; then
@@ -760,48 +775,13 @@ process_sample() {
   # Metagenomic Workflow
   ################################
   elif [[ "$SAMPLE_TYPE" == "meta" ]]; then
-    local fastp_status
-    fastp_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $6}' "$INPUT_FILE")
-    if [[ "$fastp_status" != "1" ]]; then
-      if [[ -n "$PAIRED_FASTQ" ]]; then
-        run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER -Q -A -L" \
-          "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2"
-        if [[ $? -eq 0 && -f "$QC1" && -f "$QC2" ]]; then
-          update_checkpoint "$RUN_ACCESSION" "Fastp" "1"
-        else
-          log_info "Error: fastp failed or missing outputs for $RUN_ACCESSION"
-          append_with_lock "$RUN_ACCESSION:fastp failed or missing $QC1/$QC2" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
-        fi
-      else
-        run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER -Q -A -L" \
-          "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ" "$QC"
-        if [[ $? -eq 0 && -f "$QC" ]]; then
-          update_checkpoint "$RUN_ACCESSION" "Fastp" "1"
-        else
-          log_info "Error: fastp failed or missing output for $RUN_ACCESSION"
-          append_with_lock "$RUN_ACCESSION:fastp failed or missing $QC" "$FAILED_FILE" "$FAILED_LOCK"
-          rm -rf "$TMP_DIR"
-          return 1
-        fi
-      fi
-    else
-      log_debug "Skipping fastp for $RUN_ACCESSION: checkpoint set"
-    fi
-
-    local FASTQ_TO_USE
-    if [[ -n "$PAIRED_FASTQ" ]]; then
-      FASTQ_TO_USE="$QC1,$QC2"
-    else
-      FASTQ_TO_USE="$QC"
-    fi
-
     local metaphlan_status
     metaphlan_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $9}' "$INPUT_FILE")
     if [[ "$metaphlan_status" != "1" ]]; then
-      run_command "micromamba run -n \"$MPA_ENV_NAME\" metaphlan \"$FASTQ_TO_USE\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\" 2> \"$METAPHLAN_LOG\"" \
-        "[metaphlan] Process for $RUN_ACCESSION" "$FASTQ_TO_USE" "$METAPHLAN_PROFILE"
+      local FASTQ_INPUT="$FASTQ_TO_USE_1"
+      [[ -n "$FASTQ_TO_USE_2" ]] && FASTQ_INPUT="$FASTQ_TO_USE_1,$FASTQ_TO_USE_2"
+      run_command "micromamba run -n \"$MPA_ENV_NAME\" metaphlan \"$FASTQ_INPUT\" --input_type fastq --unclassified_estimation --nproc $THREADS_PER_WORKER --bowtie2out \"$METAPHLAN_BOWTIE\" -o \"$METAPHLAN_PROFILE\" 2> \"$METAPHLAN_LOG\"" \
+        "[metaphlan] Process for $RUN_ACCESSION" "$FASTQ_INPUT" "$METAPHLAN_PROFILE"
       if [[ $? -eq 0 && -f "$METAPHLAN_PROFILE" ]]; then
         convert_metaphlan_to_counts "$METAPHLAN_LOG" "$METAPHLAN_PROFILE" "$METAPHLAN_COUNTS"
         if [[ -f "$METAPHLAN_COUNTS" ]]; then
@@ -825,9 +805,9 @@ process_sample() {
     local motus_status
     motus_status=$(awk -F"$DELIMITER" -v acc="$RUN_ACCESSION" '$2 == acc {print $8}' "$INPUT_FILE")
     if [[ "$motus_status" != "1" ]]; then
-      if [[ -n "$PAIRED_FASTQ" ]]; then
-        run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -f \"$QC1\" -r \"$QC2\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-          "[motus] Process for $RUN_ACCESSION" "$QC1,$QC2" "$MOTUS_PROFILE"
+      if [[ -n "$FASTQ_TO_USE_2" ]]; then
+        run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -f \"$FASTQ_TO_USE_1\" -r \"$FASTQ_TO_USE_2\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+          "[motus] Process for $RUN_ACCESSION" "$FASTQ_TO_USE_1,$FASTQ_TO_USE_2" "$MOTUS_PROFILE"
         if [[ $? -eq 0 && -f "$MOTUS_PROFILE" ]]; then
           update_checkpoint "$RUN_ACCESSION" "Motus" "1"
         else
@@ -837,8 +817,8 @@ process_sample() {
           return 1
         fi
       else
-        run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -s \"$QC\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
-          "[motus] Process for $RUN_ACCESSION" "$QC" "$MOTUS_PROFILE"
+        run_command "micromamba run -n \"$MOTUS_ENV_NAME\" motus profile -s \"$FASTQ_TO_USE_1\" -o \"$MOTUS_PROFILE\" -t $THREADS_PER_WORKER -c -k $MOTUS_TAX_LEVEL" \
+          "[motus] Process for $RUN_ACCESSION" "$FASTQ_TO_USE_1" "$MOTUS_PROFILE"
         if [[ $? -eq 0 && -f "$MOTUS_PROFILE" ]]; then
           update_checkpoint "$RUN_ACCESSION" "Motus" "1"
         else
