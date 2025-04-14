@@ -800,7 +800,6 @@ process_sample() {
       if [[ "$fastp_status" != "1" ]]; then
         if [[ -n "$PAIRED_FASTQ" ]]; then
           run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -I \"$PAIRED_FASTQ\" -o \"$QC1\" -O \"$QC2\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
-            "[fastp] Process,
             "[fastp] Process for $RUN_ACCESSION" "$INPUT_FASTQ,$PAIRED_FASTQ" "$QC1,$QC2"
         else
           run_command "micromamba run -n \"$MPA_ENV_NAME\" fastp -i \"$INPUT_FASTQ\" -o \"$QC\" -w $THREADS_PER_WORKER --disable_quality_filtering --empty_output_tabular" \
