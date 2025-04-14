@@ -51,6 +51,7 @@ except ImportError:
     tqdm = None
     print("Warning: tqdm not installed. Progress bar disabled. Install with 'pip install tqdm' for progress display.", flush=True)
 
+
 def safe_entrez_request(func, *args, max_retries=3, verbose=False, **kwargs):
     """Helper to gracefully retry Entrez calls on HTTP 429 or transient failures."""
     for attempt in range(max_retries):
@@ -66,6 +67,7 @@ def safe_entrez_request(func, *args, max_retries=3, verbose=False, **kwargs):
             else:
                 raise e
     raise RuntimeError(f"Entrez request failed after {max_retries} retries.")
+
 
 def safe_requests_get(url, params=None, max_retries=3, timeout=30, verbose=False):
     """Helper to retry requests.get on transient failures."""
@@ -89,6 +91,7 @@ def safe_requests_get(url, params=None, max_retries=3, timeout=30, verbose=False
                 print(f"Request error: {e}. Retrying in {wait_time}s...", flush=True)
             time.sleep(wait_time)
     raise RuntimeError(f"Requests failed after {max_retries} retries.")
+
 
 def fetch_runs_ena(accession, verbose=False):
     """Query ENA Filereport for run_accession."""
@@ -114,8 +117,18 @@ def fetch_runs_ena(accession, verbose=False):
                 print(f"ENA fetch failed for {accession}: {e}", flush=True)
         return []
 
+
 def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
-    """Fetch run accessions from NCBI SRA for BioProject (PRJNA/SRP), including SRS and XML RUN_SET."""
+    """
+    Fetch run accessions from NCBI SRA for BioProject (e.g. PRJNA545312, or SRP),
+    including runinfo (CSV) and fallback to XML RUN_SET. We do not assume that
+    len(id_list) is the same as the total run count, because each SRA 'ID' can
+    contain multiple runs.
+
+    Returns:
+      - runs: list of unique SRR/ERR/DRR run accessions
+      - expected_runs: best guess for total runs found (using runinfo + XML)
+    """
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
@@ -123,66 +136,94 @@ def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
     try:
         if verbose:
             print(f" - Searching SRA for BioProject {accession}...", flush=True)
+        # ESearch for all SRA IDs that are under the given BioProject
         handle = safe_entrez_request(
             Entrez.esearch,
             db="sra",
             term=f"{accession}[BioProject]",
-            retmax=100000,
+            retmax=9999999,    # Try large retmax to retrieve all
+            usehistory="y",    # We'll do chunked EFetch with WebEnv
             verbose=verbose
         )
         record = Entrez.read(handle)
         handle.close()
-        id_list = record.get("IdList", [])
-        if not id_list:
+
+        # We get a WebEnv + QueryKey for chunked efetch
+        webenv = record.get("WebEnv", "")
+        query_key = record.get("QueryKey", "")
+        count_str = record.get("Count", "0")
+        try:
+            total_ids = int(count_str)
+        except ValueError:
+            total_ids = 0
+
+        if total_ids == 0:
             if verbose:
                 print(f" - No SRA experiments found for {accession}.", flush=True)
             return [], 0
 
-        expected_runs = len(id_list)
-        runs = []
-        batch_size = 200
-        for i in range(0, len(id_list), batch_size):
-            batch_ids = id_list[i:i + batch_size]
+        runs = set()
+        BATCH_SIZE = 200
+
+        # Chunked fetch for runinfo
+        if verbose:
+            print(f" - Found {total_ids} SRA record IDs for {accession}. Fetching runinfo in chunks...", flush=True)
+
+        for start in range(0, total_ids, BATCH_SIZE):
             handle = safe_entrez_request(
                 Entrez.efetch,
                 db="sra",
-                id=",".join(batch_ids),
+                query_key=query_key,
+                WebEnv=webenv,
                 rettype="runinfo",
                 retmode="text",
+                retstart=start,
+                retmax=BATCH_SIZE,
                 verbose=verbose
             )
-            text = handle.read()
+            text_data = handle.read()
             handle.close()
 
-            if isinstance(text, bytes):
-                text = text.decode("utf-8")
-            lines = text.strip().split("\n")
+            if isinstance(text_data, bytes):
+                text_data = text_data.decode("utf-8")
+
+            lines = text_data.strip().split("\n")
             if len(lines) < 2:
+                # Possibly empty or partial chunk
                 continue
 
+            # First line is the header (comma-delimited)
             header = lines[0].split(",")
             try:
                 run_index = header.index("Run")
             except ValueError:
-                run_index = 0
+                run_index = None
 
             for line in lines[1:]:
                 cols = line.split(",")
-                if len(cols) > run_index and cols[run_index].strip():
-                    runs.append(cols[run_index].strip())
+                if run_index is not None and run_index < len(cols):
+                    run_acc = cols[run_index].strip()
+                    if run_acc:
+                        runs.add(run_acc)
 
+        # If we have any runs from runinfo, that is likely the best measure
+        runinfo_count = len(runs)
+
+        # Next, do the XML approach to see if we find additional runs or confirm
         if verbose:
-            print(f" - Checking XML for SRS and runs in {accession}...", flush=True)
-        srs_ids = []
-        xml_runs = []
-        for i in range(0, len(id_list), batch_size):
-            batch_ids = id_list[i:i + batch_size]
+            print(f" - Checking XML for {accession} in chunks (total IDs: {total_ids})...", flush=True)
+
+        xml_runs = set()
+        for start in range(0, total_ids, BATCH_SIZE):
             handle = safe_entrez_request(
                 Entrez.efetch,
                 db="sra",
-                id=",".join(batch_ids),
+                query_key=query_key,
+                WebEnv=webenv,
                 rettype="full",
                 retmode="xml",
+                retstart=start,
+                retmax=BATCH_SIZE,
                 verbose=verbose
             )
             xml_text = handle.read()
@@ -191,82 +232,46 @@ def get_run_accessions_ncbi(accession, email, api_key, verbose=False):
             if isinstance(xml_text, bytes):
                 xml_text = xml_text.decode("utf-8")
 
+            # Parse XML
             try:
                 root = ET.fromstring(xml_text)
                 for exp_pkg in root.findall(".//EXPERIMENT_PACKAGE"):
-                    sample = exp_pkg.find(".//SAMPLE/IDENTIFIERS/EXTERNAL_ID")
-                    if sample is not None and sample.text and sample.text.startswith("SRS"):
-                        srs_ids.append(sample.text)
                     run_set = exp_pkg.find(".//RUN_SET")
                     if run_set is not None:
                         for run in run_set.findall("RUN"):
                             run_acc = run.get("accession")
                             if run_acc and run_acc.startswith(("SRR", "ERR", "DRR")):
-                                xml_runs.append(run_acc)
+                                xml_runs.add(run_acc)
             except ET.ParseError as e:
                 print(f"XML parsing failed for {accession}: {e}", flush=True)
                 continue
 
         if xml_runs:
-            if verbose:
-                print(f" - Found runs in XML RUN_SET for {accession}.", flush=True)
-            runs.extend(xml_runs)
-            expected_runs = max(expected_runs, len(set(xml_runs)))
+            runs.update(xml_runs)
 
-        if srs_ids:
-            if verbose:
-                print(f" - Found SRS for {accession}. Fetching runs...", flush=True)
-            for srs in srs_ids:
-                handle = safe_entrez_request(
-                    Entrez.esearch,
-                    db="sra",
-                    term=f"{srs}[Sample]",
-                    retmax=100000,
-                    verbose=verbose
-                )
-                srs_record = Entrez.read(handle)
-                handle.close()
-                srs_id_list = srs_record.get("IdList", [])
-                if srs_id_list:
-                    for j in range(0, len(srs_id_list), batch_size):
-                        srs_batch_ids = srs_id_list[j:j + batch_size]
-                        handle = safe_entrez_request(
-                            Entrez.efetch,
-                            db="sra",
-                            id=",".join(srs_batch_ids),
-                            rettype="runinfo",
-                            retmode="text",
-                            verbose=verbose
-                        )
-                        srs_text = handle.read()
-                        handle.close()
+        # "expected_runs" is simply the total unique runs we found from
+        # runinfo and/or the XML. There's no guaranteed official "expected" count,
+        # but we use the runinfo count as a baseline.
+        # IMPORTANT CHANGE: We do not rely on ID count from eSearch for "expected" 
+        # because each SRA record can hold multiple runs.
+        expected_runs = len(runs)  # best estimate
 
-                        if isinstance(srs_text, bytes):
-                            srs_text = srs_text.decode("utf-8")
-                        srs_lines = srs_text.strip().split("\n")
-                        if len(srs_lines) < 2:
-                            continue
-
-                        srs_header = srs_lines[0].split(",")
-                        try:
-                            srs_run_index = srs_header.index("Run")
-                        except ValueError:
-                            srs_run_index = 0
-
-                        for line in srs_lines[1:]:
-                            cols = line.split(",")
-                            if len(cols) > srs_run_index and cols[srs_run_index].strip():
-                                runs.append(cols[srs_run_index].strip())
-
-        expected_runs = max(expected_runs, len(set(runs)))
-        return list(set(runs)), expected_runs
+        return sorted(runs), expected_runs
 
     except Exception as e:
         print(f"Error processing NCBI accession {accession}: {e}", flush=True)
         return [], 0
 
+
 def get_run_accessions_geo(accession, email, api_key, verbose=False):
-    """Resolve GSE to SRR."""
+    """
+    Resolve GSE to SRR.
+    1) ESearch GDS for the GSE
+    2) ELink from GDS to SRA
+    3) EFetch runinfo to parse SRRs
+
+    If no results, fallback to pysradb if installed.
+    """
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
@@ -310,6 +315,7 @@ def get_run_accessions_geo(accession, email, api_key, verbose=False):
     except Exception as e:
         print(f"Entrez failed for GEO accession {accession}: {e}", flush=True)
 
+    # If no runs found, try pysradb fallback
     if not runs and SRAweb is not None:
         db = SRAweb()
         for attempt in range(2):
@@ -320,16 +326,21 @@ def get_run_accessions_geo(accession, email, api_key, verbose=False):
                 if not df.empty and "run_accession" in df.columns:
                     runs.extend(df["run_accession"].dropna().unique().tolist())
                 break
-            except Exception as e:
+            except Exception as ex:
                 wait_time = 5 * 2 ** attempt
                 if verbose:
-                    print(f"pysradb error: {e}. Retrying in {wait_time}s...", flush=True)
+                    print(f"pysradb error: {ex}. Retrying in {wait_time}s...", flush=True)
                 time.sleep(wait_time)
 
     return list(set(runs)), 0
 
+
 def fallback_entrez_accession(accession, email, api_key, verbose=False):
-    """Fallback: Search for runs by accession[ACCN], including SRS and XML RUN_SET."""
+    """
+    Fallback: If we didn't find anything by direct approach, just do a broad
+    {accession}[ACCN] search in SRA. Then parse runinfo, parse XML, etc.
+    This can catch cases like an SRS or SRX, or a partial match.
+    """
     Entrez.email = email
     if api_key:
         Entrez.api_key = api_key
@@ -339,34 +350,46 @@ def fallback_entrez_accession(accession, email, api_key, verbose=False):
             Entrez.esearch,
             db="sra",
             term=f"{accession}[ACCN]",
-            retmax=100000,
+            retmax=9999999,
+            usehistory="y",
             verbose=verbose
         )
         record = Entrez.read(handle)
         handle.close()
-        id_list = record.get("IdList", [])
-        if not id_list:
+
+        webenv = record.get("WebEnv", "")
+        query_key = record.get("QueryKey", "")
+        count_str = record.get("Count", "0")
+        try:
+            total_ids = int(count_str)
+        except ValueError:
+            total_ids = 0
+
+        if total_ids == 0:
             return [], 0
 
-        runs = []
-        expected_runs = len(id_list)
-        batch_size = 200
-        for i in range(0, len(id_list), batch_size):
-            batch_ids = id_list[i:i + batch_size]
+        runs = set()
+        BATCH_SIZE = 200
+
+        # 1) EFetch runinfo in chunks
+        for start in range(0, total_ids, BATCH_SIZE):
             handle = safe_entrez_request(
                 Entrez.efetch,
                 db="sra",
-                id=",".join(batch_ids),
+                query_key=query_key,
+                WebEnv=webenv,
                 rettype="runinfo",
                 retmode="text",
+                retstart=start,
+                retmax=BATCH_SIZE,
                 verbose=verbose
             )
-            text = handle.read()
+            text_data = handle.read()
             handle.close()
 
-            if isinstance(text, bytes):
-                text = text.decode("utf-8")
-            lines = text.strip().split("\n")
+            if isinstance(text_data, bytes):
+                text_data = text_data.decode("utf-8")
+            lines = text_data.strip().split("\n")
             if len(lines) < 2:
                 continue
 
@@ -374,25 +397,27 @@ def fallback_entrez_accession(accession, email, api_key, verbose=False):
             try:
                 run_index = header.index("Run")
             except ValueError:
-                run_index = 0
+                run_index = None
 
             for line in lines[1:]:
                 cols = line.split(",")
-                if len(cols) > run_index and cols[run_index].strip():
-                    runs.append(cols[run_index].strip())
+                if run_index is not None and run_index < len(cols):
+                    run_acc = cols[run_index].strip()
+                    if run_acc:
+                        runs.add(run_acc)
 
-        if verbose:
-            print(f" - Checking XML for SRS and runs in fallback for {accession}...", flush=True)
-        srs_ids = []
-        xml_runs = []
-        for i in range(0, len(id_list), batch_size):
-            batch_ids = id_list[i:i + batch_size]
+        # 2) EFetch full XML in chunks
+        xml_runs = set()
+        for start in range(0, total_ids, BATCH_SIZE):
             handle = safe_entrez_request(
                 Entrez.efetch,
                 db="sra",
-                id=",".join(batch_ids),
+                query_key=query_key,
+                WebEnv=webenv,
                 rettype="full",
                 retmode="xml",
+                retstart=start,
+                retmax=BATCH_SIZE,
                 verbose=verbose
             )
             xml_text = handle.read()
@@ -404,105 +429,74 @@ def fallback_entrez_accession(accession, email, api_key, verbose=False):
             try:
                 root = ET.fromstring(xml_text)
                 for exp_pkg in root.findall(".//EXPERIMENT_PACKAGE"):
-                    sample = exp_pkg.find(".//SAMPLE/IDENTIFIERS/EXTERNAL_ID")
-                    if sample is not None and sample.text and sample.text.startswith("SRS"):
-                        srs_ids.append(sample.text)
                     run_set = exp_pkg.find(".//RUN_SET")
                     if run_set is not None:
                         for run in run_set.findall("RUN"):
                             run_acc = run.get("accession")
                             if run_acc and run_acc.startswith(("SRR", "ERR", "DRR")):
-                                xml_runs.append(run_acc)
+                                xml_runs.add(run_acc)
             except ET.ParseError as e:
                 print(f"XML parsing failed for {accession}: {e}", flush=True)
                 continue
 
         if xml_runs:
-            if verbose:
-                print(f" - Found runs in XML RUN_SET for {accession}.", flush=True)
-            runs.extend(xml_runs)
-            expected_runs = max(expected_runs, len(set(xml_runs)))
+            runs.update(xml_runs)
 
-        if srs_ids:
-            if verbose:
-                print(f" - Found SRS for {accession}. Fetching runs...", flush=True)
-            for srs in srs_ids:
-                handle = safe_entrez_request(
-                    Entrez.esearch,
-                    db="sra",
-                    term=f"{srs}[Sample]",
-                    retmax=100000,
-                    verbose=verbose
-                )
-                srs_record = Entrez.read(handle)
-                handle.close()
-                srs_id_list = srs_record.get("IdList", [])
-                if srs_id_list:
-                    for j in range(0, len(srs_id_list), batch_size):
-                        srs_batch_ids = srs_id_list[j:j + batch_size]
-                        handle = safe_entrez_request(
-                            Entrez.efetch,
-                            db="sra",
-                            id=",".join(srs_batch_ids),
-                            rettype="runinfo",
-                            retmode="text",
-                            verbose=verbose
-                        )
-                        srs_text = handle.read()
-                        handle.close()
+        expected_runs = len(runs)
+        return sorted(runs), expected_runs
 
-                        if isinstance(srs_text, bytes):
-                            srs_text = srs_text.decode("utf-8")
-                        srs_lines = srs_text.strip().split("\n")
-                        if len(srs_lines) < 2:
-                            continue
-
-                        srs_header = srs_lines[0].split(",")
-                        try:
-                            srs_run_index = srs_header.index("Run")
-                        except ValueError:
-                            srs_run_index = 0
-
-                        for line in srs_lines[1:]:
-                            cols = line.split(",")
-                            if len(cols) > srs_run_index and cols[srs_run_index].strip():
-                                runs.append(cols[srs_run_index].strip())
-
-        expected_runs = max(expected_runs, len(set(runs)))
-        return list(set(runs)), expected_runs
     except Exception as e:
         print(f"Fallback Entrez failed for {accession}: {e}", flush=True)
         return [], 0
 
+
 def process_accession(accession, email, api_key, verbose=False):
-    """Resolve accession to run accessions (SRR/ERR/DRR) and estimate expected runs."""
+    """
+    Resolve accession to run accessions (SRR/ERR/DRR) and estimate expected runs.
+    Handles:
+      - PRJNA / SRP -> get_run_accessions_ncbi + ENA
+      - GSE -> get_run_accessions_geo
+      - PRJEB / ERP / EGAS -> fetch_runs_ena
+      - single SRR/ERR/DRR -> trivial
+      - fallback if nothing found
+    """
     accession = accession.strip()
     if verbose:
         print(f"DEBUG: Processing accession {accession}", flush=True)
 
+    # If it's already a run
     if re.match(r"^(SRR|ERR|DRR)\d+$", accession):
         return [accession], 1
 
-    expected_runs = 0
+    # We'll store merges here
+    merged_runs = []
+
     if accession.startswith("PRJNA") or accession.startswith("SRP"):
+        # NCBI approach
         runs_1, ncbi_expected = get_run_accessions_ncbi(accession, email, api_key, verbose=verbose)
+        # ENA approach
         runs_2 = fetch_runs_ena(accession, verbose=verbose)
         merged_runs = list(set(runs_1 + runs_2))
+        # We assume the NCBI logic is the best indicator of "expected"
         expected_runs = ncbi_expected
+
     elif accession.startswith("GSE"):
         merged_runs, _ = get_run_accessions_geo(accession, email, api_key, verbose=verbose)
         expected_runs = len(merged_runs)
+
     elif (accession.startswith("PRJEB") or
           accession.startswith("ERP") or
           accession.startswith("EGAS")):
+        # Directly from ENA
         merged_runs = fetch_runs_ena(accession, verbose=verbose)
         expected_runs = len(merged_runs)
+
     else:
         merged_runs = []
         expected_runs = 0
 
     if merged_runs:
-        return merged_runs, expected_runs
+        return sorted(merged_runs), expected_runs
 
     if verbose:
         print(f" - No runs found in primary approach for {accession}, trying fallback_entrez_accession...", flush=True)
@@ -510,18 +504,22 @@ def process_accession(accession, email, api_key, verbose=False):
     expected_runs = max(expected_runs, fallback_expected)
     return fallback_runs, expected_runs
 
+
 def process_accession_wrapper(args):
     """Wrapper for threading: process one accession and save to temp file."""
     accession, email, api_key, verbose, temp_dir = args
     try:
         run_list, expected_runs = process_accession(accession, email, api_key, verbose)
         found_runs = len(run_list)
-        status = (
-            "Complete"
-            if found_runs >= expected_runs and expected_runs > 0
-            else "Incomplete" if expected_runs > 0
-            else "Unknown"
-        )
+
+        # We'll say "Complete" if found_runs >= expected_runs (and expected_runs>0)
+        if expected_runs > 0 and found_runs >= expected_runs:
+            status = "Complete"
+        elif expected_runs > 0 and found_runs < expected_runs:
+            status = "Incomplete"
+        else:
+            status = "Unknown"
+
         result = {
             "accession": accession,
             "runs": run_list,
@@ -539,9 +537,11 @@ def process_accession_wrapper(args):
                 print(f"DEBUG: Saved temp result to {temp_file}", flush=True)
         except Exception as e:
             print(f"Error saving temp file {temp_file}: {e}", flush=True)
+
         if verbose:
             print(f" - Expected {expected_runs} runs, found {found_runs} runs: {status}", flush=True)
         return result
+
     except Exception as e:
         print(f"❌ Failed to process {accession}: {e}", flush=True)
         result = {
@@ -559,9 +559,10 @@ def process_accession_wrapper(args):
                 json.dump(result, f, indent=2)
             if verbose:
                 print(f"DEBUG: Saved temp result (error) to {temp_file}", flush=True)
-        except Exception as e:
-            print(f"Error saving temp file {temp_file}: {e}", flush=True)
+        except Exception as e2:
+            print(f"Error saving temp file {temp_file}: {e2}", flush=True)
         return result
+
 
 def read_accessions(input_file):
     """Read accessions from input file."""
@@ -580,6 +581,7 @@ def read_accessions(input_file):
         sys.exit(1)
     return accessions
 
+
 def merge_results(results, temp_dir):
     """Merge results from memory and temp files, ensuring no data loss."""
     print(f"DEBUG: Merging results from {temp_dir}", flush=True)
@@ -591,6 +593,7 @@ def merge_results(results, temp_dir):
                 try:
                     with open(temp_path, "r") as f:
                         temp_result = json.load(f)
+                        # If we don’t already have this accession in memory results, add it
                         if not any(r["accession"] == temp_result["accession"] for r in merged_results):
                             merged_results.append(temp_result)
                             print(f"DEBUG: Added temp result from {temp_path}", flush=True)
@@ -601,13 +604,14 @@ def merge_results(results, temp_dir):
     print(f"DEBUG: Merged {len(merged_results)} results", flush=True)
     return merged_results
 
+
 def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log_file):
     """Write all output files."""
     output_path = os.path.join(CWD, output_file)
     runs_only_path = os.path.join(CWD, runs_only_file)
     fail_log_path = os.path.join(CWD, fail_log)
     comparison_log_path = os.path.join(CWD, comparison_log_file)
-    
+
     print(f"DEBUG: Starting write_outputs to {CWD} with {len(results)} results", flush=True)
     results.sort(key=lambda x: x["accession"])
 
@@ -643,6 +647,7 @@ def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log
             if not runs and status != "Failed":
                 failed.append((accession, "No run accessions found"))
 
+    # Write CSV
     try:
         print(f"DEBUG: Writing CSV to {output_path}", flush=True)
         with open(output_path, "w", newline="", encoding="utf-8-sig") as csvfile:
@@ -653,6 +658,7 @@ def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log
     except Exception as e:
         print(f"Error writing CSV to {output_path}: {e}", flush=True)
 
+    # Write runs-only
     try:
         print(f"DEBUG: Writing runs-only to {runs_only_path}", flush=True)
         with open(runs_only_path, "w") as txtfile:
@@ -662,6 +668,7 @@ def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log
     except Exception as e:
         print(f"Error writing run accessions only file to {runs_only_path}: {e}", flush=True)
 
+    # Fail log
     if failed:
         try:
             print(f"DEBUG: Writing failure log to {fail_log_path}", flush=True)
@@ -672,6 +679,7 @@ def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log
         except Exception as e:
             print(f"Error writing failure log to {fail_log_path}: {e}", flush=True)
 
+    # Comparison log
     try:
         print(f"DEBUG: Writing comparison log to {comparison_log_path}", flush=True)
         with open(comparison_log_path, "w") as clog:
@@ -681,6 +689,7 @@ def write_outputs(results, output_file, runs_only_file, fail_log, comparison_log
         print(f"📊 Run comparison logged to {comparison_log_path}", flush=True)
     except Exception as e:
         print(f"Error writing comparison log to {comparison_log_path}: {e}", flush=True)
+
 
 def main():
     print("DEBUG: Entering main()", flush=True)
@@ -759,14 +768,13 @@ python {os.path.abspath(__file__)} {args.input_file} -o {args.output_file} --run
         print(f"Error creating temp directory {temp_dir}: {e}", flush=True)
         sys.exit(1)
 
-    # Prepare results
     results = []
 
     # Process accessions
     print(f"DEBUG: Starting processing with {threads} threads", flush=True)
     tasks = [(acc, email, api_key, args.verbose, temp_dir) for acc in accessions]
     if threads == 1:
-        # Single-threaded
+        # Single-threaded mode
         print("DEBUG: Running in single-threaded mode", flush=True)
         iterator = tqdm(accessions, desc="Processing accessions", unit="accession") if tqdm and not args.verbose else accessions
         for accession in iterator:
@@ -776,7 +784,7 @@ python {os.path.abspath(__file__)} {args.input_file} -o {args.output_file} --run
             results.append(result)
             time.sleep(1.0)
     else:
-        # Parallel processing
+        # Parallel mode
         print(f"DEBUG: Running in parallel mode with {threads} threads", flush=True)
         pbar = tqdm(total=len(accessions), desc="Processing accessions", unit="accession") if tqdm and not args.verbose else None
         try:
@@ -786,7 +794,7 @@ python {os.path.abspath(__file__)} {args.input_file} -o {args.output_file} --run
                     print(f"DEBUG: Thread completed for accession {result['accession']}", flush=True)
                     if pbar:
                         pbar.update(1)
-                    time.sleep(1.0)  # Increased delay
+                    time.sleep(1.0)
         finally:
             if pbar:
                 pbar.close()
@@ -806,7 +814,9 @@ python {os.path.abspath(__file__)} {args.input_file} -o {args.output_file} --run
         print(f"DEBUG: Temp directory {temp_dir} removed", flush=True)
     except Exception as e:
         print(f"Error cleaning up temp directory {temp_dir}: {e}", flush=True)
+
     print("DEBUG: Script completed", flush=True)
+
 
 if __name__ == "__main__":
     print("DEBUG: Script starting", flush=True)
