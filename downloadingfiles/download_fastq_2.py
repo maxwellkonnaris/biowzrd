@@ -678,6 +678,84 @@ def write_sorted_unique_completed(completed_file, bio_files, debug_file, debug_l
         log_debug_message(f"[write_sorted_unique_completed] No bio files; removed {completed_file}",
                           debug_file, debug_lock)
 
+def audit_and_repair_fastqs(args, checksum_file, checksum_lock, debug_file, debug_lock, num_threads=16):
+    import hashlib
+
+    fastq_dir = os.path.join(args.workdir, "fastq_data")
+    checksum_map = {}
+
+    # Load existing checksums if present
+    if os.path.exists(checksum_file):
+        with open(checksum_file, "r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                chksum, fname = line.strip().split()
+                checksum_map[fname] = chksum
+
+    # All FASTQs in biological dir
+    fq_files = list(Path(fastq_dir).rglob("fastq_biologicaldata/*.fastq.gz"))
+
+    def process_fq(fq_path):
+        fq_name = fq_path.name
+        try:
+            # Check gzip integrity
+            with gzip.open(fq_path, "rt") as f:
+                for i, line in enumerate(f):
+                    if i >= 64:
+                        break
+                    if i % 4 == 0 and not line.startswith("@"):
+                        raise ValueError(f"Bad format in {fq_name}: line {i+1} doesn't start with @")
+
+            # Check MD5 if available
+            if fq_name in checksum_map:
+                hash_md5 = hashlib.md5()
+                with open(fq_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        hash_md5.update(chunk)
+                computed = hash_md5.hexdigest()
+                if computed != checksum_map[fq_name]:
+                    return ("remove", fq_path, f"[audit] {fq_name} checksum mismatch")
+            else:
+                # Add new checksum
+                hash_md5 = hashlib.md5()
+                with open(fq_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        hash_md5.update(chunk)
+                return ("add_checksum", fq_name, hash_md5.hexdigest())
+
+            return ("ok", fq_path, "")
+        except Exception as e:
+            return ("remove", fq_path, f"[audit] {fq_name} failed: {e}")
+
+    # Parallelize the audit
+    to_remove = []
+    to_add_checksum = []
+
+    with ProcessPoolExecutor(max_workers=num_threads) as executor:
+        futures = {executor.submit(process_fq, fq): fq for fq in fq_files}
+        for fut in as_completed(futures):
+            status, val1, val2 = fut.result()
+            if status == "remove":
+                to_remove.append((val1, val2))
+            elif status == "add_checksum":
+                to_add_checksum.append((val1, val2))
+
+    # Remove corrupt/mismatched files
+    for path, msg in to_remove:
+        log_debug_message(msg, debug_file, debug_lock)
+        remove_file_safely(path, debug_file, debug_lock)
+
+    # Append new checksums
+    if to_add_checksum:
+        with open(checksum_lock, "a+"):
+            flock_exclusive(open(checksum_lock, "a+"))
+            with open(checksum_file, "a") as cf:
+                for fname, chksum in to_add_checksum:
+                    cf.write(f"{chksum}  {fname}\n")
+            flock_release(open(checksum_lock, "a+"))
+        log_debug_message(f"[audit] Added {len(to_add_checksum)} new checksums", debug_file, debug_lock)
+
 ##########################
 # Cleanup Functions
 ##########################
@@ -884,6 +962,15 @@ def main():
                         print(msg, file=sys.stderr)
                         log_debug_message(msg, args.debug_file, args.debug_lock)
                         append_line_with_lock(acc, args.failed_file, args.failed_lock)
+
+    log_debug_message("[main] Auditing FASTQ files for corruption and checksum mismatch...", args.debug_file, args.debug_lock)
+    audit_and_repair_fastqs(
+        args,
+        checksum_file=os.path.join(args.workdir, "fastq_data", "fastq_checksums.md5"),
+        checksum_lock=os.path.join(args.workdir, "fastq_data", "fastq_checksums.md5.lock"),
+        debug_file=args.debug_file,
+        debug_lock=args.debug_lock
+    )
 
     log_debug_message("[main] Post-processing: Checking and sorting FASTQs...", args.debug_file, args.debug_lock)
     check_and_sort_fastqs(args, n_threads_per_worker)
