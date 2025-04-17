@@ -12,7 +12,7 @@
 #SBATCH --open-mode=append
 #--------------------------------------------------
 # Purpose : SLURM pipeline for 16S‐rRNA FASTQ files
-# Tooling : micromamba + R (DADA2) + GNU parallel
+# Tooling : micromamba + R (DADA2) + GNU parallel
 #--------------------------------------------------
 
 set -euxo pipefail
@@ -29,6 +29,7 @@ INPUT_LOCK="$LOCK_DIR/input.lock"
 DEFAULT_WORKERS=4
 LOG_LEVEL="INFO"
 RDP_DATABASE="rdp_19_toGenus_trainset.fa.gz"
+REPAIR_FASTQS=1
 
 mkdir -p "$LOCK_DIR" "$OUTPUT_BASE" || {
   echo "Error: cannot create required directories"; exit 1; }
@@ -52,12 +53,12 @@ log_debug() {
 log_info()  { echo  "$(date) [INFO]  $1"; }
 
 ########################################
-# File‑locking helpers
+# File‐locking helpers
 ########################################
 append_with_lock() {          # $1 line  $2 file  $3 lock
   { flock -x 200; echo "$1" >> "$2"; } 200>>"$3"; }
 
-update_input_csv() {          # $1 new‑file‑contents
+update_input_csv() {          # $1 new‐file‐contents
   { flock -x 200; printf '%s\n' "$1" > "$INPUT_FILE"; } 200>"$INPUT_LOCK"; }
 
 ########################################
@@ -70,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     -d) FASTQ_DIR=$2; shift 2 ;;
     -w) NUM_WORKERS=$2; shift 2 ;;
     --debug) LOG_LEVEL=DEBUG; shift ;;
+    --no-repair-fastqs) REPAIR_FASTQS=0; shift ;;
     --process-sample) PROCESS_SAMPLE=1; PROCESS_ARGS=("$@"); break ;;
     *) echo "Invalid option: $1"; exit 1;;
   esac
@@ -93,12 +95,8 @@ if [[ -z "$DADA2_ENV_NAME" ]]; then
 fi
 log_info "Using activated DADA2 environment: $DADA2_ENV_NAME"
 
-
-#[[ -z $DADA2_ENV_NAME ]] && { echo "No active micromamba env"; exit 1; }
-#log_info "Using DADA2 environment: $DADA2_ENV_NAME"
-
 ########################################
-# Generic cmd‑runner under the env
+# Generic cmd‐runner under the env
 ########################################
 run_command() {               # $1 cmd  $2 description
   local cmd="$1" desc="$2"
@@ -136,25 +134,26 @@ log_info "RDP DB ok: $RDP_DATABASE"
 generate_fastq_checksums() {
   log_info "Generating initial checksums for FASTQ files"
   find "$FASTQ_DIR" -type f -name "*.fastq.gz" | sort | \
-    parallel --jobs "$NUM_WORKERS" 'md5sum "{}"' \
-    > "$FASTQ_DIR/checksums.md5"
-  log_info "Checksums saved to $FASTQ_DIR/checksums.md5"
+    parallel --jobs "$NUM_WORKERS" 'b3sum "{}"' \
+    > "$FASTQ_DIR/checksums.b3"
+  log_info "Checksums saved to $FASTQ_DIR/checksums.b3"
 }
 
 validate_fastq() {
   local fq=$1
-  # must exist and be valid gzip
   [[ -f $fq ]] || return 1
   gzip -t "$fq" 2>/dev/null || return 1
 
-  # Grab the first 3 lines: header, sequence, plus‐line
   zcat "$fq" | head -n 3 | awk '
-    NR==1 && $0 !~ /^@/ { exit 1 }
-    NR==3 && $0 !~ /^\+/ { exit 1 }
+    NR==1 && $0 !~ /^@/ { print "[FAIL] Line 1 does not start with @"; exit 1 }
+    NR==3 && $0 !~ /^\+/ { print "[FAIL] Line 3 does not start with +"; exit 1 }
+    END { print "[PASS] FASTQ header structure OK" }
   ' || return 1
 
   return 0
 }
+
+
 
 repair_fastq_if_needed() {
   local src_dir="$FASTQ_DIR"
@@ -169,6 +168,9 @@ repair_fastq_if_needed() {
   log_info "Verifying FASTQ checksums using b3sum in parallel …"
 
   cd "$src_dir"
+
+  # Generate checksums if not present
+  [[ -f "$checksum_file" ]] || generate_fastq_checksums
 
   # 1) Build “to-check” list (hash <TAB> file)
   build_validated_set
@@ -228,7 +230,7 @@ is_biological_fastq() {
   uniq=$(printf '%s\n' "$lengths" | sort -u | wc -l)
   local maxlen
   maxlen=$(printf '%s\n' "$lengths" | awk 'max < $1 {max = $1} END {print max}')
-  # biological if:   ≥2 different lengths   OR   any read > 30 bp
+  # biological if:   ≥2 different lengths   OR   any read > 30 bp
   (( uniq > 1 )) || (( maxlen > 30 ))
 }
 
@@ -311,7 +313,7 @@ if (( missing_count > 0 )); then
   head -n 10 unmatched_16saccessions.txt >&2
 fi
 
-rm -rf 16saccessions_from_csv.txt  16saccessions_from_index.txt
+rm -rf 16saccessions_from_csv.txt 16saccessions_from_index.txt
 
 ########################################
 # Update input with FASTQ paths
@@ -355,7 +357,6 @@ update_input_with_fastq_paths() {
       continue
     fi
 
-
     if [[ -n "${acc:-}" ]]; then
       echo "[DEBUG] Acc: $acc → Files: ${fastq_map[$acc]:-}" >&2
       if [[ -z "${fastq_map[$acc]:-}" ]]; then
@@ -368,20 +369,45 @@ update_input_with_fastq_paths() {
     valid=()
     for fq in "${files[@]}"; do
       [[ -z "$fq" ]] && continue
-      echo "[DEBUG] Checking $fq" >&2
-      if ! validate_fastq "$fq"; then
-        echo "[DEBUG] $fq failed validation" >&2
+      echo "[DEBUG] Evaluating $fq for $acc" >&2
+    
+      if ! [[ -f "$fq" ]]; then
+        echo "[FAIL] $fq does not exist" >&2
+        mark_failure MISSING "$acc"
+        continue
+      fi
+    
+      if ! gzip -t "$fq" 2>/dev/null; then
+        echo "[FAIL] $fq failed gzip test" >&2
         mark_failure CORRUPT "$acc"
         continue
       fi
-      if is_biological_fastq "$fq"; then
-        echo "[DEBUG] $fq is biological" >&2
+    
+      if ! zcat "$fq" | head -n 3 | awk '
+          NR==1 && $0 !~ /^@/ { print "[FAIL] Line 1 not @"; exit 1 }
+          NR==3 && $0 !~ /^\+/ { print "[FAIL] Line 3 not +"; exit 1 }'; then
+        echo "[FAIL] $fq failed FASTQ structure" >&2
+        mark_failure CORRUPT "$acc"
+        continue
+      fi
+    
+      lengths=$(zcat "$fq" | awk 'NR % 4 == 2 {print length}' | head -n 20)
+      uniq=$(printf '%s\n' "$lengths" | sort -u | wc -l)
+      maxlen=$(printf '%s\n' "$lengths" | awk 'max < $1 {max = $1} END {print max}')
+    
+      echo "[DEBUG] $fq → uniq=$uniq, maxlen=$maxlen" >&2
+    
+      if (( uniq > 1 || maxlen > 30 )); then
+        echo "[PASS] $fq is biological" >&2
         valid+=("$fq")
       else
-        echo "[DEBUG] $fq is technical" >&2
+        echo "[FAIL] $fq is technical" >&2
         mark_failure TECHNICAL "$acc"
       fi
     done
+    
+    echo "[RESULT] $acc → ${#valid[@]} valid files: ${valid[*]}" >&2
+
 
     case ${#valid[@]} in
       0) new1="MISSING"; new2="MISSING"; val=0; mark_failure NO_VALID "$acc" ;;
@@ -400,8 +426,6 @@ update_input_with_fastq_paths() {
   rm tmp.$$
   log_info "FASTQ path update done"
 }
-
-
 
 ########################################
 # Checkpoint columns
@@ -480,7 +504,7 @@ export -f process_sample log_debug log_info append_with_lock update_checkpoint r
 export DELIM INPUT_FILE FAILED_FILE FAILED_LOCK INPUT_LOCK OUTPUT_BASE DADA2_ENV_NAME LOG_LEVEL
 
 ########################################
-# Merging per‑bioproject profiles
+# Merging per‐bioproject profiles
 ########################################
 merge_profiles() {
   local biop=$1 odir="$OUTPUT_BASE/$biop"
@@ -507,7 +531,7 @@ final_validation_and_merge() {
 # Parallel driver
 ########################################
 process_samples() {
-  log_info "Launching GNU parallel ($NUM_WORKERS workers)"
+  log_info "Launching GNU parallel ($NUM_WORKERS workers)"
   tail -n +2 "$INPUT_FILE" | awk -F"$DELIM" '$3=="16S"' | \
   parallel --colsep "$DELIM" \
            --jobs "$NUM_WORKERS" \
@@ -521,8 +545,8 @@ process_samples() {
 # Main
 ########################################
 main() {
-  [[ -f "$FASTQ_DIR/checksums.md5" ]] || generate_fastq_checksums
-  repair_fastq_if_needed
+  [[ -f "$FASTQ_DIR/checksums.b3" ]] || generate_fastq_checksums
+  (( REPAIR_FASTQS )) && repair_fastq_if_needed
   update_input_with_fastq_paths
   initialize_checkpoints
   process_samples
