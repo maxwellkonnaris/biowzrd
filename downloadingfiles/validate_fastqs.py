@@ -39,33 +39,42 @@ def md5sum(path):
 
 # Attempt to repair a FASTQ file using Biopython
 def repair_fastq(fq_path):
+    from Bio.SeqIO.QualityIO import FastqGeneralIterator
+
     fq_path = Path(fq_path)
     tmp_fastq = fq_path.with_suffix(".repaired.fastq")
     tmp_gz = fq_path.with_suffix(".repaired.fastq.gz")
 
     try:
+        # Count original reads before repair attempt
+        with gzip.open(fq_path, "rt") as handle:
+            original_reads = sum(1 for _ in FastqGeneralIterator(handle))
+
+        # Attempt to salvage valid reads
         with gzip.open(fq_path, "rt") as in_handle, open(tmp_fastq, "wt") as out_handle:
-            count = SeqIO.write(SeqIO.parse(in_handle, "fastq"), out_handle, "fastq")
+            repaired_reads = SeqIO.write(SeqIO.parse(in_handle, "fastq"), out_handle, "fastq")
 
-        if count == 0:
+        if repaired_reads == 0:
             tmp_fastq.unlink(missing_ok=True)
-            return f"[FAIL] {fq_path}: No records found in repair"
+            return f"[FAIL] {fq_path}: No valid records found (original had {original_reads} reads)"
 
-        # Compress with pigz or gzip
+        # Compress repaired FASTQ
         compressor = shutil.which("pigz") or shutil.which("gzip")
         compress_cmd = [compressor, "-f", str(tmp_fastq)]
         subprocess.run(compress_cmd, check=True)
 
         if tmp_gz.exists():
             shutil.move(str(tmp_gz), str(fq_path))
-            return f"[REPAIRED] {fq_path} ({count} reads)"
+            return (f"[REPAIRED] {fq_path}: replaced with {repaired_reads} salvaged reads "
+                    f"from {original_reads} total (corrupted reads were discarded)")
         else:
-            return f"[FAIL] {fq_path}: Compression failed"
+            return f"[FAIL] {fq_path}: Compression failed after repair"
 
     except Exception as e:
         tmp_fastq.unlink(missing_ok=True)
         tmp_gz.unlink(missing_ok=True)
         return f"[FAIL] {fq_path}: Repair error: {e}"
+
 
 # Validate checksum if known, append if not, then check/repair
 def check_and_fix_fastq(fq_path, checksums_path, known_checksums, checksums_lock):
