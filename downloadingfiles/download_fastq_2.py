@@ -84,6 +84,39 @@ def get_read_lengths(fastq_gz):
     except Exception as e:
         return None
 
+def compute_global_md5_checksums(fastq_dir, checksum_file, lock_file, debug_file, debug_lock, num_threads=8):
+    from pathlib import Path
+    import hashlib
+
+    def compute_md5_for_file(fq_path):
+        try:
+            hash_md5 = hashlib.md5()
+            with open(fq_path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    hash_md5.update(chunk)
+            checksum = hash_md5.hexdigest()
+            return f"{checksum}  {os.path.basename(fq_path)}"
+        except Exception as e:
+            log_debug_message(f"[checksum] Error for {fq_path}: {e}", debug_file, debug_lock)
+            return None
+
+    fq_files = list(Path(fastq_dir).rglob("*.fastq.gz"))
+
+    with ProcessPoolExecutor(max_workers=num_threads) as executor:
+        results = list(executor.map(compute_md5_for_file, fq_files))
+
+    with open(lock_file, "a+"):
+        flock_exclusive(open(lock_file, "a+"))
+        with open(checksum_file, "w") as f:
+            for line in results:
+                if line:
+                    f.write(line + "\n")
+        flock_release(open(lock_file, "a+"))
+
+    log_debug_message(f"[checksum] Wrote global MD5 checksums for {len(fq_files)} files to {checksum_file}",
+                      debug_file, debug_lock)
+
+
 ##########################
 # Command Runner with Retry
 ##########################
@@ -858,6 +891,15 @@ def main():
     log_debug_message("[main] Post-processing: Final validation of downloaded files...", args.debug_file, args.debug_lock)
     final_bio_files = final_validation(args, n_threads_per_worker)
 
+    log_debug_message("[main] Computing global MD5 checksums for FASTQ files...", args.debug_file, args.debug_lock)
+    compute_global_md5_checksums(
+        fastq_dir=os.path.join(args.workdir, "fastq_data"),
+        checksum_file=os.path.join(args.workdir, "fastq_data", "fastq_checksums.md5"),
+        lock_file=os.path.join(args.workdir, "fastq_data", "fastq_checksums.md5.lock"),
+        debug_file=args.debug_file,
+        debug_lock=args.debug_lock,
+        num_threads=min(num_workers, 16)
+    )
     log_debug_message("[main] Writing sorted list of unique completed accessions based on fastq_biologicaldata...", 
                       args.debug_file, args.debug_lock)
     write_sorted_unique_completed(args.completed_file, final_bio_files, args.debug_file, args.debug_lock)
