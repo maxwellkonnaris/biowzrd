@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 
 # adjust this import to your actual script name
-import python_16s as p16
+import generate_16s_counts as p16
 
 def make_csv(tmp_path, header, rows, delim=","):
     f = tmp_path / "input.csv"
