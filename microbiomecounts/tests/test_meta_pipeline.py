@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 
 # adjust this import to your actual meta‐script name
-import python_meta as pm
+import generate_meta_counts as pm
 
 def make_csv(tmp_path, header, rows, delim=","):
     f = tmp_path / "input_meta.csv"
