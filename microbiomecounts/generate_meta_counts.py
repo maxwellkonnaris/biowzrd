@@ -149,7 +149,7 @@ def parse_arguments():
                        help=f"Number of workers (default: 3/4ths of CPUs = {default_workers})")
     parser.add_argument("--mode",
                         choices=["both", "metaphlan", "motus"],
-                        default="both",
+                        default="metaphlan",
                         help="Run only MetaPhlAn, only mOTUs, or both")
     parser.add_argument("--metaphlan-threads", type=int, default=4,
                         help="Threads for MetaPhlAn bowtie2 (default: 4)")
@@ -757,14 +757,14 @@ def process_sample(
     if mode in ("both", "motus") and mt_flag != "1":
         start = perf_counter()
         mt_out = outdir / f"{acc}_motus.out"
-        cmd    = (
-            f"motus profile -s {fq1} "
+        cmd = (
+            f"motus profile -s '{fq1}' "
             f"-c "
             f"-t {motus_threads} "
-            f"-o {mt_out}"
+            f"-o '{mt_out}' "
             f"-A "
         )
-
+    
         logger.info(f"{acc}: mOTUs → start")
         try:
             subprocess.run(cmd, shell=True, check=True, text=True,
@@ -777,6 +777,7 @@ def process_sample(
             logger.info(f"{acc}: mOTUs → FAIL ({e})")
             append_with_flock(f"{acc}:MT_FAIL", FAILED_FILE)
             return
+
 
     # -------------------------------------------------------------------
     # Mark overall completion
