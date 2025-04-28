@@ -48,7 +48,7 @@ SLURM_CONFIG = {
     "mail-user": "mak6930@psu.edu",
 }
 
-def submit_slurm_job():
+def submit_slurm_job(dependency=None):
     """
     Submit the pipeline as a SLURM job if not already running under SLURM.
     """
@@ -64,6 +64,8 @@ def submit_slurm_job():
         sb.write("#!/bin/bash\n")
         for key, val in SLURM_CONFIG.items():
             sb.write(f"#SBATCH --{key}={val}\n")
+        if dependency:
+            sb.write(f"#SBATCH --dependency=afterok:{dependency}\n")
         sb.write("\n")
         sb.write("source ~/.bashrc\n")
         active_env = os.environ.get("CONDA_DEFAULT_ENV") or os.environ.get("MAMBA_DEFAULT_ENV") or "dada2"  # Fallback to 'dada2'
@@ -151,6 +153,8 @@ def parse_arguments():
                        help="Disable FASTQ repair")
     parser.add_argument("--submit-slurm", action="store_true",
                         help="Submit this script as a SLURM job and exit")
+    parser.add_argument("--dependency", type=str, default=None,
+                        help="SLURM job ID to wait for (afterok)")
     parser.add_argument("--process-sample", action="store_true", help="Process a single sample")
     return parser.parse_args()
 
@@ -664,7 +668,7 @@ def main():
     args = parse_arguments()
     from pathlib import Path
     if args.submit_slurm:
-        submit_slurm_job()
+        submit_slurm_job(dependency=args.dependency)
         return
     if args.debug:
         logger.setLevel(logging.DEBUG)
@@ -724,8 +728,20 @@ def main():
     full_df = pd.read_csv(args.input_file, sep=delim, dtype=str)
     
     # Filter to only those still needing DADA2
+    # --- Read the failed accessions ---
+    failed_accessions = set()
+    
+    if os.path.exists("failed_16s.log"):
+        with open("failed_16s.log", "r") as f:
+            for line in f:
+                accession = line.strip().split(":")[0]  # Take only the part before ':'
+                failed_accessions.add(accession)     
+    
+    # --- Filter your full_df ---
     to_run = full_df.loc[
-        (full_df["SequencingType"] == "16S") & (full_df["Dada2"] == "0"),
+        (full_df["SequencingType"] == "16S") &
+        (full_df["Dada2"] == "0") &
+        (~full_df["RunAccession"].isin(failed_accessions)),  # Exclude failed ones
         full_df.columns
     ]
     
