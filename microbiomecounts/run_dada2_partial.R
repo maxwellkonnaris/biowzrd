@@ -1,104 +1,132 @@
 #!/usr/bin/env Rscript
-suppressPackageStartupMessages(library(dada2))
+suppressPackageStartupMessages({
+  library(dada2)
+  library(BiocParallel)
+})
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 2 || length(args) > 4) {
-  stop("Usage: Rscript run_dada2_partial.R <forward_fastq> [<reverse_fastq>] <output_file> [<filter_mode>]")
-}
+usage <- "
+Usage:
+  Rscript run_dada2_partial.R <forward.fastq.gz> [<reverse.fastq.gz>] <out.rds> [strict|light|none]
+"
+if (length(args) < 2 || length(args) > 4) stop(usage)
 
-parse_args <- function(a) {
-  n <- length(a)
-  if (n == 2) {
-    list(fnF = a[1], fnR = "", out = a[2], mode = "light")
-  } else if (n == 3 && grepl("\\.fastq", a[2], ignore.case = TRUE)) {
-    list(fnF = a[1], fnR = a[2], out = a[3], mode = "light")
-  } else if (n == 3) {
-    list(fnF = a[1], fnR = "", out = a[2], mode = tolower(a[3]))
-  } else if (n == 4) {
-    list(fnF = a[1], fnR = a[2], out = a[3], mode = tolower(a[4]))
-  } else stop("Unrecognised argument pattern")
-}
-
-p <- parse_args(args)
-fnF <- p$fnF
-fnR <- p$fnR
-output_file <- p$out
-filter_mode <- p$mode
-
-if (!filter_mode %in% c("strict", "light", "none")) filter_mode <- "light"
-
-sample <- sub("^asv_([^.]+)\\.rds$", "\\1", basename(output_file))
-out_dir <- dirname(output_file)
-
-if (!file.exists(fnF)) stop("Forward FASTQ does not exist: ", fnF)
-if (nzchar(fnR) && !file.exists(fnR)) stop("Reverse FASTQ does not exist: ", fnR)
-dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-
-filt_F <- file.path(out_dir, paste0("filtered_", basename(fnF)))
-filt_R <- if (nzchar(fnR)) file.path(out_dir, paste0("filtered_", basename(fnR))) else NULL
-single_end <- TRUE
-
-if (filter_mode == "strict") {
-  truncLen <- 200; maxEE <- 2; truncQ <- 2
-} else if (filter_mode == "light") {
-  truncLen <- 0; maxEE <- 10; truncQ <- 2
+# Parse arguments
+if (grepl("\\.fastq", args[2], ignore.case = TRUE)) {
+  fnF <- args[1]; fnR <- args[2]; out <- args[3]
+  mode <- if (length(args) == 4) tolower(args[4]) else "light"
 } else {
-  truncLen <- 0; maxEE <- Inf; truncQ <- 0
+  fnF <- args[1]; fnR <- ""
+  out <- args[2]; mode <- if (length(args) == 3) tolower(args[3]) else "light"
 }
+stopifnot(mode %in% c("strict", "light", "none"))
+
+# Filtering parameters
+pars <- switch(
+  mode,
+  strict = list(truncLen = 200, maxEE = 2,  truncQ = 2),
+  light  = list(truncLen = 0,   maxEE = 10, truncQ = 2),
+  list(truncLen = 0, maxEE = Inf, truncQ = 0)
+)
+
+fnR <- ""
+
+# Setup parallelization
+threads <- as.integer(Sys.getenv("D2_THREADS", 4))
+register(MulticoreParam(workers = threads))
+message(sprintf("[DADA2] Using %d threads (via BiocParallel)", threads))
+
+# Prepare paths and sample name
+dir.create(dirname(out), showWarnings = FALSE, recursive = TRUE)
+filt_F <- file.path(dirname(out), paste0("filtered_", basename(fnF)))
+filt_R <- if (nzchar(fnR)) file.path(dirname(out), paste0("filtered_", basename(fnR))) else NULL
+sample <- sub("^asv_([^.]+)\\.rds$", "\\1", basename(out))
 
 timings <- list()
 
+# 1. filterAndTrim
 t0 <- proc.time()
-out <- filterAndTrim(fnF, filt_F,
-                     truncLen = truncLen, maxN = 0, maxEE = maxEE, truncQ = truncQ,
-                     rm.phix = TRUE, compress = FALSE, multithread = 4)
+out_filt <- filterAndTrim(
+  fnF, filt_F,
+  if (nzchar(fnR)) fnR else NULL,
+  if (nzchar(fnR)) filt_R else NULL,
+  truncLen = pars$truncLen,
+  maxN = 0,
+  maxEE = pars$maxEE,
+  truncQ = pars$truncQ,
+  rm.phix = TRUE,
+  compress = FALSE,
+  multithread = FALSE
+)
 timings$filterAndTrim <- (proc.time() - t0)[["elapsed"]]
+if (sum(out_filt[, "reads.out"]) == 0) stop("No reads passed filtering for ", sample)
 
-if (sum(out[, "reads.out"]) == 0) stop("No reads passed quality filtering for ", sample)
-
-t0 <- proc.time()
-derepForErr <- derepFastq(filt_F, verbose = FALSE)
-if (sum(derepForErr$quals[[1]] != "") > 1e6) {
-  set.seed(42)
-  sample_ix <- sample(seq_along(derepForErr$quals), size = 1e6)
-  derepForErr <- list(quals = derepForErr$quals[sample_ix])
-}
-errF <- learnErrors(derepForErr, multithread = 4)
-timings$learnErrors <- (proc.time() - t0)[["elapsed"]]
-
+# 3. derepFastq
 t0 <- proc.time()
 derep_F <- derepFastq(filt_F)
+if (nzchar(fnR)) derep_R <- derepFastq(filt_R)
 timings$derepFastq <- (proc.time() - t0)[["elapsed"]]
 
+# 2. learnErrors
+# Single-end or paired: learn on each filtered file
+learn_errors <- function(fq) {
+  t1 <- proc.time()
+  err <- learnErrors(fq, nbases = 1e8, randomize = TRUE, multithread=threads)
+  elapsed <- (proc.time() - t1)[["elapsed"]]
+  list(err = err, time = elapsed)
+}
+
+leF <- learn_errors(derep_F)
+timings$learnErrors_F <- leF$time
+
+if (nzchar(fnR)) {
+  leR <- learn_errors(derep_R)
+  timings$learnErrors_R <- leR$time
+}
+
+# 4. dada
 t0 <- proc.time()
-dada_F <- suppressMessages(dada(derep_F, err = errF, multithread = 4))
+dada_F <- dada(derep_F, err = leF$err, multithread=threads)
+if (nzchar(fnR)) dada_R <- dada(derep_R, err = leR$err, multithread=threads)
 timings$dada <- (proc.time() - t0)[["elapsed"]]
 
+# 5. mergePairs or single-end
 t0 <- proc.time()
-seqtab <- makeSequenceTable(dada_F)
-timings$makeSequenceTable <- (proc.time() - t0)[["elapsed"]]
-
-if (ncol(seqtab) > 0) {
-  message(sprintf("[DADA2] %s → Single-end: %d ASVs", sample, ncol(seqtab)))
-  
-  t0 <- proc.time()
-  saveRDS(seqtab, output_file)
-  write.table(out, file.path(out_dir, paste0(sample, "_filter_summary.txt")),
-              sep = "\t", quote = FALSE)
-  unlink(filt_F)
-  timings$saveOutputs <- (proc.time() - t0)[["elapsed"]]
-  
-  message(sprintf(
-    "[%s] TIMING SUMMARY: filterAndTrim=%.1fs, learnErrors=%.1fs, derepFastq=%.1fs, dada=%.1fs, makeSequenceTable=%.1fs, saveOutputs=%.1fs",
-    sample,
-    timings$filterAndTrim, timings$learnErrors, timings$derepFastq,
-    timings$dada, timings$makeSequenceTable, timings$saveOutputs
-  ))
-  
-  quit(save = "no", status = 0)
+if (nzchar(fnR)) {
+  mergers <- mergePairs(dada_F, derep_F, dada_R, derep_R, verbose = FALSE)
+  seqtab <- makeSequenceTable(mergers)
+  timings$mergePairs <- (proc.time() - t0)[["elapsed"]]
 } else {
-  stop(sprintf("[DADA2] %s → No ASVs detected (even in fallback single-end)", sample))
+  seqtab <- makeSequenceTable(dada_F)
+  timings$makeSequenceTable <- (proc.time() - t0)[["elapsed"]]
 }
+
+# 6. Save and cleanup
+if (ncol(seqtab) == 0) stop(sprintf("[DADA2] %s → No ASVs detected", sample))
+t0 <- proc.time()
+saveRDS(seqtab, out)
+write.table(out_filt,
+            file.path(dirname(out), paste0(sample, "_filter_summary.txt")),
+            sep = "\t", quote = FALSE)
+unlink(c(filt_F, filt_R))
+timings$saveOutputs <- (proc.time() - t0)[["elapsed"]]
+
+# 7. Report timings
+msg <- sprintf(
+  "[%s] TIMING: filter=%.1fs, errF=%.1fs%s, derep=%.1fs, dada=%.1fs%s%s save=%.1fs", 
+  sample,
+  timings$filterAndTrim,
+  timings$learnErrors_F,
+  if (nzchar(fnR)) sprintf(", errR=%.1fs", timings$learnErrors_R) else "",
+  timings$derepFastq,
+  timings$dada,
+  if (nzchar(fnR)) sprintf(", merge=%.1fs, seqtab=%0.1fs", timings$mergePairs, timings$makeSequenceTable) else "",
+  timings$saveOutputs
+)
+message(msg)
+
+quit(save = "no", status = 0)
+
 
 
 # ---- OPTIONAL: Paired-end fallback (currently commented out) ----
