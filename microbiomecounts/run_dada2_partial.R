@@ -36,9 +36,8 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 filt_F <- file.path(out_dir, paste0("filtered_", basename(fnF)))
 filt_R <- if (nzchar(fnR)) file.path(out_dir, paste0("filtered_", basename(fnR))) else NULL
-single_end <- TRUE  # Force single-end for now
+single_end <- TRUE
 
-# ---- mode-specific parameters
 if (filter_mode == "strict") {
   truncLen <- 200; maxEE <- 2; truncQ <- 2
 } else if (filter_mode == "light") {
@@ -49,7 +48,6 @@ if (filter_mode == "strict") {
 
 timings <- list()
 
-# ---- Step 1: FilterAndTrim
 t0 <- proc.time()
 out <- filterAndTrim(fnF, filt_F,
                      truncLen = truncLen, maxN = 0, maxEE = maxEE, truncQ = truncQ,
@@ -58,27 +56,28 @@ timings$filterAndTrim <- (proc.time() - t0)[["elapsed"]]
 
 if (sum(out[, "reads.out"]) == 0) stop("No reads passed quality filtering for ", sample)
 
-# ---- Step 2: learnErrors
 t0 <- proc.time()
-errF <- learnErrors(filt_F, nbases=1e8, multithread = 4)
+derepForErr <- derepFastq(filt_F, verbose = FALSE)
+if (sum(derepForErr$quals[[1]] != "") > 1e6) {
+  set.seed(42)
+  sample_ix <- sample(seq_along(derepForErr$quals), size = 1e6)
+  derepForErr <- list(quals = derepForErr$quals[sample_ix])
+}
+errF <- learnErrors(derepForErr, multithread = 4)
 timings$learnErrors <- (proc.time() - t0)[["elapsed"]]
 
-# ---- Step 3: derepFastq
 t0 <- proc.time()
 derep_F <- derepFastq(filt_F)
 timings$derepFastq <- (proc.time() - t0)[["elapsed"]]
 
-# ---- Step 4: dada
 t0 <- proc.time()
 dada_F <- suppressMessages(dada(derep_F, err = errF, multithread = 4))
 timings$dada <- (proc.time() - t0)[["elapsed"]]
 
-# ---- Step 5: makeSequenceTable
 t0 <- proc.time()
 seqtab <- makeSequenceTable(dada_F)
 timings$makeSequenceTable <- (proc.time() - t0)[["elapsed"]]
 
-# ---- Step 6: save outputs
 if (ncol(seqtab) > 0) {
   message(sprintf("[DADA2] %s → Single-end: %d ASVs", sample, ncol(seqtab)))
   
@@ -89,7 +88,6 @@ if (ncol(seqtab) > 0) {
   unlink(filt_F)
   timings$saveOutputs <- (proc.time() - t0)[["elapsed"]]
   
-  # ---- Single-line timing summary
   message(sprintf(
     "[%s] TIMING SUMMARY: filterAndTrim=%.1fs, learnErrors=%.1fs, derepFastq=%.1fs, dada=%.1fs, makeSequenceTable=%.1fs, saveOutputs=%.1fs",
     sample,
