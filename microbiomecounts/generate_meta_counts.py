@@ -49,7 +49,7 @@ SLURM_CONFIG = {
     "mail-user": "mak6930@psu.edu",
 }
 
-def submit_slurm_job():
+def submit_slurm_job(dependency=None):
     """
     Submit the pipeline as a SLURM job if not already running under SLURM.
     """
@@ -65,6 +65,8 @@ def submit_slurm_job():
         sb.write("#!/bin/bash\n")
         for key, val in SLURM_CONFIG.items():
             sb.write(f"#SBATCH --{key}={val}\n")
+        if dependency:
+            sb.write(f"#SBATCH --dependency=afterok:{dependency}\n")
         sb.write("\n")
         sb.write("source ~/.bashrc\n")
         active_env = os.environ.get("CONDA_DEFAULT_ENV") or os.environ.get("MAMBA_DEFAULT_ENV") or "mpa"  # Changed to 'mpa'
@@ -159,6 +161,8 @@ def parse_arguments():
                        help="Disable FASTQ repair")
     parser.add_argument("--submit-slurm", action="store_true",
                         help="Submit this script as a SLURM job and exit")
+    parser.add_argument("--dependency", type=str, default=None,
+                        help="SLURM job ID to wait for (afterok)")
     parser.add_argument("--debug", action="store_false",
                         help="add logging verbose")
     parser.add_argument("--process-sample", action="store_true", help="Process a single sample")
@@ -812,7 +816,7 @@ def process_samples(input_file: Path, delim: str, num_workers: int, mode: str,
 def main():
     args = parse_arguments()
     if args.submit_slurm:
-        submit_slurm_job()
+        submit_slurm_job(dependency=args.dependency)
         return
     if args.debug:
         logger.setLevel(logging.DEBUG)
