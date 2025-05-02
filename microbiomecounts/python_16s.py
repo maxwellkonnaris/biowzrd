@@ -13,6 +13,7 @@ import sys
 import time
 import fcntl
 import tempfile
+import shlex
 
 # Setup logging
 logging.basicConfig(
@@ -42,9 +43,9 @@ SLURM_CONFIG = {
     "time": "48:00:00",
     "nodes": 1,
     "ntasks": 1,
-    "cpus-per-task": 32,
-    "mem": "256G",
-    "account": "one",
+    "cpus-per-task": 16,
+    "mem": "64G",
+    "account": "open",
     "mail-user": "mak6930@psu.edu",
 }
 
@@ -100,9 +101,9 @@ RDP_DATABASE = "rdp_19_toGenus_trainset.fa.gz"
 # at the very top, after imports
 REQUIRED_COLUMNS_16S = [
     "Bioproject", "RunAccession", "SequencingType",
-    "Fastq1", "Fastq2", "Validated", "Dada2", "Completed"
+    "Fastq1", "Fastq2", "Validated"
 ]
-ZERO_DEFAULTS_16S = {"Validated", "Dada2", "Completed"}
+ZERO_DEFAULTS_16S = {"Validated"}
 
 def ensure_required_columns(df: pd.DataFrame,
                             required: list[str],
@@ -155,7 +156,6 @@ def parse_arguments():
                         help="Submit this script as a SLURM job and exit")
     parser.add_argument("--dependency", type=str, default=None,
                         help="SLURM job ID to wait for (afterok)")
-    parser.add_argument("--process-sample", action="store_true", help="Process a single sample")
     return parser.parse_args()
 
 def setup_environment():
@@ -223,7 +223,6 @@ def build_validated_set(input_file: Path, delim: str) -> List[str]:
     except ValueError as e:
         logger.warning("No 'Validated' column yet — skipping.")
         return []
-
 
 def process_fastq_global(fq_path_str: str, input_accs: set) -> Optional[Tuple[str, str]]:
     fq = Path(fq_path_str)
@@ -378,76 +377,6 @@ def validate_and_check(fq: Path, acc: str) -> Tuple[str, Optional[Path], Optiona
     else:
         return acc, None, "CORRUPT"
 
-
-def _check_asv(path: Path) -> bool:
-    """
-    Return True if R can read `path` to a non‑empty table.
-    """
-    rscript = f"""
-    args <- commandArgs(trailingOnly=TRUE)
-    x <- readRDS(args[1])
-    if ((is.matrix(x) || is.data.frame(x)) && ncol(x) > 0) {{
-      quit(status=0)
-    }} else {{
-      quit(status=1)
-    }}
-    """
-    try:
-        subprocess.run(
-            ["Rscript", "-e", rscript, str(path)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-        )
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-def regenerate_input_with_validation(
-    input_file: Path,
-    output_dir: Path,
-    delim: str = ","
-) -> pd.DataFrame:
-    df = pd.read_csv(input_file, sep=delim, dtype=str)
-    df["Dada2"]     = "0"
-    df["Completed"] = "0"
-
-    # 1) Mark merges done immediately
-    for idx, row in df.iterrows():
-        biop = row["Bioproject"]
-        merged_file = output_dir/biop/f"{biop}_merged.rds"
-        if merged_file.exists():
-            df.at[idx,"Dada2"] = df.at[idx,"Completed"] = "1"
-
-    # 2) Build list of per‑sample ASV files to verify
-    tasks = []
-    for idx, row in df.iterrows():
-        if df.at[idx,"Dada2"] == "0":  # skip those already merged
-            biop   = row["Bioproject"]
-            acc    = row["RunAccession"]
-            asv_fn = output_dir/biop/f"asv_{acc}.rds"
-            if asv_fn.exists() and asv_fn.stat().st_size >= 100:
-                tasks.append((idx, asv_fn))
-
-    # 3) Verify in parallel with a tqdm progress bar
-    with ProcessPoolExecutor(max_workers=os.cpu_count()//2 or 4) as exe:
-        futures = {exe.submit(_check_asv, path): idx for idx, path in tasks}
-        for future in tqdm(as_completed(futures),
-                           total=len(futures),
-                           desc="Verifying ASV files"):
-            idx = futures[future]
-            if future.result():
-                df.at[idx, "Dada2"] = "1"
-
-    # 4) Any of those with Dada2==1 but not merged are “in progress” → leave Completed=0
-
-    # backup & write out…
-    timestamp   = datetime.now().strftime("%Y%m%d-%H%M%S")
-    bak_path    = input_file.with_suffix(f".bak.{timestamp}.csv")
-    df.to_csv(bak_path, sep=delim, index=False)
-    logger.info(f"[BACKUP] {bak_path}")
-    df.to_csv(input_file, sep=delim, index=False)
-    logger.info(f"[REGEN] Updated {input_file}")
-    return df
-
 def update_input_with_fastq_paths(
     input_file: Path,
     fastq_dir: Path,
@@ -582,94 +511,102 @@ def update_checkpoint(
             # Release the lock
             fcntl.flock(lk, fcntl.LOCK_UN)
 
+def process_bioprojects(
+    bioprojects: List[str],
+    inputfile: str,
+    threads: int
+):
+    """
+    Submit one SLURM job per bioproject, passing:
+      Rscript run_dada2.R <biop> <inputfile> <threads> <outdir>
 
-def process_sample(biop, acc, st, fq1, fq2, val, d2, comp, env_name):
-    if st != "16S":
-        return
-    if val == "0":
-        return
-    if not (fq1 or fq2):
-        append_with_flock(f"{acc}:NO_FASTQ", FAILED_FILE)
-        return
-    if comp == "1":
-        return
+    Each job will have:
+      --job-name=<biop>
+      --output=<biop>-%j.out
+      --error=<biop>-%j.err
 
-    outdir = OUTPUT_BASE / biop
-    outdir.mkdir(parents=True, exist_ok=True)
-    seqtab = outdir / f"asv_{acc}.rds"
+    Automatically estimates FASTQ size to suggest resource adjustments.
+    """
 
-    # Only do DADA2 *and* mark Completed if d2 != "1"
-    if d2 != "1":
-        cmd = (
-            f"Rscript {Path.cwd()}/run_dada2_partial.R {fq1} {fq2} {seqtab}"
-            if fq2 else
-            f"Rscript {Path.cwd()}/run_dada2_partial.R {fq1} {seqtab}"
-        )
-        env = os.environ.copy()
-        env.update(OMP_NUM_THREADS="4", MKL_NUM_THREADS="4")
-        try:
-            subprocess.run(cmd, shell=True, check=True, text=True, env=env)
-            if not seqtab.exists():
-                append_with_flock(f"{acc}:DADA2_FAIL", FAILED_FILE)
-                return
-            # mark Dada2 done
-            update_checkpoint(Path(os.environ["INPUT_FILE"]), acc, "Dada2", "1", os.environ["DELIM"])
-            # mark Completed now that DADA2 really ran
-            update_checkpoint(Path(os.environ["INPUT_FILE"]), acc, "Completed", "1", os.environ["DELIM"])
-            logger.info(f"Finished DADA2 for {acc}")
-        except subprocess.CalledProcessError:
-            append_with_flock(f"{acc}:DADA2_FAIL", FAILED_FILE)
-            return
-    else:
-        # we already had d2 == "1", so skip entirely
-        logger.debug(f"Skipping {acc}: already has Dada2=1")
+    LOGS_DIR = OUTPUT_BASE / "logs"
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Read input CSV to get paths
+    df = pd.read_csv(inputfile)
 
-def merge_profiles(biop: str, env_name: str):
-    """Merge DADA2 profiles for a bioproject."""
-    odir = OUTPUT_BASE/biop
-    with Path(os.environ["INPUT_FILE"]).open() as f:
-        reader = csv.reader(f, delimiter=os.environ["DELIM"])
-        next(reader)
-        for row in reader:
-            if row[0]==biop and row[2]=="16S" and row[7]!="1":
-                return
-    tabs = list(odir.glob("asv_*.rds"))
-    if tabs:
-        cmd = f"Rscript {Path.cwd()}/merge_dada2.R {biop} {' '.join(map(str,tabs))}"
-        run_command(cmd, f"Merging {biop}", env_name)
+    for biop in bioprojects:
+        outdir = OUTPUT_BASE / biop
+        outdir.mkdir(parents=True, exist_ok=True)
 
-def final_validation_and_merge(input_file: Path, delim: str, env_name: str):
-    """Run final validation and merge profiles."""
-    bioprojects = set()
-    with input_file.open() as f:
-        reader = csv.reader(f, delimiter=delim)
-        next(reader)
-        for row in reader:
-            if row[2]=="16S":
-                bioprojects.add(row[0])
-    for bp in sorted(bioprojects):
-        merge_profiles(bp, env_name)
-    logger.info("Final validation done")
+        # Subset paths for the current bioproject
+        subdf = df[df["Bioproject"] == biop]
+        large_file_flag = False
+        missing_paths = 0
+        total_size = 0
+        
+        for path in subdf["Fastq1"]:
+            try:
+                size = Path(path).stat().st_size
+                total_size += size
+                if size > 10 * 1e9:  # Single file >10 GB
+                    large_file_flag = True
+            except FileNotFoundError:
+                missing_paths += 1
+        
+        total_size_gb = total_size / 1e9
+        num_files = len(subdf)
+        
+        # Decide resource allocation
+        if large_file_flag:
+            mem = "256G"
+            cpus = 16
+            time = "48:00:00"
+            account = "open"
+            print(f"Bioproject {biop} has at least one FASTQ > 10 GB. Increasing resources: {cpus} CPUs, {mem}, {time}.")
+        elif total_size_gb > 150:
+            mem = "256G"
+            cpus = "32"
+            time = "48:00:00"
+            account = "one"
+            print(f"Bioproject {biop} has {num_files} FASTQ files totaling {total_size_gb:.1f} GB. Increasing resources: {cpus} CPUs, {mem}, {time}.")
+        else:
+            mem = "64G"
+            cpus = 16
+            time = "48:00:00"
+            account = "open"
+        
+        # write a temporary SLURM script
+        with tempfile.NamedTemporaryFile("w", suffix=".slurm", delete=False) as sb:
+            sb.write("#!/bin/bash\n")
+            sb.write(f"#SBATCH --job-name={biop}\n")
+            sb.write(f"#SBATCH --output={LOGS_DIR}/{biop}-%j.out\n")
+            sb.write(f"#SBATCH --error={LOGS_DIR}/{biop}-%j.err\n")
+            sb.write(f"#SBATCH --cpus-per-task={cpus}\n")
+            sb.write(f"#SBATCH --mem={mem}\n")
+            sb.write(f"#SBATCH --time={time}\n")
+            sb.write(f"#SBATCH --account={account}\n")
+            for key, val in SLURM_CONFIG.items():
+                if key in ("job-name", "output", "error", "cpus-per-task", "mem", "time", "account"):
+                    continue
+                sb.write(f"#SBATCH --{key}={val}\n")
+            sb.write("\n")
+            sb.write("source ~/.bashrc\n")
+            sb.write(
+                f"Rscript {Path.cwd()}/run_dada2.R "
+                f"{shlex.quote(biop)} {inputfile} {threads} {outdir}\n"
+            )
 
-def process_samples(input_file: Path, delim: str, num_workers: int, env_name: str):
-    """Process samples in parallel."""
-    with input_file.open() as f:
-        reader = csv.reader(f, delimiter=delim)
-        next(reader)
-        samples = [row for row in reader if row[2] == "16S"]
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(process_sample, *sample, env_name) for sample in samples]
-        for f in as_completed(futures):
-            f.result()  # will raise if any failed
-    logger.info("All samples finished")
+        subprocess.run(["sbatch", sb.name], check=True)
 
+    
 def main():
     args = parse_arguments()
     from pathlib import Path
+
     if args.submit_slurm:
         submit_slurm_job(dependency=args.dependency)
         return
+    
     if args.debug:
         logger.setLevel(logging.DEBUG)
         
@@ -716,66 +653,17 @@ def main():
     update_input_with_fastq_paths(Path(args.input_file), fastq_dir, delim, args.num_workers)
     logger.info(f"FASTQ path update took {time.time() - start:.2f} seconds")
 
-    # NEW: Step 4.5 – Restore/checkpoint DADA2 results if output dir exists and is non-empty
-    if OUTPUT_BASE.exists() and any(OUTPUT_BASE.iterdir()):
-        logger.info(f"DADA2 output detected {time.time() - start:.2f} seconds")
-        from pathlib import Path
-        df = regenerate_input_with_validation(Path(args.input_file), OUTPUT_BASE, delim)
-        df.to_csv(Path(args.input_file), sep=delim, index=False)
-        logger.info(f"Checkpoint fields restored from existing DADA2 output {time.time() - start:.2f} seconds")
-
     # Re‑read the CSV you just overwrote
     full_df = pd.read_csv(args.input_file, sep=delim, dtype=str)
+    full_df = full_df[full_df['Validated'] == '1']
     
-    # Filter to only those still needing DADA2
-    # --- Read the failed accessions ---
-    failed_accessions = set()
-    
-    if os.path.exists("failed_16s.log"):
-        with open("failed_16s.log", "r") as f:
-            for line in f:
-                accession = line.strip().split(":")[0]  # Take only the part before ':'
-                failed_accessions.add(accession)     
-    
-    # --- Filter your full_df ---
-    to_run = full_df.loc[
-        (full_df["SequencingType"] == "16S") &
-        (full_df["Dada2"] == "0") &
-        (~full_df["RunAccession"].isin(failed_accessions)),  # Exclude failed ones
-        full_df.columns
-    ]
-    
-    if to_run.empty:
-        logger.info("All samples already have DADA2 results — nothing to do.")
-    else:
-        # Write a temporary CSV of just the remaining rows
-        subset_path = Path(args.input_file).with_name("pending_DADA2.csv")
-        to_run.to_csv(subset_path, sep=delim, index=False)
-        logger.info(f"{len(to_run)} samples pending DADA2 → {subset_path.name}")
-    
-    # Step 5: Run DADA2 processing
-    start = time.time()
-    cpu_count = os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 8)
-    if isinstance(cpu_count, str):
-        cpu_count = int(cpu_count)
-    if cpu_count is None:
-        logger.warning("CPU count unavailable; falling back to 8 CPUs")
-        cpu_count = 8
-    args.num_workers = max(1, min(args.num_workers, cpu_count // 4, 8))
-    logger.info(f"Using {args.num_workers} workers for DADA2 processing")
-    process_samples(subset_path, delim, args.num_workers, env_name)
-    logger.info(f"DADA2 processing took {time.time() - start:.2f} seconds")
-    
-    # Step 6: Final validation and merging
-    start = time.time()
-    final_validation_and_merge(Path(args.input_file), delim, env_name)
-    logger.info(f"Final validation took {time.time() - start:.2f} seconds")
-
-    logger.info("Pipeline complete.")
+    # Step 5: Submit bioprojects as SLURM array job
+    bioprojects = full_df["Bioproject"].unique().tolist()
+    fastq_dict = {biop: full_df[full_df["Bioproject"] == biop]["Fastq1"].tolist() for biop in bioprojects}
+    inputfile = OUTPUT_BASE / "16s_validated.csv"
+    full_df.to_csv(inputfile, sep=delim, index=False)
+    process_bioprojects(bioprojects, str(inputfile), args.num_workers)
 
 
 if __name__ == "__main__":
-    if "--process-sample" in sys.argv:
-        logger.error("process-sample mode not fully supported in Python version")
-        sys.exit(1)
     main()
