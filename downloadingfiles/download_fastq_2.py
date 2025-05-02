@@ -15,6 +15,7 @@ import argparse
 import subprocess
 from tqdm import tqdm
 from pathlib import Path
+from functools import partial
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -107,7 +108,25 @@ def write_per_file_b3sum(fq_path, debug_file, debug_lock):
     except subprocess.CalledProcessError as e:
         log_debug_message(f"[b3sum] Failed on {fq_path}: {e.stderr}", debug_file, debug_lock)
 
+def check_one(fq_path, verify_checksums, debug_file, debug_lock):
+    import gzip
+    try:
+        with gzip.open(fq_path, "rt") as f:
+            for i, line in enumerate(f):
+                if i >= 64:
+                    break
+                if i % 4 == 0 and not line.startswith("@"):
+                    raise ValueError("bad FASTQ header")
+    except Exception as e:
+        return ("remove", fq_path, f"[audit] corrupt FASTQ: {e}")
 
+    if verify_checksums:
+        ok, msg = verify_b3sum(str(fq_path), debug_file, debug_lock)
+        if not ok:
+            return ("remove", fq_path, f"[audit] checksum failed: {msg}")
+
+    return ("ok", fq_path, "")
+    
 ##########################
 # Command Runner with Retry
 ##########################
@@ -671,38 +690,24 @@ def write_sorted_unique_completed(completed_file, bio_files, debug_file, debug_l
                           debug_file, debug_lock)
 
 def audit_and_repair_fastqs(args, debug_file, debug_lock, num_threads=16):
-    import os, gzip
-    from pathlib import Path
-
     fastq_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
     fq_paths = list(Path(fastq_dir).glob("*.fastq.gz"))
     to_remove = []
 
-    def check_one(fq_path):
-        # basic gzip sanity / header check
-        try:
-            with gzip.open(fq_path, "rt") as f:
-                for i, line in enumerate(f):
-                    if i >= 64:
-                        break
-                    if i % 4 == 0 and not line.startswith("@"):
-                        raise ValueError("bad FASTQ header")
-        except Exception as e:
-            return ("remove", fq_path, f"[audit] corrupt FASTQ: {e}")
+    # Bind the fixed arguments so executor.map only supplies fq_path
+    wrapped_check = partial(
+        check_one,
+        verify_checksums=args.verify_checksums,
+        debug_file=debug_file,
+        debug_lock=debug_lock
+    )
 
-        # optional checksum verification
-        if args.verify_checksums:
-            ok, msg = verify_b3sum(str(fq_path), debug_file, debug_lock)
-            if not ok:
-                return ("remove", fq_path, f"[audit] checksum failed: {msg}")
-
-        return ("ok", fq_path, "")
-
-    # run checks in parallel, with progress bar
     with ProcessPoolExecutor(max_workers=num_threads) as exe:
-        for status, fq, msg in tqdm(exe.map(check_one, fq_paths),
-                                     total=len(fq_paths),
-                                     desc="Auditing FASTQs"):
+        for status, fq, msg in tqdm(
+            exe.map(wrapped_check, fq_paths),
+            total=len(fq_paths),
+            desc="Auditing FASTQs"
+        ):
             if status == "remove":
                 to_remove.append((fq, msg))
 
