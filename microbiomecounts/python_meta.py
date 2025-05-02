@@ -726,7 +726,9 @@ def process_sample(
         mp_counts     = outdir / f"{acc}_MetaPhlAn_counts.txt"
         mp_bowtie2out = outdir / f"{acc}_bowtie2out.txt"
 
-        if mp_bowtie2out.exists():
+        use_bowtie2out = mp_bowtie2out.exists() and mp_bowtie2out.stat().st_size > 1000
+
+        if use_bowtie2out:
             cmd = (
                 f"metaphlan {mp_bowtie2out} "
                 f"--input_type bowtie2out --nproc {metaphlan_threads} "
