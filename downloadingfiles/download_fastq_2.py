@@ -13,6 +13,7 @@ import atexit
 import signal
 import argparse
 import subprocess
+from tqdm import tqdm
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -670,45 +671,51 @@ def write_sorted_unique_completed(completed_file, bio_files, debug_file, debug_l
                           debug_file, debug_lock)
 
 def audit_and_repair_fastqs(args, debug_file, debug_lock, num_threads=16):
+    import os, gzip
+    from pathlib import Path
+
     fastq_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
     fq_paths = list(Path(fastq_dir).glob("*.fastq.gz"))
     to_remove = []
 
     def check_one(fq_path):
-        # basic gzip sanity
+        # basic gzip sanity / header check
         try:
             with gzip.open(fq_path, "rt") as f:
                 for i, line in enumerate(f):
-                    if i >= 64: break
+                    if i >= 64:
+                        break
                     if i % 4 == 0 and not line.startswith("@"):
                         raise ValueError("bad FASTQ header")
         except Exception as e:
             return ("remove", fq_path, f"[audit] corrupt FASTQ: {e}")
 
-        # optionally verify
+        # optional checksum verification
         if args.verify_checksums:
             ok, msg = verify_b3sum(str(fq_path), debug_file, debug_lock)
             if not ok:
                 return ("remove", fq_path, f"[audit] checksum failed: {msg}")
+
         return ("ok", fq_path, "")
 
+    # run checks in parallel, with progress bar
     with ProcessPoolExecutor(max_workers=num_threads) as exe:
-        futures = {exe.submit(check_one, fq): fq for fq in fq_paths}
-        for fut in as_completed(futures):
-            status, fq, msg = fut.result()
+        for status, fq, msg in tqdm(exe.map(check_one, fq_paths),
+                                     total=len(fq_paths),
+                                     desc="Auditing FASTQs"):
             if status == "remove":
                 to_remove.append((fq, msg))
 
-    # remove bad ones
+    # remove bad files and their stale .b3
     for fq, msg in to_remove:
         log_debug_message(msg, debug_file, debug_lock)
         remove_file_safely(fq, debug_file, debug_lock)
-        # also drop stale checksum
-        safe_b3 = str(fq) + ".b3"
-        if os.path.exists(safe_b3):
-            remove_file_safely(safe_b3, debug_file, debug_lock)
+        stale = str(fq) + ".b3"
+        if os.path.exists(stale):
+            remove_file_safely(stale, debug_file, debug_lock)
 
-    log_debug_message(f"[audit] Completed audit, removed {len(to_remove)} files", debug_file, debug_lock)
+    log_debug_message(f"[audit] Completed audit, removed {len(to_remove)} files",
+                      debug_file, debug_lock)
 
 ##########################
 # Cleanup Functions
@@ -879,70 +886,112 @@ def main():
                       args.debug_file, args.debug_lock)
 
     if not to_download:
+        # Nothing left to do
         print("[INFO] All accessions are already completed. Nothing to do.")
-        log_debug_message("[main] All accessions are already completed. Exiting early.", 
-                          args.debug_file, args.debug_lock)
+        log_debug_message(
+            "[main] All accessions are already completed. Exiting early.",
+            args.debug_file,
+            args.debug_lock
+        )
     else:
-        print(f"[INFO] Found {len(all_accs)} total, {len(done_accs)} completed, "
-              f"so {len(to_download)} remaining.")
-        
+        # 1) Report how many runs remain
+        print(
+            f"[INFO] Found {len(all_accs)} total, "
+            f"{len(done_accs)} completed, "
+            f"so {len(to_download)} remaining."
+        )
+    
+        # 2) Determine how many workers and threads each should use
         total_cores = os.cpu_count() or 4
         min_threads_per_worker = 4
         max_workers_cap = 64
+    
         if args.num_workers is None:
-            max_workers_by_cores = total_cores // min_threads_per_worker
-            num_workers = min(max_workers_by_cores, len(to_download), max_workers_cap)
+            # Cap workers by available cores
+            max_by_cores = total_cores // min_threads_per_worker
+            num_workers = min(max_by_cores, len(to_download), max_workers_cap)
         else:
+            # Honor user‐requested cap
             num_workers = min(args.num_workers, len(to_download), max_workers_cap)
-        n_threads_per_worker = max(min_threads_per_worker, total_cores // num_workers)
-        log_debug_message(f"[main] Dynamically allocated {num_workers} workers with {n_threads_per_worker} threads each "
-                          f"(total cores: {total_cores}, tasks: {len(to_download)}).",
-                          args.debug_file, args.debug_lock)
-
-        log_debug_message(f"[main] Launching parallel download for {len(to_download)} accessions "
-                          f"using {num_workers} workers.", args.debug_file, args.debug_lock)
-
+    
+        # Each worker gets at least min_threads_per_worker threads
+        n_threads_per_worker = max(
+            min_threads_per_worker,
+            total_cores // num_workers
+        )
+    
+        log_debug_message(
+            f"[main] Dynamically allocated {num_workers} workers "
+            f"with {n_threads_per_worker} threads each "
+            f"(total cores: {total_cores}, tasks: {len(to_download)}).",
+            args.debug_file,
+            args.debug_lock
+        )
+        log_debug_message(
+            f"[main] Launching parallel download for {len(to_download)} accessions "
+            f"using {num_workers} workers.",
+            args.debug_file,
+            args.debug_lock
+        )
+    
+        # 3) Ensure output directories exist
         os.makedirs(os.path.join(args.workdir, "fastq_data"), exist_ok=True)
         os.makedirs(os.path.join(args.workdir, "metadata"), exist_ok=True)
         os.makedirs(os.path.dirname(args.debug_file) or args.workdir, exist_ok=True)
         if args.tmp_dir:
             os.makedirs(args.tmp_dir, exist_ok=True)
-
+    
+        # 4) Submit jobs with an initial staggered delay
+        stagger_delay = 2.0
+        futures = []
+    
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                future_map = {}
-                stagger_delay = 2.0  # Could be args.stagger_delay if made configurable
-                for i, acc in enumerate(sorted(to_download)):
-                    if i < num_workers:
-                        initial_delay = stagger_delay * i
-                    else:
-                        initial_delay = 0
-                    initial_delay += random.uniform(0, 1.0)  # Optional jitter
-                    log_debug_message(
-                        f"[main] Scheduling {acc} with initial delay of {initial_delay:.2f}s",
-                        args.debug_file, args.debug_lock
-                    )
-                    fut = executor.submit(
-                        process_accession,
+            for i, acc in enumerate(sorted(to_download)):
+                # Delay the first num_workers launches to avoid stampede
+                if i < num_workers:
+                    initial_delay = stagger_delay * i
+                else:
+                    initial_delay = 0
+                # Add a small random jitter
+                initial_delay += random.uniform(0, 1.0)
+    
+                log_debug_message(
+                    f"[main] Scheduling {acc} with initial delay of "
+                    f"{initial_delay:.2f}s",
+                    args.debug_file,
+                    args.debug_lock
+                )
+    
+                fut = executor.submit(
+                    process_accession,
+                    acc,
+                    args,
+                    n_threads_per_worker,
+                    args.tmp_dir,
+                    False,
+                    initial_delay
+                )
+                futures.append((fut, acc))
+    
+            # 5) Collect results with a progress bar
+            for fut, acc in tqdm(
+                futures,
+                desc="Downloading accessions",
+                total=len(futures)
+            ):
+                try:
+                    res = fut.result()
+                    print(res)
+                    log_debug_message(res, args.debug_file, args.debug_lock)
+                except Exception as e:
+                    msg = f"[FATAL] Worker error for {acc}: {e}"
+                    print(msg, file=sys.stderr)
+                    log_debug_message(msg, args.debug_file, args.debug_lock)
+                    append_line_with_lock(
                         acc,
-                        args,
-                        n_threads_per_worker,
-                        args.tmp_dir,
-                        False,
-                        initial_delay
+                        args.failed_file,
+                        args.failed_lock
                     )
-                    future_map[fut] = acc
-        
-                for fut in as_completed(future_map):
-                    acc = future_map[fut]
-                    try:
-                        res = fut.result()
-                        print(res)
-                        log_debug_message(res, args.debug_file, args.debug_lock)
-                    except Exception as e:
-                        msg = f"[FATAL] Worker error for {acc}: {e}"
-                        print(msg, file=sys.stderr)
-                        log_debug_message(msg, args.debug_file, args.debug_lock)
-                        append_line_with_lock(acc, args.failed_file, args.failed_lock)
 
     log_debug_message("[main] Auditing FASTQ files for corruption and checksum mismatch...", args.debug_file, args.debug_lock)
     audit_and_repair_fastqs(
