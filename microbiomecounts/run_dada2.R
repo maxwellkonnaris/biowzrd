@@ -247,7 +247,7 @@ message("------------------------- Finished Taxonomy:", biop)
 
 # 7) FINAL SAVES ----------------------------------------------------------
 
-saveRDS(seqtab,        file.path(outdir, paste0("asv_", biop, ".rds")))
+saveRDS(seqtab,        file.path(outdir, paste0(biop, "_dada2_counts_withchimeras.rds")))
 saveRDS(seqtab_nochim, file.path(outdir, paste0(biop, "_dada2_counts.rds")))
 saveRDS(tax,           file.path(outdir, paste0(biop, "_dada2_taxa.rds")))
 
