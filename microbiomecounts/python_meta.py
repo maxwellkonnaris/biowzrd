@@ -191,7 +191,7 @@ def run_command(cmd: str, description: str, env_name: str = None) -> None:
     """
     logger.info(description)
     try:
-        subprocess.run(cmd, shell=True, check=True, text=True)
+        subprocess.run(cmd, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError:
         logger.error(f"Command failed: {description}")
         raise
@@ -725,40 +725,62 @@ def process_sample(
         mp_out        = outdir / f"{acc}_profiled.tsv"
         mp_counts     = outdir / f"{acc}_MetaPhlAn_counts.txt"
         mp_bowtie2out = outdir / f"{acc}_bowtie2out.txt"
-
+    
+        # decide whether to reuse an existing bowtie2out
         use_bowtie2out = mp_bowtie2out.exists() and mp_bowtie2out.stat().st_size > 1000
-
+    
         if use_bowtie2out:
             cmd = (
                 f"metaphlan {mp_bowtie2out} "
-                f"--input_type bowtie2out --nproc {metaphlan_threads} "
+                f"--input_type bowtie2out "
+                f"--nproc {metaphlan_threads} "
+                f"--bowtie2db {os.environ['METAPHLAN_DB']} "
                 f"--unclassified_estimation "
                 f"-o {mp_out}"
             )
         else:
             cmd = (
                 f"metaphlan {fq1} "
-                f"--input_type fastq --nproc {metaphlan_threads} "
+                f"--input_type fastq "
+                f"--nproc {metaphlan_threads} "
+                f"--bowtie2db {os.environ['METAPHLAN_DB']} "
                 f"--bowtie2out {mp_bowtie2out} "
                 f"--unclassified_estimation "
                 f"-o {mp_out}"
             )
-
+    
         logger.info(f"{acc}: MetaPhlAn → start")
         try:
-            subprocess.run(cmd, shell=True, check=True, text=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # verify and convert
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            # sanity‐check output
             if not mp_out.exists() or mp_out.stat().st_size < 100:
-                raise RuntimeError("MetaPhlAn output missing/too small")
+                raise RuntimeError("MetaPhlAn output missing or too small")
+            # convert to counts
             if not convert_metaphlan_to_counts(mp_out, mp_counts):
-                raise RuntimeError("counts conversion failed")
+                raise RuntimeError("MetaPhlAn counts conversion failed")
+    
             logger.info(f"{acc}: MetaPhlAn → success ({perf_counter()-start:.1f}s)")
             update_checkpoint(input_file, acc, "MetaPhlAn", "1", delim)
-        except Exception as e:
-            logger.info(f"{acc}: MetaPhlAn → FAIL ({e})")
+    
+        except subprocess.CalledProcessError as e:
+            logger.info(f"{acc}: MetaPhlAn → FAIL (exit {e.returncode})")
+            logger.error(f"[MetaPhlAn stderr]\n{e.stderr.strip()}")
             append_with_flock(f"{acc}:MP_FAIL", FAILED_FILE)
             return
+    
+        except Exception as e:
+            logger.info(f"{acc}: MetaPhlAn → FAIL ({e})")
+            logger.exception("Unexpected error in MetaPhlAn block")
+            append_with_flock(f"{acc}:MP_FAIL", FAILED_FILE)
+            return
+
 
     # -------------------------------------------------------------------
     # mOTUs
