@@ -676,7 +676,7 @@ def merge_profiles(biop: str, tool: str):
     
     run_command(cmd, f"Merging {biop} {tool}")
 
-def final_validation_and_merge(input_file: Path, delim: str, env_name: str, conda_prefix: Path):
+def final_validation_and_merge(input_file: Path, delim: str):
     """Run final validation and merge MetaPhlAn and mOTUs profiles."""
     bioprojects = set()
     with input_file.open() as f:
@@ -900,7 +900,7 @@ def main():
     
     # Step 6: Final validation and merging
     start = time.time()
-    final_validation_and_merge(Path(args.input_file), delim, env_name)
+    final_validation_and_merge(Path(args.input_file), delim)
     logger.info(f"Final validation and merging took {time.time() - start:.2f} seconds")
 
     logger.info("Pipeline complete.")
