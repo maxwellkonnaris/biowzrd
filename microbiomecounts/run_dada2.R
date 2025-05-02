@@ -121,32 +121,53 @@ message("------------------------- Finished Filtering:", biop)
 err_chk <- file.path(chkdir, "errors.rds")
 smp_chk <- file.path(chkdir, "sample_names.rds")
 
+# Find filtered FASTQ files (already generated or new ones)
+filts <- list.files(filtpath, pattern="filtered_.*\\.fastq$", full.names=TRUE)
+sample.names <- sub(
+  "^filtered_([^_]+)(?:_1)?\\.fastq$",
+  "\\1",
+  basename(filts),
+  perl = TRUE
+)
+
+# Check if an existing error model is out of date
+if (file.exists(smp_chk)) {
+  saved_sample.names <- readRDS(smp_chk)
+  
+  if (!identical(sort(saved_sample.names), sort(sample.names))) {
+    message("Sample list has changed since last run. Clearing old error model.")
+    unlink(c(err_chk, smp_chk))
+  }
+}
+
+# Reload or re-learn the error model
 if (file.exists(err_chk) && file.exists(smp_chk)) {
   message("Loading existing error model and sample names")
   err <- readRDS(err_chk)
   sample.names <- readRDS(smp_chk)
+  filts <- list.files(filtpath, pattern="filtered_.*\\.fastq$", full.names=TRUE)
+  names(filts) <- sample.names
+  if (anyDuplicated(sample.names)) {
+    stop("Duplicate sample names detected!")
+  }
 } else {
   message("Learning error rates")
   filts <- list.files(filtpath, pattern="filtered_.*\\.fastq$", full.names=TRUE)
-  
   sample.names <- sub(
     "^filtered_([^_]+)(?:_1)?\\.fastq$",
     "\\1",
     basename(filts),
     perl = TRUE
   )
-  
   names(filts) <- sample.names
   if (anyDuplicated(sample.names)) {
     stop("Duplicate sample names detected!")
   }
-  
+
   err <- learnErrors(filts, nbases=1e8, multithread=TRUE, randomize=TRUE, verbose=VERBOSE)
-  
   saveRDS(err, err_chk)
   saveRDS(sample.names, smp_chk)
 }
-
 message("------------------------- Finished Error Model: ", biop)
 
 # 3) dada() PER-SAMPLE ----------------------------------------------------
