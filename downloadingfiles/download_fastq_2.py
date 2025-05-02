@@ -51,6 +51,17 @@ def log_debug_message(msg, debug_file, debug_lock):
 # File Validation Helpers
 ##########################
 
+def verify_b3sum(fq_path, debug_file, debug_lock):
+    b3file = fq_path + ".b3"
+    if not os.path.exists(b3file):
+        return False, "[verify] missing .b3"
+    try:
+        subprocess.run(["b3sum", "-c", b3file],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        return True, ""
+    except subprocess.CalledProcessError as e:
+        return False, e.stderr.decode().strip()
+
 def is_valid_fastq(path, min_size_bytes=100):  # Lowered for debugging
     size = os.path.getsize(path) if os.path.isfile(path) else 0
     valid = size >= min_size_bytes
@@ -84,37 +95,16 @@ def get_read_lengths(fastq_gz):
     except Exception as e:
         return None
 
-def compute_global_md5_checksums(fastq_dir, checksum_file, lock_file, debug_file, debug_lock, num_threads=8):
-    from pathlib import Path
-    import hashlib
-
-    def compute_md5_for_file(fq_path):
-        try:
-            hash_md5 = hashlib.md5()
-            with open(fq_path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    hash_md5.update(chunk)
-            checksum = hash_md5.hexdigest()
-            return f"{checksum}  {os.path.basename(fq_path)}"
-        except Exception as e:
-            log_debug_message(f"[checksum] Error for {fq_path}: {e}", debug_file, debug_lock)
-            return None
-
-    fq_files = list(Path(fastq_dir).rglob("*.fastq.gz"))
-
-    with ProcessPoolExecutor(max_workers=num_threads) as executor:
-        results = list(executor.map(compute_md5_for_file, fq_files))
-
-    with open(lock_file, "a+"):
-        flock_exclusive(open(lock_file, "a+"))
-        with open(checksum_file, "w") as f:
-            for line in results:
-                if line:
-                    f.write(line + "\n")
-        flock_release(open(lock_file, "a+"))
-
-    log_debug_message(f"[checksum] Wrote global MD5 checksums for {len(fq_files)} files to {checksum_file}",
-                      debug_file, debug_lock)
+def write_per_file_b3sum(fq_path, debug_file, debug_lock):
+    try:
+        out = subprocess.run(["b3sum", fq_path],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        checksum, fname = out.split(maxsplit=1)
+        with open(fq_path + ".b3", "w") as w:
+            w.write(f"{checksum}  {Path(fq_path).name}\n")
+        log_debug_message(f"[b3sum] Wrote {fq_path}.b3", debug_file, debug_lock)
+    except subprocess.CalledProcessError as e:
+        log_debug_message(f"[b3sum] Failed on {fq_path}: {e.stderr}", debug_file, debug_lock)
 
 
 ##########################
@@ -144,7 +134,7 @@ def compress_fastqs(accession, fastq_dir, debug_file, debug_lock):
     fastq_files = glob.glob(pattern)
     compressor = shutil.which("pigz") or shutil.which("gzip")
     if not compressor:
-        raise RuntimeError("No pigz or gzip found on system!")
+        raise RuntimeError("No pigz or gzip found")
 
     for fq in fastq_files:
         if not fq.endswith(".gz"):
@@ -152,8 +142,9 @@ def compress_fastqs(accession, fastq_dir, debug_file, debug_lock):
             if "pigz" in compressor:
                 cmd.extend(["-p", "8"])
             cmd.append(fq)
-            run_command(cmd, f"[compress_fastqs] {accession} compression failed on {fq}",
-                        debug_file, debug_lock)
+            run_command(cmd, f"[compress_fastqs] {fq}", debug_file, debug_lock)
+            write_per_file_b3sum(fq + ".gz", debug_file, debug_lock)
+
 
 def cleanup_invalid_fastqs(accession, fastq_dir, debug_file, debug_lock):
     gz_files = glob.glob(os.path.join(fastq_dir, f"{accession}*.fastq.gz"))
@@ -678,83 +669,46 @@ def write_sorted_unique_completed(completed_file, bio_files, debug_file, debug_l
         log_debug_message(f"[write_sorted_unique_completed] No bio files; removed {completed_file}",
                           debug_file, debug_lock)
 
-def audit_and_repair_fastqs(args, checksum_file, checksum_lock, debug_file, debug_lock, num_threads=16):
-    import hashlib
+def audit_and_repair_fastqs(args, debug_file, debug_lock, num_threads=16):
+    fastq_dir = os.path.join(args.workdir, "fastq_data", "fastq_biologicaldata")
+    fq_paths = list(Path(fastq_dir).glob("*.fastq.gz"))
+    to_remove = []
 
-    fastq_dir = os.path.join(args.workdir, "fastq_data")
-    checksum_map = {}
-
-    # Load existing checksums if present
-    if os.path.exists(checksum_file):
-        with open(checksum_file, "r") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                chksum, fname = line.strip().split()
-                checksum_map[fname] = chksum
-
-    # All FASTQs in biological dir
-    fq_files = list(Path(fastq_dir).rglob("fastq_biologicaldata/*.fastq.gz"))
-
-    def process_fq(fq_path):
-        fq_name = fq_path.name
+    def check_one(fq_path):
+        # basic gzip sanity
         try:
-            # Check gzip integrity
             with gzip.open(fq_path, "rt") as f:
                 for i, line in enumerate(f):
-                    if i >= 64:
-                        break
+                    if i >= 64: break
                     if i % 4 == 0 and not line.startswith("@"):
-                        raise ValueError(f"Bad format in {fq_name}: line {i+1} doesn't start with @")
-
-            # Check MD5 if available
-            if fq_name in checksum_map:
-                hash_md5 = hashlib.md5()
-                with open(fq_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(8192), b""):
-                        hash_md5.update(chunk)
-                computed = hash_md5.hexdigest()
-                if computed != checksum_map[fq_name]:
-                    return ("remove", fq_path, f"[audit] {fq_name} checksum mismatch")
-            else:
-                # Add new checksum
-                hash_md5 = hashlib.md5()
-                with open(fq_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(8192), b""):
-                        hash_md5.update(chunk)
-                return ("add_checksum", fq_name, hash_md5.hexdigest())
-
-            return ("ok", fq_path, "")
+                        raise ValueError("bad FASTQ header")
         except Exception as e:
-            return ("remove", fq_path, f"[audit] {fq_name} failed: {e}")
+            return ("remove", fq_path, f"[audit] corrupt FASTQ: {e}")
 
-    # Parallelize the audit
-    to_remove = []
-    to_add_checksum = []
+        # optionally verify
+        if args.verify_checksums:
+            ok, msg = verify_b3sum(str(fq_path), debug_file, debug_lock)
+            if not ok:
+                return ("remove", fq_path, f"[audit] checksum failed: {msg}")
+        return ("ok", fq_path, "")
 
-    with ProcessPoolExecutor(max_workers=num_threads) as executor:
-        futures = {executor.submit(process_fq, fq): fq for fq in fq_files}
+    with ProcessPoolExecutor(max_workers=num_threads) as exe:
+        futures = {exe.submit(check_one, fq): fq for fq in fq_paths}
         for fut in as_completed(futures):
-            status, val1, val2 = fut.result()
+            status, fq, msg = fut.result()
             if status == "remove":
-                to_remove.append((val1, val2))
-            elif status == "add_checksum":
-                to_add_checksum.append((val1, val2))
+                to_remove.append((fq, msg))
 
-    # Remove corrupt/mismatched files
-    for path, msg in to_remove:
+    # remove bad ones
+    for fq, msg in to_remove:
         log_debug_message(msg, debug_file, debug_lock)
-        remove_file_safely(path, debug_file, debug_lock)
+        remove_file_safely(fq, debug_file, debug_lock)
+        # also drop stale checksum
+        safe_b3 = str(fq) + ".b3"
+        if os.path.exists(safe_b3):
+            remove_file_safely(safe_b3, debug_file, debug_lock)
 
-    # Append new checksums
-    if to_add_checksum:
-        with open(checksum_lock, "a+"):
-            flock_exclusive(open(checksum_lock, "a+"))
-            with open(checksum_file, "a") as cf:
-                for fname, chksum in to_add_checksum:
-                    cf.write(f"{chksum}  {fname}\n")
-            flock_release(open(checksum_lock, "a+"))
-        log_debug_message(f"[audit] Added {len(to_add_checksum)} new checksums", debug_file, debug_lock)
+    log_debug_message(f"[audit] Completed audit, removed {len(to_remove)} files", debug_file, debug_lock)
 
 ##########################
 # Cleanup Functions
@@ -799,6 +753,31 @@ def signal_handler(sig, frame, args):
     cleanup_all_temps(args.workdir, args.debug_file, args.debug_lock)
     sys.exit(1)
 
+def compute_global_b3sums(fastq_dir, checksum_file, lock_file,
+                          debug_file, debug_lock, num_threads=8):
+    def run_b3(fq):
+        try:
+            return subprocess.run(
+                ["b3sum", str(fq)],
+                capture_output=True, text=True, check=True
+            ).stdout.strip()
+        except subprocess.CalledProcessError as e:
+            log_debug_message(f"[b3sum] {fq}: {e.stderr}", debug_file, debug_lock)
+            return None
+
+    fq_files = list(Path(fastq_dir).rglob("*.fastq.gz"))
+    with ProcessPoolExecutor(max_workers=num_threads) as exe:
+        results = list(exe.map(run_b3, fq_files))
+
+    with open(lock_file, "a+"):
+        flock_exclusive(open(lock_file, "a+"))
+        with open(checksum_file, "w") as out:
+            for line in results:
+                if line:
+                    out.write(line + "\n")
+        flock_release(open(lock_file, "a+"))
+    log_debug_message(f"[b3sum] Global checksums → {checksum_file}", debug_file, debug_lock)
+
 ##########################
 # Main with Dynamic Workers
 ##########################
@@ -833,6 +812,8 @@ def parse_args():
                         help="Directory for temporary files (default: within workdir/fastq_data)")
     parser.add_argument("--clean-unexpected", action="store_true",
                         help="Remove files in fastq_biologicaldata not in accessions file")
+    parser.add_argument("--verify-checksums", action="store_true",
+                    help="Enable b3sum checksum verification during audit")
     return parser.parse_args()
 
 def main():
@@ -966,10 +947,9 @@ def main():
     log_debug_message("[main] Auditing FASTQ files for corruption and checksum mismatch...", args.debug_file, args.debug_lock)
     audit_and_repair_fastqs(
         args,
-        checksum_file=os.path.join(args.workdir, "fastq_data", "fastq_checksums.md5"),
-        checksum_lock=os.path.join(args.workdir, "fastq_data", "fastq_checksums.md5.lock"),
-        debug_file=args.debug_file,
-        debug_lock=args.debug_lock
+        args.debug_file,
+        args.debug_lock,
+        num_threads=min(args.num_workers, 16)
     )
 
     log_debug_message("[main] Post-processing: Checking and sorting FASTQs...", args.debug_file, args.debug_lock)
@@ -978,15 +958,15 @@ def main():
     log_debug_message("[main] Post-processing: Final validation of downloaded files...", args.debug_file, args.debug_lock)
     final_bio_files = final_validation(args, n_threads_per_worker)
 
-    log_debug_message("[main] Computing global MD5 checksums for FASTQ files...", args.debug_file, args.debug_lock)
-    compute_global_md5_checksums(
+    compute_global_b3sums(
         fastq_dir=os.path.join(args.workdir, "fastq_data"),
-        checksum_file=os.path.join(args.workdir, "fastq_data", "fastq_checksums.md5"),
-        lock_file=os.path.join(args.workdir, "fastq_data", "fastq_checksums.md5.lock"),
+        checksum_file=os.path.join(args.workdir, "fastq_data", "fastq_checksums.b3"),
+        lock_file=os.path.join(args.workdir, "fastq_data", "fastq_checksums.b3.lock"),
         debug_file=args.debug_file,
         debug_lock=args.debug_lock,
-        num_threads=min(num_workers, 16)
+        num_threads=min(args.num_workers, 16)
     )
+
     log_debug_message("[main] Writing sorted list of unique completed accessions based on fastq_biologicaldata...", 
                       args.debug_file, args.debug_lock)
     write_sorted_unique_completed(args.completed_file, final_bio_files, args.debug_file, args.debug_lock)
