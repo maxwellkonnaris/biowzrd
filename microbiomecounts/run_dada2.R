@@ -238,7 +238,8 @@ if (file.exists(tax_chk)) {
   tax <- readRDS(tax_chk)
 } else {
   message("Assigning taxonomy")
-  tax <- assignTaxonomy(seqtab_nochim, "rdp_19_toGenus_trainset.fa.gz", multithread=TRUE, verbose = VERBOSE)
+  seqs <- colnames(seqtab_nochim)
+  tax <- assignTaxonomy(seqs, "rdp_19_toGenus_trainset.fa.gz", multithread=TRUE, verbose = VERBOSE)
   saveRDS(tax, tax_chk)
 }
 
