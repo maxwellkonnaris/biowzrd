@@ -188,12 +188,23 @@ def setup_environment():
 def run_command(cmd: str, description: str, env_name: str = None) -> None:
     """
     Run a shell command (e.g. Rscript) directly, assuming the environment is already active.
+    Captures stdout and stderr, and logs them on failure.
     """
     logger.info(description)
     try:
-        subprocess.run(cmd, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        return result.stdout  # if callers expect stdout
+    except subprocess.CalledProcessError as e:
         logger.error(f"Command failed: {description}")
+        logger.error(f"[stdout]\n{e.stdout.strip()}")
+        logger.error(f"[stderr]\n{e.stderr.strip()}")
         raise
 
 def validate_input_file(file_path: Path) -> str:
