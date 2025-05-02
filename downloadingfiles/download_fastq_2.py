@@ -765,21 +765,24 @@ def signal_handler(sig, frame, args):
     cleanup_all_temps(args.workdir, args.debug_file, args.debug_lock)
     sys.exit(1)
 
+def run_b3(fq, debug_file, debug_lock):
+    try:
+        return subprocess.run(
+            ["b3sum", str(fq)],
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except subprocess.CalledProcessError as e:
+        log_debug_message(f"[b3sum] {fq}: {e.stderr}", debug_file, debug_lock)
+        return None
+
 def compute_global_b3sums(fastq_dir, checksum_file, lock_file,
                           debug_file, debug_lock, num_threads=8):
-    def run_b3(fq):
-        try:
-            return subprocess.run(
-                ["b3sum", str(fq)],
-                capture_output=True, text=True, check=True
-            ).stdout.strip()
-        except subprocess.CalledProcessError as e:
-            log_debug_message(f"[b3sum] {fq}: {e.stderr}", debug_file, debug_lock)
-            return None
-
     fq_files = list(Path(fastq_dir).rglob("*.fastq.gz"))
+
+    wrapped = partial(run_b3, debug_file=debug_file, debug_lock=debug_lock)
+
     with ProcessPoolExecutor(max_workers=num_threads) as exe:
-        results = list(exe.map(run_b3, fq_files))
+        results = list(exe.map(wrapped, fq_files))
 
     with open(lock_file, "a+"):
         flock_exclusive(open(lock_file, "a+"))
