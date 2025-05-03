@@ -44,8 +44,8 @@ SLURM_CONFIG = {
     "nodes": 1,
     "ntasks": 1,
     "cpus-per-task": 16,
-    "mem": "256G",
-    "account": "one",
+    "mem": "128G",
+    "account": "open",
     "mail-user": "mak6930@psu.edu",
 }
 
@@ -96,7 +96,7 @@ DEFAULT_DIR = "fastq_data/fastq_biologicaldata"
 OUTPUT_BASE = Path("metagenomics")
 LOCK_DIR = Path("locks")
 FAILED_FILE = Path("failed_meta.log")
-METAPHLAN_DB_FALLBACK = "/storage/work/mak6930/applicationstorage/micromamba/envs/mpa/lib/python3.7/site-packages/metaphlan/metaphlan_databases"
+METAPHLAN_DB = "/storage/work/mak6930/applicationstorage/micromamba/envs/mpa/lib/python3.7/site-packages/metaphlan/metaphlan_databases"
 
 # at the very top, after imports
 REQUIRED_COLUMNS_META = [
@@ -227,8 +227,8 @@ def check_metaphlan_database() -> Path:
         )
         db_path = Path(result.stdout.strip())
     except subprocess.CalledProcessError:
-        logger.debug(f"MetaPhlAn DB auto-detection failed; using fallback: {METAPHLAN_DB_FALLBACK}")
-        db_path = Path(METAPHLAN_DB_FALLBACK)
+        logger.debug(f"MetaPhlAn DB auto-detection failed; using fallback: {METAPHLAN_DB}")
+        db_path = Path(METAPHLAN_DB)
 
     if not db_path.is_dir():
         logger.error(f"MetaPhlAn DB not found at {db_path}")
@@ -669,6 +669,13 @@ def merge_profiles(biop: str, tool: str):
     conda_prefix = Path(os.environ.get("CONDA_PREFIX", ""))  # Get the conda prefix from the environment variable
 
     if tool == "metaphlan":
+        files = list(odir.glob("*_profiled.txt"))
+        if not files:
+            logger.debug(f"No MetaPhlAn proportions files found for {biop}")
+            return
+        out = odir / f"{biop}_proportions.tsv"
+        merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
+        cmd = f"python \"{merge_script}\" {' '.join(map(str, files))} > \"{out}\""
         files = list(odir.glob("*_MetaPhlAn_counts.txt"))
         if not files:
             logger.debug(f"No MetaPhlAn counts files found for {biop}")
@@ -697,9 +704,8 @@ def final_validation_and_merge(input_file: Path, delim: str):
             if row[2] == "meta":
                 bioprojects.add(row[0])
     for bp in sorted(bioprojects):
-        merge_profiles(bp, "metaphlan", "counts")
-        merge_profiles(bp, "metaphlan", "abundances")
-        merge_profiles(bp, "motus", "")
+        merge_profiles(bp, "metaphlan")
+        merge_profiles(bp, "motus")
     logger.info("Final merge of MetaPhlAn counts, abundances, and mOTUs done")
 
 def process_sample(
@@ -877,7 +883,7 @@ def main():
     os.environ["FAILED_FILE"] = str(FAILED_FILE)
     os.environ["OUTPUT_BASE"] = str(OUTPUT_BASE)
 
-    MetaPhlAn_db = check_metaphlan_database()  # Fixed from check_rdp_database
+    METAPHLAN_DB = check_metaphlan_database()  # Fixed from check_rdp_database
     fastq_dir = Path(args.fastq_dir).resolve()
 
     # Step 1: Generate checksums if needed
