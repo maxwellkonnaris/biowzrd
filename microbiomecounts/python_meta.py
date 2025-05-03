@@ -291,7 +291,6 @@ def validate_fastq(fq: Path) -> bool:
     Validate a FASTQ file.
     Logs failures at INFO; successes at DEBUG.
     """
-    logger.debug(f"[VAL] Checking {fq}")
     if not fq.is_file():
         logger.error(f"[VAL FAIL] {fq} does not exist")
         return False
@@ -303,8 +302,6 @@ def validate_fastq(fq: Path) -> bool:
                 return False
     except (gzip.BadGzipFile, EOFError):
         logger.error(f"[VAL FAIL] {fq} is not valid gzip")
-        return False
-    logger.debug(f"[VAL PASS] {fq}")
     return True
 
 def is_biological_fastq(fq: Path) -> bool:
