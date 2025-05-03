@@ -669,20 +669,25 @@ def merge_profiles(biop: str, tool: str):
     conda_prefix = Path(os.environ.get("CONDA_PREFIX", ""))  # Get the conda prefix from the environment variable
 
     if tool == "metaphlan":
-        files = list(odir.glob("*_profiled.txt"))
-        if not files:
+        # --- Merge proportions ---
+        prop_files = list(odir.glob("*_profiled.txt"))
+        if prop_files:
+            prop_out = odir / f"{biop}_proportions.tsv"
+            merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
+            cmd_prop = f"python \"{merge_script}\" {' '.join(map(str, prop_files))} > \"{prop_out}\""
+            run_command(cmd_prop, f"Merging {biop} MetaPhlAn proportions")
+        else:
             logger.debug(f"No MetaPhlAn proportions files found for {biop}")
-            return
-        out = odir / f"{biop}_proportions.tsv"
-        merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
-        cmd = f"python \"{merge_script}\" {' '.join(map(str, files))} > \"{out}\""
-        files = list(odir.glob("*_MetaPhlAn_counts.txt"))
-        if not files:
+
+        # --- Merge counts ---
+        count_files = list(odir.glob("*_MetaPhlAn_counts.txt"))
+        if count_files:
+            count_out = odir / f"{biop}_MetaPhlAn_merged.tsv"
+            merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
+            cmd_count = f"python \"{merge_script}\" {' '.join(map(str, count_files))} > \"{count_out}\""
+            run_command(cmd_count, f"Merging {biop} MetaPhlAn counts")
+        else:
             logger.debug(f"No MetaPhlAn counts files found for {biop}")
-            return
-        out = odir / f"{biop}_MetaPhlAn_merged.tsv"
-        merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
-        cmd = f"python \"{merge_script}\" {' '.join(map(str, files))} > \"{out}\""
     else:  # motus
         files = list(odir.glob("*_motus.out"))
         if not files:
@@ -883,7 +888,9 @@ def main():
     os.environ["FAILED_FILE"] = str(FAILED_FILE)
     os.environ["OUTPUT_BASE"] = str(OUTPUT_BASE)
 
-    METAPHLAN_DB = check_metaphlan_database()  # Fixed from check_rdp_database
+    METAPHLAN_DB = check_metaphlan_database()  
+    os.environ["METAPHLAN_DB"] = str(METAPHLAN_DB)
+    
     fastq_dir = Path(args.fastq_dir).resolve()
 
     # Step 1: Generate checksums if needed
