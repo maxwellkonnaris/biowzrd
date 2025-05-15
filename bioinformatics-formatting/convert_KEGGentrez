@@ -1,0 +1,66 @@
+#' Maxwell's custom KEGG/ENTREZ mining from KEGGREST api tool. Last update: 2/8/24
+#' Parse KEGG information for a given organism
+#' 
+#' This function retrieves KEGG IDs/ENTREZ from KEGGREST for a given organism.
+#' 
+#' @param organism The name of the organism to search for.
+#' @return A dataframe containing KEGG/ENTREZ information for the specified organism.
+#' @export
+IDgetit <- function(organism) {
+  require("KEGGREST")
+  require("clusterProfiler")
+  library(KEGGREST)
+  library(clusterProfiler)
+  
+  # Search organism name
+  org_results <- as.data.frame(keggList("organism"))
+  kegg_organism_results <- search_kegg_organism(paste0(organism), by='common_name')
+  
+  # Prompt user to select organism name
+  cat("Select the organism name:\n")
+  print(org_results)
+  print(kegg_organism_results)
+  organism_name <- readline("Enter the organism name from the lists above: ")
+  
+  # Retrieve KEGG/ENTREZ keys
+  keys <- names(keggList(organism_name))
+  
+  # Initialize a list to store Ensembl numbers
+  ensembl_numbers <- vector("list", length(keys))
+  
+  # Loop through each KEGG/ENTREZ key
+  for (i in seq_along(keys)) {
+    tryCatch({
+      query <- keggGet(keys[i])
+      print(query)
+      if ("DBLINKS" %in% names(query[[1]])) {
+        dblink <- query[[1]]$DBLINKS
+        ensembl <- dblink[grep("Ensembl:", dblink)]
+        if (length(ensembl) > 0) {
+          ensembl_numbers[[i]] <- ensembl
+        }
+      }
+    }, error = function(e) {
+      message(paste0(keys[i], " error: ", e$message))
+    })
+  }
+  
+  # Name the list elements with the KEGG keys
+  names(ensembl_numbers) <- keys
+  
+  # Replace null entries with 'Not available'
+  ensembl_numbers[sapply(ensembl_numbers, is.null)] <- 'Not available'
+  
+  # Create a dataframe
+  ensembl_number <- data.frame(NCBI = names(ensembl_numbers), ENSEMBL = unlist(ensembl_numbers), stringsAsFactors = FALSE)
+  
+  # Clean up NCBI and ENSEMBL columns
+  ensembl_number$NCBI <- sub(paste0(organism,":"), "", ensembl_number$NCBI)
+  ensembl_number$ENSEMBL <- sub("Ensembl: ", "", ensembl_number$ENSEMBL)
+  
+  # Write dataframe to CSV
+  write.csv(ensembl_number, paste0(organism,"_entrez.csv"), row.names = FALSE)
+  
+  # Return the dataframe
+  return(ensembl_number)
+}
