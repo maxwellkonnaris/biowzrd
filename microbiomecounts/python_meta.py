@@ -44,7 +44,7 @@ SLURM_CONFIG = {
     "nodes": 1,
     "ntasks": 1,
     "cpus-per-task": 16,
-    "mem": "128G",
+    "mem": "256G",
     "account": "open",
     "mail-user": "mak6930@psu.edu",
 }
@@ -127,7 +127,7 @@ def setup_directories():
 def append_with_flock(line: str, file_path: Path):
     """
     Append a line to a file using an exclusive file lock
-    so multiple processes can’t write simultaneously.
+    so multiple processes can't write simultaneously.
     """
     with file_path.open("a") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -573,7 +573,7 @@ def update_checkpoint(
 ):
     """
     Safely update a single checkpoint cell using a file lock
-    so multiple processes can’t clobber each other.
+    so multiple processes can't clobber each other.
     """
     lock_path = LOCK_DIR / (input_file.name + ".lock")
     # Ensure lock file exists
@@ -670,9 +670,16 @@ def merge_profiles(biop: str, tool: str):
         prop_files = list(odir.glob("*_profiled.txt"))
         if prop_files:
             prop_out = odir / f"{biop}_proportions.tsv"
+            # Write file list to temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                for file in prop_files:
+                    f.write(f"{file}\n")
+                file_list = f.name
+            
             merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
-            cmd_prop = f"python \"{merge_script}\" {' '.join(map(str, prop_files))} > \"{prop_out}\""
+            cmd_prop = f"python \"{merge_script}\" -i \"{file_list}\" > \"{prop_out}\""
             run_command(cmd_prop, f"Merging {biop} MetaPhlAn proportions")
+            os.unlink(file_list)
         else:
             logger.debug(f"No MetaPhlAn proportions files found for {biop}")
 
@@ -680,9 +687,16 @@ def merge_profiles(biop: str, tool: str):
         count_files = list(odir.glob("*_MetaPhlAn_counts.txt"))
         if count_files:
             count_out = odir / f"{biop}_MetaPhlAn_merged.tsv"
+            # Write file list to temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                for file in count_files:
+                    f.write(f"{file}\n")
+                file_list = f.name
+            
             merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
-            cmd_count = f"python \"{merge_script}\" {' '.join(map(str, count_files))} > \"{count_out}\""
+            cmd_count = f"python \"{merge_script}\" -i \"{file_list}\" > \"{count_out}\""
             run_command(cmd_count, f"Merging {biop} MetaPhlAn counts")
+            os.unlink(file_list)
         else:
             logger.debug(f"No MetaPhlAn counts files found for {biop}")
     else:  # motus
@@ -693,7 +707,6 @@ def merge_profiles(biop: str, tool: str):
         out = odir / f"{biop}_motus_merged.tsv"
         file_list = ",".join(map(str, files))
         cmd = f"motus merge -i \"{file_list}\" -o \"{out}\""
-    
     run_command(cmd, f"Merging {biop} {tool}")
 
 def final_validation_and_merge(input_file: Path, delim: str):
@@ -735,6 +748,7 @@ def process_sample(
     
     input_file = Path(os.environ["INPUT_FILE"])
     delim = os.environ["DELIM"]
+    extra_mp_args = "--read_min_len 30"
 
     # -------------------------------------------------------------------
     # MetaPhlAn
@@ -755,6 +769,7 @@ def process_sample(
                 f"--nproc {metaphlan_threads} "
                 f"--bowtie2db {os.environ['METAPHLAN_DB']} "
                 f"--unclassified_estimation "
+                f"{extra_mp_args} " 
                 f"-o {mp_out}"
             )
         else:
@@ -765,6 +780,7 @@ def process_sample(
                 f"--bowtie2db {os.environ['METAPHLAN_DB']} "
                 f"--bowtie2out {mp_bowtie2out} "
                 f"--unclassified_estimation "
+                f"{extra_mp_args} " 
                 f"-o {mp_out}"
             )
     
