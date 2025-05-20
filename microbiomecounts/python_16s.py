@@ -15,6 +15,7 @@ import fcntl
 import tempfile
 import shlex
 
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +32,7 @@ import pandas as pd
 logger.info("Falling back to pandas for single threaded I/O")
     
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -228,6 +229,15 @@ def process_fastq_global(fq_path_str: str, input_accs: set) -> Optional[Tuple[st
     fq = Path(fq_path_str)
     acc = re.sub(r"(_[12])?\.fastq(\.gz)?$", "", fq.name)
     return (acc, fq_path_str) if acc in input_accs else None
+    
+
+def compute_checksum(f: Path) -> str:
+    """Return the b3sum output for this file."""
+    res = subprocess.run(
+        ["b3sum", str(f)],
+        capture_output=True, text=True, check=True
+    )
+    return res.stdout.strip()
 
 
 def generate_fastq_checksums(fastq_dir: Path, num_workers: int):
@@ -235,10 +245,7 @@ def generate_fastq_checksums(fastq_dir: Path, num_workers: int):
     fastq_files = sorted(fastq_dir.glob("*.fastq.gz"))
     checksum_file = fastq_dir / "checksums.b3"
     checksums = []
-    def compute_checksum(f: Path) -> str:
-        result = subprocess.run(["b3sum", str(f)], capture_output=True, text=True, check=True)
-        return result.stdout.strip()
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
         for checksum in tqdm(
             executor.map(compute_checksum, fastq_files),
             total=len(fastq_files),
@@ -561,7 +568,7 @@ def process_bioprojects(
             mem = "256G"
             cpus = 16
             time = "48:00:00"
-            account = "open"
+            account = "one"
             print(f"Bioproject {biop} has at least one FASTQ > 10 GB. Increasing resources: {cpus} CPUs, {mem}, {time}.")
         elif total_size_gb > 150:
             mem = "256G"
@@ -659,7 +666,6 @@ def main():
     
     # Step 5: Submit bioprojects as SLURM array job
     bioprojects = full_df["Bioproject"].unique().tolist()
-    fastq_dict = {biop: full_df[full_df["Bioproject"] == biop]["Fastq1"].tolist() for biop in bioprojects}
     inputfile = OUTPUT_BASE / "16s_validated.csv"
     full_df.to_csv(inputfile, sep=delim, index=False)
     process_bioprojects(bioprojects, str(inputfile), args.num_workers)
