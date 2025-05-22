@@ -1,42 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse
-import csv
-from datetime import datetime
-import gzip
-import logging
-import os
-import re
-import shutil
-import subprocess
-import sys
-import time
-import fcntl
-import tempfile
-import shlex
-
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
-
-#try:
-#    import fireducks.pandas as pd
-#    logger.info("Using fireducks.pandas for faster multithreaded I/O")
-#except ImportError:
-import pandas as pd
-logger.info("Falling back to pandas for single threaded I/O")
-    
-from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-# SLURM-like configuration (adapt as needed for your environment)
+# SLURM-like configuration 
 SLURM_CONFIG = {
     "job-name": "counts_16s",
     "output": "slurm_16s-%j.out",
@@ -46,8 +10,7 @@ SLURM_CONFIG = {
     "ntasks": 1,
     "cpus-per-task": 16,
     "mem": "64G",
-    "account": "open",
-    "mail-user": "mak6930@psu.edu",
+    "account": "open"
 }
 
 def submit_slurm_job(dependency=None):
@@ -99,12 +62,12 @@ LOCK_DIR = Path("locks")
 FAILED_FILE = Path("failed_16s.log")
 RDP_DATABASE = "rdp_19_toGenus_trainset.fa.gz"
 
-# at the very top, after imports
-REQUIRED_COLUMNS_16S = [
-    "Bioproject", "RunAccession", "SequencingType",
-    "Fastq1", "Fastq2", "Validated"
-]
-ZERO_DEFAULTS_16S = {"Validated"}
+# these must already be in df, or you’ll raise an error
+HARD_REQUIRED = ["Bioproject", "RunAccession", "SequencingType"]
+
+# these will be added if missing, with “Validated”→"0", fastq cols→""
+OPTIONAL_COLUMNS = ["Fastq1", "Fastq2", "Validated"]
+ZERO_DEFAULTS = {"Validated"}
 
 def ensure_required_columns(df: pd.DataFrame,
                             required: list[str],
@@ -117,6 +80,17 @@ def ensure_required_columns(df: pd.DataFrame,
         if col not in df.columns:
             df[col] = "0" if col in zero_cols else ""
     return df
+
+def prepare_16s_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    1) Error if any HARD_REQUIRED columns are missing.
+    2) Auto-add any OPTIONAL_COLUMNS that aren’t present,
+       defaulting “Validated” to "0", fastq paths to "".
+    """
+    missing = set(HARD_REQUIRED) - set(df.columns)
+    if missing:
+        raise KeyError(f"Missing required columns: {missing!r}")
+    return ensure_required_columns(df, OPTIONAL_COLUMNS, ZERO_DEFAULTS)
 
 def setup_directories():
     """Create required directories."""
@@ -395,7 +369,9 @@ def update_input_with_fastq_paths(
     logger.info("Updating FASTQ paths")
 
     # 1) Load input CSV
-    df = pd.read_csv(input_file, sep=delim)
+    df = pd.read_csv(input_file, sep=delim, dtype=str)
+    df = prepare_16s_df(df)
+    
     input_accs = set(df.loc[df["SequencingType"] == "16S", "RunAccession"].str.strip())
     logger.info(f"{len(input_accs)} target accessions from CSV")
 
@@ -468,8 +444,6 @@ def update_input_with_fastq_paths(
     df["Fastq1"]    = df["Fastq1"   ].fillna("MISSING")
     df["Fastq2"]    = df["Fastq2"   ].fillna("MISSING")
     df["Validated"] = df["Validated"].fillna("0")
-
-    df = ensure_required_columns(df, REQUIRED_COLUMNS_16S,ZERO_DEFAULTS_16S)
 
     # And finally overwrite the CSV
     logger.info(f"Writing updated CSV → {input_file}")
@@ -579,8 +553,8 @@ def process_bioprojects(
             account = "one"
             print(f"Bioproject {biop} has {num_files} FASTQ files totaling {total_size_gb:.1f} GB. Increasing resources: {cpus} CPUs, {mem}, {time}.")
         else:
-            mem = "64G"
-            cpus = 16
+            mem = "128G"
+            cpus = 8
             time = "48:00:00"
             account = "open"
         
@@ -611,8 +585,41 @@ def process_bioprojects(
 def main():
     args = parse_arguments()
     from pathlib import Path
-    import pandas as pd
+    import argparse
+    import csv
+    from datetime import datetime
+    import gzip
+    import logging
+    import os
+    import re
+    import shutil
+    import subprocess
+    import sys
+    import time
+    import fcntl
+    import tempfile
+    import shlex
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logger = logging.getLogger(__name__)
 
+    #try:
+    #    import fireducks.pandas as pd
+    #    logger.info("Using fireducks.pandas for faster multithreaded I/O")
+    #except ImportError:
+    import pandas as pd
+    logger.info("Falling back to pandas for single threaded I/O")
+        
+    from tqdm import tqdm
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
+    from typing import Dict, List, Optional, Tuple
+    
     # Determine delimiter early (needed for submit-only)
     delim = validate_input_file(Path(args.input_file))
     os.environ["DELIM"] = delim
@@ -680,5 +687,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
