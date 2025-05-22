@@ -1,5 +1,40 @@
 #!/usr/bin/env python3
 
+"""
+counts_16s.py
+=============
+
+A SLURM‑aware pipeline for validating, repairing and processing 16S‑rRNA
+FASTQ files prior to DADA2 denoising.  The script can either
+
+1.  Perform **one‑shot** processing on a full accession list, or
+2.  Act as a **job‑submitter**, spawning a separate SLURM job per
+    BioProject (via the ``--submit-only`` flag).
+
+Key features
+------------
+* **Checksum‑driven integrity checks** with BLAKE3 (``b3sum``).
+* Parallel FASTQ validation / repair using ``concurrent.futures``.
+* Automatic CSV checkpoint updates guarded with file locks.
+* Resource‑aware SLURM submission that scales memory / CPU per project.
+* Environment autodetection for Micromamba‑managed R/DADA2 envs.
+
+Typical usage
+-------------
+.. code-block:: bash
+
+    python counts_16s.py \
+        -i metadata.csv \
+        -d fastq_data/fastq_biologicaldata \
+        --submit-only          # submit one SLURM job per BioProject
+
+Or run the whole pipeline locally:
+
+.. code-block:: bash
+
+    python counts_16s.py -i metadata.csv -w 12
+"""
+
 # SLURM-like configuration 
 SLURM_CONFIG = {
     "job-name": "counts_16s",
