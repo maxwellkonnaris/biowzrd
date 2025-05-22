@@ -80,7 +80,8 @@ SLURM_CONFIG = {
     "ntasks": 1,
     "cpus-per-task": 16,
     "mem": "64G",
-    "account": "open"
+    "account": "open",
+    "mail-user": "mak6930@psu.edu",
 }
 
 def submit_slurm_job(dependency=None):
@@ -714,6 +715,39 @@ def process_bioprojects(
     
 def main():
     args = parse_arguments()
+    import argparse
+    import csv
+    from datetime import datetime
+    import gzip
+    import logging
+    import os
+    import re
+    import shutil
+    import subprocess
+    import sys
+    import time
+    import fcntl
+    import tempfile
+    import shlex
+    from typing import List, Dict, Optional, Tuple
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logger = logging.getLogger(__name__)
+    
+    #try:
+    #    import fireducks.pandas as pd
+    #    logger.info("Using fireducks.pandas for faster multithreaded I/O")
+    #except ImportError:
+    import pandas as pd
+    logger.info("Falling back to pandas for single threaded I/O")
+        
+    from tqdm import tqdm
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
 
     # Determine delimiter early (needed for submit-only)
@@ -760,8 +794,9 @@ def main():
     fastq_dir = Path(args.fastq_dir).resolve()
 
     # Step 1: Generate checksums if needed
-    if not (fastq_dir / "checksums.b3").exists():
+    if not any(fastq_dir.glob("*.b3")) and not any(fastq_dir.glob("*.b3sum")):
         generate_fastq_checksums(fastq_dir, args.num_workers)
+
 
     # Step 2: Build validated set
     validated_accessions = build_validated_set(Path(args.input_file), delim)
@@ -783,4 +818,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
