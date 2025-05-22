@@ -35,6 +35,41 @@ Or run the whole pipeline locally:
     python counts_16s.py -i metadata.csv -w 12
 """
 
+import argparse
+import csv
+from datetime import datetime
+import gzip
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import fcntl
+import tempfile
+import shlex
+from typing import List, Dict, Optional, Tuple
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+#try:
+#    import fireducks.pandas as pd
+#    logger.info("Using fireducks.pandas for faster multithreaded I/O")
+#except ImportError:
+import pandas as pd
+logger.info("Falling back to pandas for single threaded I/O")
+    
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
 # SLURM-like configuration 
 SLURM_CONFIG = {
     "job-name": "counts_16s",
@@ -199,15 +234,75 @@ def run_command(cmd: str, description: str, env_name: str = None) -> None:
         raise
 
 def validate_input_file(file_path: Path) -> str:
-    """Validate CSV header and determine delimiter."""
-    with file_path.open("r") as f:
-        first_line = f.readline().strip()
-    if first_line.startswith("Bioproject,RunAccession,SequencingType"):
-        return ","
-    if first_line.startswith("Bioproject\tRunAccession\tSequencingType"):
-        return "\t"
-    logger.error("Malformed header in input file")
-    sys.exit(1)
+    """
+    Validate & normalize CSV header; return delimiter.
+
+    1) Detects comma vs tab delimiter.
+    2) Reads header, normalizes each column name:
+       - all → lowercase, then capitalize first character
+       - columns starting with "run" → "Run" + capitalize(rest)
+       - columns starting with "sequencing" → "Sequencing" + capitalize(rest)
+    3) If header changed, rewrite the file with the normalized header.
+    4) Returns delimiter (',' or '\\t').
+
+    Args
+    ----
+    file_path : pathlib.Path
+        Path to the metadata CSV/TSV to validate.
+
+    Returns
+    -------
+    str
+        Delimiter string: either ',' or '\\t'.
+
+    Raises
+    ------
+    SystemExit
+        If no comma or tab can be found in the header.
+    """
+    text = file_path.read_text().splitlines()
+    if not text:
+        logger.error("Input file is empty")
+        sys.exit(1)
+
+    orig_header, *rest = text
+
+    # 1) detect delimiter
+    if ',' in orig_header:
+        delim = ','
+    elif '\t' in orig_header:
+        delim = '\t'
+    else:
+        logger.error("Could not detect delimiter; header has neither comma nor tab")
+        sys.exit(1)
+
+    # 2) split into column names & normalize
+    cols = [c.strip() for c in orig_header.split(delim)]
+
+    def normalize(col: str) -> str:
+        """lower → capitalize first char; special-cases run*/sequencing* prefixes."""
+        cl = col.lower().replace(' ', '')
+        if cl.startswith('run'):
+            # e.g. "runaccession" → "Run" + "accession".capitalize()
+            return 'Run' + cl[3:].capitalize()
+        if cl.startswith('sequencing'):
+            # e.g. "sequencingtype" → "Sequencing" + "type".capitalize()
+            return 'Sequencing' + cl[10:].capitalize()
+        # default: just Title-case
+        return cl.capitalize()
+
+    new_cols = [normalize(c) for c in cols]
+    new_header = delim.join(new_cols)
+
+    # 3) rewrite file if header changed
+    if new_header != orig_header:
+        logger.info(f"Normalizing header: {orig_header!r} → {new_header!r}")
+        with file_path.open('w', newline='') as f:
+            f.write(new_header + '\n')
+            f.write('\n'.join(rest))
+
+    # 4) return the delimiter so downstream code knows how to read the file
+    return delim
 
 def check_rdp_database():
     """Verify RDP database exists."""
@@ -216,7 +311,7 @@ def check_rdp_database():
         sys.exit(1)
     logger.info(f"RDP DB ok: {RDP_DATABASE}")
 
-def build_validated_set(input_file: Path, delim: str) -> List[str]:
+def build_validated_set(input_file: Path, delim: str) -> list[str]:
     """
     Read the input CSV and return all RunAccession values
     for which the 'Validated' field == '1'.
@@ -620,41 +715,7 @@ def process_bioprojects(
 def main():
     args = parse_arguments()
     from pathlib import Path
-    import argparse
-    import csv
-    from datetime import datetime
-    import gzip
-    import logging
-    import os
-    import re
-    import shutil
-    import subprocess
-    import sys
-    import time
-    import fcntl
-    import tempfile
-    import shlex
-    
-    # Setup logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-    logger = logging.getLogger(__name__)
 
-    #try:
-    #    import fireducks.pandas as pd
-    #    logger.info("Using fireducks.pandas for faster multithreaded I/O")
-    #except ImportError:
-    import pandas as pd
-    logger.info("Falling back to pandas for single threaded I/O")
-        
-    from tqdm import tqdm
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from pathlib import Path
-    from typing import Dict, List, Optional, Tuple
-    
     # Determine delimiter early (needed for submit-only)
     delim = validate_input_file(Path(args.input_file))
     os.environ["DELIM"] = delim
@@ -722,3 +783,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
