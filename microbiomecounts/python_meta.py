@@ -1,41 +1,20 @@
 #!/usr/bin/env python3
 
-import argparse
-import csv
+import argparse, csv, gzip, logging, os, re, shutil, subprocess, sys, time, fcntl, tempfile
 from datetime import datetime
-import gzip
-import logging
-import os
-import re
-import shutil
-import subprocess
-import sys
-import time
-import fcntl
-import tempfile
+from pathlib import Path
+from typing import List, Set, Dict, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import pandas as pd
+import shlex
+from tqdm import tqdm
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+# set up logging
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s",
+                    handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
 
-#try:
-#    import fireducks.pandas as pd
-#    logger.info("Using fireducks.pandas for faster multithreaded I/O")
-#except ImportError:
-import pandas as pd
-logger.info("Falling back to pandas for single threaded I/O")
-    
-from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set
-
-
-# SLURM-like configuration (adapt as needed for your environment)
 SLURM_CONFIG = {
     "job-name": "counts_meta",
     "output": "slurm_meta-%j.out",
@@ -49,48 +28,6 @@ SLURM_CONFIG = {
     "mail-user": "mak6930@psu.edu",
 }
 
-def submit_slurm_job(dependency=None):
-    """
-    Submit the pipeline as a SLURM job if not already running under SLURM.
-    """
-    if "SLURM_JOB_ID" in os.environ:
-        logger.info("Already running under SLURM, skipping submission")
-        return
-
-    # Build command without --submit-slurm
-    cmd = [sys.executable] + [arg for arg in sys.argv if arg != "--submit-slurm"]
-
-    # Write temporary SLURM script
-    with tempfile.NamedTemporaryFile("w", suffix=".slurm", delete=False) as sb:
-        sb.write("#!/bin/bash\n")
-        for key, val in SLURM_CONFIG.items():
-            sb.write(f"#SBATCH --{key}={val}\n")
-        if dependency:
-            sb.write(f"#SBATCH --dependency=afterok:{dependency}\n")
-        sb.write("\n")
-        sb.write("source ~/.bashrc\n")
-        active_env = os.environ.get("CONDA_DEFAULT_ENV") or os.environ.get("MAMBA_DEFAULT_ENV") or "mpa"  # Changed to 'mpa'
-        if not active_env:
-            logger.error("Could not determine active micromamba environment")
-            sys.exit(1)
-        sb.write(f"micromamba activate {active_env}\n\n")
-        sb.write(" ".join(cmd) + "\n")
-        script_path = sb.name
-
-    # Submit the job
-    try:
-        res = subprocess.run(
-            ["sbatch", script_path],
-            capture_output=True, text=True, check=True
-        )
-        logger.info(f"Submitted SLURM job: {res.stdout.strip()}")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"SLURM submission failed: {e.stderr.strip()}")
-        logger.error(f"Command output: {e.stdout.strip()}")
-        sys.exit(1)
-    finally:
-        os.unlink(script_path)
-
 # Default variables and directories
 DEFAULT_DIR = "fastq_data/fastq_biologicaldata"
 OUTPUT_BASE = Path("metagenomics")
@@ -98,18 +35,18 @@ LOCK_DIR = Path("locks")
 FAILED_FILE = Path("failed_meta.log")
 METAPHLAN_DB = "/storage/work/mak6930/applicationstorage/micromamba/envs/mpa/lib/python3.7/site-packages/metaphlan/metaphlan_databases"
 
-# at the very top, after imports
-REQUIRED_COLUMNS_META = [
-    "Bioproject", "RunAccession", "SequencingType",
-    "Fastq1", "Fastq2", "Validated", "MetaPhlAn", "Motus", "Completed"
-]
-ZERO_DEFAULTS_META = {"Validated", "MetaPhlAn", "Motus",  "Completed"}
+# these must already be in df, or you’ll raise an error
+HARD_REQUIRED = ["Bioproject", "RunAccession", "SequencingType"]
 
-def ensure_required_columns(
-    df: pd.DataFrame,
-    required: List[str],
-    zero_cols: Set[str]
-) -> pd.DataFrame:
+# these will be added if missing, with “Validated”→"0", fastq cols→""
+OPTIONAL_COLUMNS = ["Fastq1", "Fastq2", "Validated", "MetaPhlAn", "Motus",  "Completed"]
+ZERO_DEFAULTS = {"Validated", "MetaPhlAn", "Motus",  "Completed"}
+
+REQUIRED_COLUMNS_META = HARD_REQUIRED + OPTIONAL_COLUMNS
+
+def ensure_required_columns(df: pd.DataFrame,
+                            required: List[str],
+                            zero_cols: Set[str]) -> pd.DataFrame:
     """
     Guarantee that `df` has every column in `required`.
     For any missing col in zero_cols, fill with "0"; otherwise fill with "".
@@ -118,6 +55,17 @@ def ensure_required_columns(
         if col not in df.columns:
             df[col] = "0" if col in zero_cols else ""
     return df
+
+def prepare_meta_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    1) Error if any HARD_REQUIRED columns are missing.
+    2) Auto-add any OPTIONAL_COLUMNS that aren’t present,
+       defaulting “Validated” to "0", fastq paths to "".
+    """
+    missing = set(HARD_REQUIRED) - set(df.columns)
+    if missing:
+        raise KeyError(f"Missing required columns: {missing!r}")
+    return ensure_required_columns(df, OPTIONAL_COLUMNS, ZERO_DEFAULTS)
 
 def setup_directories():
     """Create required directories."""
@@ -133,6 +81,67 @@ def append_with_flock(line: str, file_path: Path):
         fcntl.flock(f, fcntl.LOCK_EX)
         f.write(line + "\n")
         fcntl.flock(f, fcntl.LOCK_UN)
+        
+def get_unique_bioprojects(csv_path: Path, delim: str) -> List[str]:
+    df = pd.read_csv(csv_path, sep=delim, usecols=["Bioproject"], dtype=str)
+    return sorted(df["Bioproject"].dropna().unique())
+
+def submit_slurm(cmd: List[str], job_name: str, dependency: Optional[str] = None) -> None:
+    """
+    Submit the given command as a SLURM job named `job_name`.
+    If `dependency` is provided, the job will wait for it to finish successfully.
+    """
+    # Build a temporary sbatch script
+    with tempfile.NamedTemporaryFile("w", suffix=".slurm", delete=False) as sb:
+        sb.write("#!/bin/bash\n")
+        # SBATCH directives
+        for key, val in SLURM_CONFIG.items():
+            sb.write(f"#SBATCH --{key}={val}\n")
+        sb.write(f"#SBATCH --job-name={job_name}\n")
+        sb.write(f"#SBATCH --output=slurm_{job_name}-%j.out\n")
+        sb.write(f"#SBATCH --error=slurm_{job_name}-%j.err\n")
+        if dependency:
+            sb.write(f"#SBATCH --dependency=afterok:{dependency}\n")
+        sb.write("\nsource ~/.bashrc\n")
+        # Activate the current conda/micromamba environment
+        active_env = os.getenv("CONDA_DEFAULT_ENV") or os.getenv("MAMBA_DEFAULT_ENV") or "mpa"
+        sb.write(f"micromamba activate {active_env}\n\n")
+        # Write the actual command
+        sb.write(" ".join(shlex.quote(x) for x in cmd) + "\n")
+        script_path = sb.name
+
+    # Submit and clean up
+    try:
+        result = subprocess.run([
+            "sbatch", script_path
+        ], capture_output=True, text=True, check=True)
+        logger.info(f"[SLURM] Submitted {job_name}: {result.stdout.strip()}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"SLURM submission failed for {job_name}: {e.stderr.strip()}")
+        sys.exit(1)
+    finally:
+        try:
+            os.unlink(script_path)
+        except OSError:
+            logger.warning(f"Could not remove temporary sbatch script: {script_path}")
+
+
+def submit_self_as_slurm(dependency: Optional[str] = None) -> None:
+    """
+    If not already running under SLURM, submit this script to Slurm.
+    Removes the --submit-slurm flag to avoid recursion.
+    """
+    # Skip if already under SLURM
+    if "SLURM_JOB_ID" in os.environ:
+        logger.info("Already running under SLURM; skipping submission.")
+        return
+
+    # Build the command to re-launch without --submit-slurm
+    cmd = [sys.executable] + [arg for arg in sys.argv if arg != "--submit-slurm"]
+    # Derive a job name from the script filename
+    job_name = os.path.splitext(os.path.basename(sys.argv[0]))[0]
+    submit_slurm(cmd, job_name, dependency)
+    sys.exit(0)
 
 def parse_arguments():
     """Parse command-line arguments."""
@@ -157,6 +166,16 @@ def parse_arguments():
                         help="Threads for MetaPhlAn bowtie2 (default: 4)")
     parser.add_argument("--motus-threads",    type=int, default=4,
                         help="Threads for mOTUs profiling (default: 4)")
+    parser.add_argument("--skip-preprocessing", action="store_true",
+                        help="Skip checksum generation, FASTQ repair, path "
+                             "updates, and checkpoint regeneration. "
+                             "Assumes the input CSV already contains valid "
+                             "Fastq1/Fastq2/Validated and MetaPhlAn/mOTUs "
+                             "checkpoint columns.")
+    parser.add_argument("--bioproject",
+                        help="Run only this BioProject ID. "
+                             "If omitted the script becomes a *launcher* that "
+                             "fires one SLURM job per BioProject.")
     parser.add_argument("--no-repair-fastqs", action="store_false", dest="repair_fastqs",
                        help="Disable FASTQ repair")
     parser.add_argument("--submit-slurm", action="store_true",
@@ -481,12 +500,20 @@ def update_input_with_fastq_paths(
     logger.info("Updating FASTQ paths")
 
     # 1) Load input CSV
-    df = pd.read_csv(input_file, sep=delim)
+    df = pd.read_csv(input_file, sep=delim, dtype=str)
+    df = prepare_meta_df(df)
     input_accs = set(df.loc[df["SequencingType"] == "meta", "RunAccession"].str.strip())
     logger.info(f"{len(input_accs)} target accessions from CSV")
 
     # 2) Scan FASTQ dir
+    # sanity-check the FASTQ directory up front
+    if not fastq_dir.is_dir():
+        logger.error(f"FASTQ directory not found: {fastq_dir}")
+        sys.exit(1)
     fastq_files = list(fastq_dir.glob("*.fastq.gz"))
+    if not fastq_files:
+        logger.error(f"No .fastq.gz files found in: {fastq_dir}")
+        sys.exit(1)
     fq_paths = [str(p) for p in fastq_files]
     fastq_map: Dict[str, List[Path]] = {}
 
@@ -556,7 +583,7 @@ def update_input_with_fastq_paths(
     df["Fastq2"]    = df["Fastq2"   ].fillna("MISSING")
     df["Validated"] = df["Validated"].fillna("0")
 
-    df = ensure_required_columns(df, REQUIRED_COLUMNS_META,ZERO_DEFAULTS_META)
+    df = ensure_required_columns(df, REQUIRED_COLUMNS_META,ZERO_DEFAULTS)
 
     # And finally overwrite the CSV
     logger.info(f"Writing updated CSV → {input_file}")
@@ -659,46 +686,95 @@ def convert_metaphlan_to_counts(
         logger.error(f"Error converting {profile} to counts: {e}")
         return False
 
-
 def merge_profiles(biop: str, tool: str):
     """Merge MetaPhlAn or mOTUs profiles for a bioproject."""
     odir = OUTPUT_BASE / biop
-    conda_prefix = Path(os.environ.get("CONDA_PREFIX", ""))  # Get the conda prefix from the environment variable
+
+    # locate MetaPhlAn merge script
+    try:
+        import metaphlan
+        merge_script = Path(metaphlan.__file__).parent / "utils" / "merge_metaphlan_tables.py"
+        if not merge_script.exists():
+            logger.error(f"MetaPhlAn merge script not found: {merge_script}")
+            return
+    except ImportError:
+        logger.error("Cannot import 'metaphlan'; skipping merge step.")
+        return
 
     if tool == "metaphlan":
-        # --- Merge proportions ---
-        prop_files = list(odir.glob("*_profiled.txt"))
+        BATCH_SIZE = 95
+
+        # --- PROPORTIONS ---
+        prop_files = sorted(odir.glob("*_profiled.tsv"))
         if prop_files:
             prop_out = odir / f"{biop}_proportions.tsv"
-            # Write file list to temporary file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                for file in prop_files:
-                    f.write(f"{file}\n")
-                file_list = f.name
-            
-            merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
-            cmd_prop = f"python \"{merge_script}\" -i \"{file_list}\" > \"{prop_out}\""
-            run_command(cmd_prop, f"Merging {biop} MetaPhlAn proportions")
-            os.unlink(file_list)
+            batches = []
+            for i in range(0, len(prop_files), BATCH_SIZE):
+                batch = prop_files[i : i + BATCH_SIZE]
+                num = i // BATCH_SIZE + 1
+                batch_out = odir / f"{biop}_proportions_batch{num}.tsv"
+
+                if len(batch) == 1:
+                    shutil.copy2(batch[0], batch_out)
+                else:
+                    files_str = " ".join(f'"{p}"' for p in batch)
+                    cmd = f'python "{merge_script}" {files_str} > "{batch_out}"'
+                    run_command(cmd, f"Merging proportions batch {num} for {biop}")
+
+                batches.append(batch_out)
+
+            # final merge or move
+            if len(batches) == 1:
+                shutil.move(str(batches[0]), str(prop_out))
+            else:
+                files_str = " ".join(f'"{p}"' for p in batches)
+                final_cmd = f'python "{merge_script}" {files_str} > "{prop_out}"'
+                run_command(final_cmd, f"Final merge of proportions for {biop}")
+
+            # — show first 10 lines of the merged proportions —
+            logger.info(f"First 10 lines of {prop_out.name}:")
+            with open(prop_out, 'r') as fh:
+                for idx, line in enumerate(fh):
+                    if idx >= 10:
+                        break
+                    logger.info(f"  {line.rstrip()}")
+
         else:
             logger.debug(f"No MetaPhlAn proportions files found for {biop}")
 
-        # --- Merge counts ---
-        count_files = list(odir.glob("*_MetaPhlAn_counts.txt"))
+        # --- COUNTS (pandas concat) ---
+        count_files = sorted(odir.glob("*_MetaPhlAn_counts.txt"))
         if count_files:
-            count_out = odir / f"{biop}_MetaPhlAn_merged.tsv"
-            # Write file list to temporary file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                for file in count_files:
-                    f.write(f"{file}\n")
-                file_list = f.name
-            
-            merge_script = conda_prefix / "lib" / "python3.7" / "site-packages" / "metaphlan" / "utils" / "merge_metaphlan_tables.py"
-            cmd_count = f"python \"{merge_script}\" -i \"{file_list}\" > \"{count_out}\""
-            run_command(cmd_count, f"Merging {biop} MetaPhlAn counts")
-            os.unlink(file_list)
+            count_out = odir / f"{biop}_MetaPhlAn_merged_counts.tsv"
+            series_list = []
+            for f in count_files:
+                sample = f.stem.replace("_MetaPhlAn_counts", "")
+                df = pd.read_csv(
+                    f,
+                    sep="\t",
+                    comment="#",
+                    header=None,
+                    names=["clade", "abundance", "reads"],
+                    dtype={"clade": str, "abundance": float, "reads": float},
+                )
+                df = df.set_index("clade")
+                reads = df["reads"].rename(sample)
+                series_list.append(reads)
+
+            merged = pd.concat(series_list, axis=1).fillna(0).astype(int)
+            merged.to_csv(count_out, sep="\t")
+
+            # — show first 10 lines of the merged counts —
+            logger.info(f"First 10 lines of {count_out.name}:")
+            with open(count_out, 'r') as fh:
+                for idx, line in enumerate(fh):
+                    if idx >= 10:
+                        break
+                    logger.info(f"  {line.rstrip()}")
+
         else:
             logger.debug(f"No MetaPhlAn counts files found for {biop}")
+
     else:  # motus
         files = list(odir.glob("*_motus.out"))
         if not files:
@@ -707,7 +783,16 @@ def merge_profiles(biop: str, tool: str):
         out = odir / f"{biop}_motus_merged.tsv"
         file_list = ",".join(map(str, files))
         cmd = f"motus merge -i \"{file_list}\" -o \"{out}\""
-    run_command(cmd, f"Merging {biop} {tool}")
+        run_command(cmd, f"Merging {biop} {tool}")
+
+        # — show first 10 lines of the mOTUs merged file —
+        logger.info(f"First 10 lines of {out.name}:")
+        with open(out, 'r') as fh:
+            for idx, line in enumerate(fh):
+                if idx >= 10:
+                    break
+                logger.info(f"  {line.rstrip()}")
+
 
 def final_validation_and_merge(input_file: Path, delim: str):
     """Run final validation and merge MetaPhlAn and mOTUs profiles."""
@@ -850,8 +935,6 @@ def process_sample(
     # -------------------------------------------------------------------
     update_checkpoint(input_file, acc, "Completed", "1", delim)
     logger.info(f"{acc}: Completed")
-
-
     
 def process_samples(input_file: Path, delim: str, num_workers: int, mode: str,
     metaphlan_threads: str,
@@ -877,94 +960,114 @@ def process_samples(input_file: Path, delim: str, num_workers: int, mode: str,
 
 def main():
     args = parse_arguments()
+
+    # 1) If flagged for Slurm submission, self-submit and exit
     if args.submit_slurm:
-        submit_slurm_job(dependency=args.dependency)
+        submit_self_as_slurm(dependency=args.dependency)
+
+    # 2) Launcher mode: no --bioproject -> fire one job per BioProject
+    if args.bioproject is None:
+        delim = validate_input_file(Path(args.input_file))
+        bps = get_unique_bioprojects(Path(args.input_file), delim)
+        logger.info(f"Launching {len(bps)} BioProjects as separate SLURM jobs")
+
+        base_cmd = [sys.executable, sys.argv[0]] + [
+            a for a in sys.argv[1:]
+            if a != "--submit-slurm" and not a.startswith("--bioproject")
+        ]
+        for bp in bps:
+            cmd = base_cmd + ["--bioproject", bp, "--submit-slurm"]
+            submit_slurm(cmd, job_name=f"{bp}_meta", dependency=args.dependency)
         return
+
+    # 3) Worker mode: continue locally under Slurm (or without Slurm)
     if args.debug:
         logger.setLevel(logging.DEBUG)
-        
-    # Cap num_workers at 3/4ths of available CPUs
-    cpu_count = os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 4)
-    if isinstance(cpu_count, str):
-        cpu_count = int(cpu_count)
-    if cpu_count is None:
-        logger.warning("CPU count unavailable; falling back to 4 CPUs")
-        cpu_count = 8
-    args.num_workers = max(1, min(args.num_workers, cpu_count * 3 // 4))
-    logger.info(f"Using {args.num_workers} workers for MetaPhlAn/mOTUs parallel steps ({cpu_count} CPUs)")
 
     setup_directories()
     env_name = setup_environment()
     delim = validate_input_file(Path(args.input_file))
-    os.environ["DELIM"] = delim
-    os.environ["INPUT_FILE"] = args.input_file
-    os.environ["FAILED_FILE"] = str(FAILED_FILE)
-    os.environ["OUTPUT_BASE"] = str(OUTPUT_BASE)
-
-    METAPHLAN_DB = check_metaphlan_database()  
-    os.environ["METAPHLAN_DB"] = str(METAPHLAN_DB)
-    
+    os.environ.update({
+        "DELIM": delim,
+        "INPUT_FILE": args.input_file,
+        "FAILED_FILE": str(FAILED_FILE),
+        "OUTPUT_BASE": str(OUTPUT_BASE),
+    })
+    db = check_metaphlan_database()
+    os.environ["METAPHLAN_DB"] = str(db)
     fastq_dir = Path(args.fastq_dir).resolve()
 
-    # Step 1: Generate checksums if needed
-    start = time.time()
-    if not (fastq_dir / "checksums.b3").exists():
-        generate_fastq_checksums(fastq_dir, args.num_workers)
-    logger.info(f"Checksum generation took {time.time() - start:.2f} seconds")
-
-    # Step 2: Build validated set
-    start = time.time()
-    validated_accessions = build_validated_set(Path(args.input_file), delim)
-    logger.info(f"Validated set building took {time.time() - start:.2f} seconds")
-
-    # Step 3: Repair FASTQs if needed
-    start = time.time()
-    if args.repair_fastqs:
-        fastq_dir = repair_fastq_if_needed(fastq_dir, args.num_workers, validated_accessions)
-    logger.info(f"FASTQ repair took {time.time() - start:.2f} seconds")
-
-    # Step 4: Update input CSV with FASTQ paths + validation
-    start = time.time()
+    # 4) Pre-processing (checksums, repair, CSV updates)
+    if not args.skip_preprocessing:
+        # 4a) checksums
+        if not (fastq_dir / "checksums.b3").exists():
+            generate_fastq_checksums(fastq_dir, args.num_workers)
+        # 4b) build validated set
+        validated = build_validated_set(Path(args.input_file), delim)
+        # 4c) repair FASTQs
+        if args.repair_fastqs:
+            fastq_dir = repair_fastq_if_needed(fastq_dir, args.num_workers, validated)
+    else:
+        logger.info("⚡ Skipping preprocessing (--skip-preprocessing)")
+        
+    # 4d) update CSV with Fastq1/Fastq2/Validated
     update_input_with_fastq_paths(Path(args.input_file), fastq_dir, delim, args.num_workers)
-    logger.info(f"FASTQ path update took {time.time() - start:.2f} seconds")
-
-    # Step 4.5: Restore/checkpoint MetaPhlAn/mOTUs results if output dir exists
-    if OUTPUT_BASE.exists() and any(OUTPUT_BASE.iterdir()):
-        logger.info(f"MetaPhlAn/mOTUs output detected")
-        df = regenerate_input_with_validation(Path(args.input_file), OUTPUT_BASE, delim)
-        df.to_csv(Path(args.input_file), sep=delim, index=False)
-        logger.info(f"Checkpoint fields restored from existing MetaPhlAn/mOTUs output")
-
-    # Re-read the CSV
-    full_df = pd.read_csv(args.input_file, sep=delim, dtype=str)
     
-    # Filter to samples needing processing
+    # 4e) regenerate MetaPhlAn/mOTUs checkpoints if outputs already exist
+    if OUTPUT_BASE.exists() and any(OUTPUT_BASE.iterdir()):
+        regenerate_input_with_validation(Path(args.input_file), OUTPUT_BASE, delim)
+
+    # 5) Load CSV, filter to this BioProject (if any), select pending samples
+    full_df = pd.read_csv(args.input_file, sep=delim, dtype=str)
+    full_df = prepare_meta_df(full_df) 
+    if args.bioproject:
+        full_df = full_df[full_df["Bioproject"] == args.bioproject]
+
     to_run = full_df.loc[
         (full_df["SequencingType"] == "meta") &
-        ((full_df["MetaPhlAn"] == "0") | (full_df["Motus"] == "0")),
-        :
+        ((full_df["MetaPhlAn"] == "0") | (full_df["Motus"] == "0"))
     ]
 
     if to_run.empty:
-        logger.info("All samples already processed — nothing to do.")
-    else:
-        subset_path = Path(args.input_file).with_name("pending_samples.csv")
-        to_run.to_csv(subset_path, sep=delim, index=False)
-        logger.info(f"{len(to_run)} samples pending → {subset_path.name}")
+        logger.info("All samples already processed—nothing to do.")
+        return
 
-    # Step 5: Run MetaPhlAn/mOTUs processing
-    start = time.time()
+    subset_name = f"pending_{args.bioproject or 'all'}.csv"
+    subset_path = Path(args.input_file).with_name(subset_name)
+    to_run.to_csv(subset_path, sep=delim, index=False)
+    logger.info(f"{len(to_run)} samples pending → {subset_name}")
+
+    # 6) Profile in parallel
+    cpu_env    = os.environ.get("SLURM_CPUS_PER_TASK")
+    cpu_count  = int(cpu_env) if cpu_env and cpu_env.isdigit() else (os.cpu_count() or 4)
     args.num_workers = max(1, min(args.num_workers, cpu_count // 4, 4))
-    logger.info(f"Using {args.num_workers} workers for MetaPhlAn/mOTUs processing")
-    process_samples(subset_path, delim, args.num_workers, args.mode, args.metaphlan_threads, args.motus_threads)
-    logger.info(f"MetaPhlAn/mOTUs processing took {time.time() - start:.2f} seconds")
+    logger.info(f"Using {args.num_workers} workers for profiling")
     
-    # Step 6: Final validation and merging
-    start = time.time()
-    final_validation_and_merge(Path(args.input_file), delim)
-    logger.info(f"Final validation and merging took {time.time() - start:.2f} seconds")
+    try:
+        process_samples(
+            subset_path,
+            delim,
+            args.num_workers,
+            args.mode,
+            args.metaphlan_threads,
+            args.motus_threads
+        )
+    except Exception as e:
+        logger.error("Error during sample profiling!", exc_info=True)
+        # Optionally: sys.exit(1) if you want to stop here
+        return
+
+
+    # 7) Final merge: for a single BioProject, merge just that one;
+    #    otherwise fall back to the old “merge all” helper
+    if args.bioproject:
+        merge_profiles(args.bioproject, "metaphlan")
+        merge_profiles(args.bioproject, "motus")
+    else:
+        final_validation_and_merge(Path(args.input_file), delim)
 
     logger.info("Pipeline complete.")
+
 
 if __name__ == "__main__":
     if "--process-sample" in sys.argv:
