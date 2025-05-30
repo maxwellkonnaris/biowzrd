@@ -686,113 +686,151 @@ def convert_metaphlan_to_counts(
         logger.error(f"Error converting {profile} to counts: {e}")
         return False
 
-def merge_profiles(biop: str, tool: str):
-    """Merge MetaPhlAn or mOTUs profiles for a bioproject."""
-    odir = OUTPUT_BASE / biop
 
-    # locate MetaPhlAn merge script
+def merge_profiles(biop: str, tool: str):
+    """Merge MetaPhlAn or mOTUs profiles for a bioproject, fetching GTDB maps dynamically."""
+    odir         = OUTPUT_BASE / biop
+    python_exec  = sys.executable
+
     try:
         import metaphlan
-        merge_script = Path(metaphlan.__file__).parent / "utils" / "merge_metaphlan_tables.py"
+        utils_dir    = Path(metaphlan.__file__).parent / "utils"
+        merge_script = utils_dir / "merge_metaphlan_tables.py"
         if not merge_script.exists():
             logger.error(f"MetaPhlAn merge script not found: {merge_script}")
             return
     except ImportError:
-        logger.error("Cannot import 'metaphlan'; skipping merge step.")
+        logger.error("Cannot import 'metaphlan'; skipping merge.")
         return
 
-    if tool == "metaphlan":
-        BATCH_SIZE = 95
+    def _log_head(path: Path, n: int = 10):
+        logger.info(f"First {n} lines of {path.name}:")
+        with open(path) as fh:
+            for i, L in enumerate(fh):
+                if i >= n: break
+                logger.info("  " + L.rstrip())
 
-        # --- PROPORTIONS ---
-        prop_files = sorted(odir.glob("*_profiled.tsv"))
-        if prop_files:
-            prop_out = odir / f"{biop}_proportions.tsv"
-            batches = []
-            for i in range(0, len(prop_files), BATCH_SIZE):
-                batch = prop_files[i : i + BATCH_SIZE]
-                num = i // BATCH_SIZE + 1
-                batch_out = odir / f"{biop}_proportions_batch{num}.tsv"
-
-                if len(batch) == 1:
-                    shutil.copy2(batch[0], batch_out)
-                else:
-                    files_str = " ".join(f'"{p}"' for p in batch)
-                    cmd = f'python "{merge_script}" {files_str} > "{batch_out}"'
-                    run_command(cmd, f"Merging proportions batch {num} for {biop}")
-
-                batches.append(batch_out)
-
-            # final merge or move
-            if len(batches) == 1:
-                shutil.move(str(batches[0]), str(prop_out))
-            else:
-                files_str = " ".join(f'"{p}"' for p in batches)
-                final_cmd = f'python "{merge_script}" {files_str} > "{prop_out}"'
-                run_command(final_cmd, f"Final merge of proportions for {biop}")
-
-            # — show first 10 lines of the merged proportions —
-            logger.info(f"First 10 lines of {prop_out.name}:")
-            with open(prop_out, 'r') as fh:
-                for idx, line in enumerate(fh):
-                    if idx >= 10:
-                        break
-                    logger.info(f"  {line.rstrip()}")
-
-        else:
-            logger.debug(f"No MetaPhlAn proportions files found for {biop}")
-
-        # --- COUNTS (pandas concat) ---
-        count_files = sorted(odir.glob("*_MetaPhlAn_counts.txt"))
-        if count_files:
-            count_out = odir / f"{biop}_MetaPhlAn_merged_counts.tsv"
-            series_list = []
-            for f in count_files:
-                sample = f.stem.replace("_MetaPhlAn_counts", "")
-                df = pd.read_csv(
-                    f,
-                    sep="\t",
-                    comment="#",
-                    header=None,
-                    names=["clade", "abundance", "reads"],
-                    dtype={"clade": str, "abundance": float, "reads": float},
-                )
-                df = df.set_index("clade")
-                reads = df["reads"].rename(sample)
-                series_list.append(reads)
-
-            merged = pd.concat(series_list, axis=1).fillna(0).astype(int)
-            merged.to_csv(count_out, sep="\t")
-
-            # — show first 10 lines of the merged counts —
-            logger.info(f"First 10 lines of {count_out.name}:")
-            with open(count_out, 'r') as fh:
-                for idx, line in enumerate(fh):
-                    if idx >= 10:
-                        break
-                    logger.info(f"  {line.rstrip()}")
-
-        else:
-            logger.debug(f"No MetaPhlAn counts files found for {biop}")
-
-    else:  # motus
-        files = list(odir.glob("*_motus.out"))
-        if not files:
-            logger.debug(f"No mOTUs files found for {biop}")
+    if tool != "metaphlan":
+        motus_files = sorted(odir.glob("*_motus.out"))
+        if not motus_files:
+            logger.debug("No mOTUs files found; skipping")
             return
         out = odir / f"{biop}_motus_merged.tsv"
-        file_list = ",".join(map(str, files))
-        cmd = f"motus merge -i \"{file_list}\" -o \"{out}\""
-        run_command(cmd, f"Merging {biop} {tool}")
+        cmd = f'{python_exec} -m motus merge -i "{",".join(map(str, motus_files))}" -o "{out}"'
+        run_command(cmd, f"Merging {biop} mOTUs")
+        _log_head(out)
+        return
 
-        # — show first 10 lines of the mOTUs merged file —
-        logger.info(f"First 10 lines of {out.name}:")
-        with open(out, 'r') as fh:
-            for idx, line in enumerate(fh):
-                if idx >= 10:
-                    break
-                logger.info(f"  {line.rstrip()}")
+    # 1) collect profiled files & detect db name
+    profiled = sorted(odir.glob("*_profiled.tsv"))
+    if not profiled:
+        logger.debug("No MetaPhlAn profiled.tsv found; skipping")
+        return
+    with open(profiled[0]) as fh:
+        db_name = fh.readline().lstrip("#").split()[0]
 
+    # ensure GTDB map exists locally, otherwise download from GitHub raw
+    map_file = utils_dir / f"{db_name}_SGB2GTDB.tsv"
+    if not map_file.exists():
+        raw_url = (
+            "https://raw.githubusercontent.com/biobakery/MetaPhlAn/master/"
+            f"metaphlan/utils/{db_name}_SGB2GTDB.tsv"
+        )
+        logger.info(f"Downloading GTDB map for {db_name} from GitHub: {raw_url}")
+        urllib.request.urlretrieve(raw_url, map_file)
+
+    # 2) merge proportions (SGB)
+    prop_out = odir / f"{biop}_MetaPhlAn_proportions.tsv"
+    batches  = []
+    for i in range(0, len(profiled), 95):
+        batch     = profiled[i:i+95]
+        num       = i//95 + 1
+        batch_out = odir / f"{biop}_proportions_batch{num}.tsv"
+        if len(batch) == 1:
+            shutil.copy2(batch[0], batch_out)
+        else:
+            files_str = " ".join(f'"{p}"' for p in batch)
+            cmd = f'{python_exec} "{merge_script}" {files_str} > "{batch_out}"'
+            run_command(cmd, f"Merging proportions batch {num}")
+        batches.append(batch_out)
+    if len(batches) == 1:
+        shutil.move(str(batches[0]), str(prop_out))
+    else:
+        files_str = " ".join(f'"{p}"' for p in batches)
+        cmd = f'{python_exec} "{merge_script}" {files_str} > "{prop_out}"'
+        run_command(cmd, "Final merge of proportions")
+    _log_head(prop_out)
+
+    # 3) merge GTDB‐mapped proportions
+    gtdb_files = []
+    for f in profiled:
+        out_g = odir / f"{f.stem}_gtdb.tsv"
+        cmd   = (
+            f'{python_exec} -m metaphlan.utils.sgb_to_gtdb_profile '
+            f'-i "{f}" -o "{out_g}"'
+        )
+        run_command(cmd, f"Converting {f.name} → GTDB")
+        gtdb_files.append(out_g)
+    if gtdb_files:
+        gtdb_out  = odir / f"{biop}_MetaPhlAn_proportions_gtdb.tsv"
+        files_str = " ".join(f'"{p}"' for p in gtdb_files)
+        cmd = f'{python_exec} "{merge_script}" {files_str} > "{gtdb_out}"'
+        run_command(cmd, "Final merge of GTDB proportions")
+        _log_head(gtdb_out)
+
+    # 4) merge counts (pandas)
+    counts   = sorted(odir.glob("*_MetaPhlAn_counts.txt"))
+    if counts:
+        count_out = odir / f"{biop}_MetaPhlAn_merged_counts.tsv"
+        series    = []
+        for f in counts:
+            sample = f.stem.replace("_MetaPhlAn_counts", "")
+            df = (
+                pd.read_csv(
+                    f, sep="\t", comment="#", header=None,
+                    names=["clade","abundance","reads"],
+                )
+                .set_index("clade")
+            )
+            series.append(df["reads"].rename(sample))
+        pd.concat(series, axis=1).fillna(0).astype(int).to_csv(count_out, sep="\t")
+        _log_head(count_out)
+
+        # 5) merge GTDB‐mapped counts
+        gtdb_counts = []
+        for f in counts:
+            out_c = odir / f"{f.stem}_counts_gtdb.tsv"
+            cmd   = (
+                f'{python_exec} -m metaphlan.utils.sgb_to_gtdb_profile '
+                f'-i "{f}" -o "{out_c}"'
+            )
+            run_command(cmd, f"Converting {f.name} counts → GTDB")
+            gtdb_counts.append(out_c)
+        if gtdb_counts:
+            gtdb_count_out = odir / f"{biop}_MetaPhlAn_merged_counts_gtdb.tsv"
+            series = []
+            for f in gtdb_counts:
+                sample = f.stem.replace("_MetaPhlAn_counts_counts_gtdb","")
+                df = (
+                    pd.read_csv(
+                        f, sep="\t", comment="#", header=None,
+                        names=["clade","abundance","reads"],
+                    )
+                    .set_index("clade")
+                )
+                series.append(df["reads"].rename(sample))
+            pd.concat(series, axis=1).fillna(0).astype(int).to_csv(gtdb_count_out, sep="\t")
+            _log_head(gtdb_count_out)
+    else:
+        logger.debug("No MetaPhlAn counts files found.")
+
+def _log_head(path: Path, n: int = 10):
+    """Helper to log the first n lines of a file."""
+    logger.info(f"First {n} lines of {path.name}:")
+    with open(path) as fh:
+        for i, line in enumerate(fh):
+            if i >= n: break
+            logger.info("  " + line.rstrip())
 
 def final_validation_and_merge(input_file: Path, delim: str):
     """Run final validation and merge MetaPhlAn and mOTUs profiles."""
