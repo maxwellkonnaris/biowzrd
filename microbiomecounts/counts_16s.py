@@ -434,7 +434,7 @@ def repair_fastq_if_needed(
             return fn
 
     failed_files: list[str] = []
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(verify, h, fn) for h, fn in to_check]
         for future in tqdm(as_completed(futures),
                            total=len(futures),
@@ -457,7 +457,7 @@ def repair_fastq_if_needed(
                 for line in inf:
                     outf.write(line.rstrip("\r") + "\n")
 
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
             list(tqdm(executor.map(do_repair, failed_files),
                       total=len(failed_files),
                       desc="Repairing FASTQs"))
@@ -513,7 +513,7 @@ def update_input_with_fastq_paths(
 
     # 2a) Map accession→file in parallel, with progress
     map_futures = []
-    with ProcessPoolExecutor(max_workers=num_workers) as exe:
+    with ThreadPoolExecutor(max_workers=num_workers) as exe:
         for fq in fq_paths:
             map_futures.append(exe.submit(process_fastq_global, fq, input_accs))
 
@@ -529,7 +529,7 @@ def update_input_with_fastq_paths(
     # 3) Validate each FASTQ in parallel, with progress
     validated_map: Dict[str, List[Path]] = {}
     val_futures = []
-    with ProcessPoolExecutor(max_workers=num_workers) as exe:
+    with ThreadPoolExecutor(max_workers=num_workers) as exe:
         for acc, fqs in fastq_map.items():
             for fq in fqs:
                 val_futures.append(exe.submit(validate_and_check, fq, acc))
@@ -675,19 +675,19 @@ def process_bioprojects(
             mem = "256G"
             cpus = 16
             time = "48:00:00"
-            account = "one"
+            account = "one_sc_default" # HEY IF YOURE READING THIS CHANGE
             print(f"Bioproject {biop} has at least one FASTQ > 10 GB. Increasing resources: {cpus} CPUs, {mem}, {time}.")
         elif total_size_gb > 150:
             mem = "256G"
             cpus = "32"
             time = "48:00:00"
-            account = "one"
+            account = "one_sc_default" # HEY IF YOURE READING THIS CHANGE
             print(f"Bioproject {biop} has {num_files} FASTQ files totaling {total_size_gb:.1f} GB. Increasing resources: {cpus} CPUs, {mem}, {time}.")
         else:
             mem = "128G"
             cpus = 8
             time = "48:00:00"
-            account = "open"
+            account = "open" # HEY IF YOURE READING THIS CHANGE
         
         # write a temporary SLURM script
         with tempfile.NamedTemporaryFile("w", suffix=".slurm", delete=False) as sb:
@@ -704,7 +704,6 @@ def process_bioprojects(
                     continue
                 sb.write(f"#SBATCH --{key}={val}\n")
             sb.write("\n")
-            sb.write("source ~/.bashrc\n")
             sb.write(
                 f"Rscript {Path.cwd()}/run_dada2.R "
                 f"{shlex.quote(biop)} {inputfile} {threads} {outdir}\n"
